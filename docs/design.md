@@ -970,6 +970,29 @@ $ subagent action=launch agent=scout
 
 复现脚本：`/tmp/herdr-sandbox/`（Dockerfile + verify.sh + final2.sh）。
 
+### F37 — 开发机的 `node_modules` 是手工 symlink，克隆后 typecheck 必崩
+
+我在开发机上把 peer 依赖做成了指向全局 pi 安装的 **symlink**（从未进 git）。
+于是 `npm run typecheck` 在开发机一直绿，但**全新 `git clone` 后必然失败**：
+
+```text
+index.ts(131,4): error TS7006: Parameter 'onUpdate' implicitly has an 'any' type.
+index.ts(132,4): error TS7006: Parameter 'signal' implicitly has an 'any' type.
+```
+
+根因有两层：
+
+1. `peerDependenciesMeta` 把**全部** peer 标成 `optional`，npm 因此不安装它们。
+2. 类型定义实际来自开发机的手工 symlink，而非任何可复现的安装步骤。
+
+**修法**：`peerDependencies` 保留（pi 官方要求用 `"*"` 声明并由 pi 提供），
+但把真正参与编译的包同时列为 **devDependencies**（`pi-agent-core`、
+`pi-coding-agent`、`typebox`），使 `npm install` 后即可 typecheck。
+
+**教训（与 F35 同源）**：**“在我机器上能跑”的等价物是“在我的 node_modules 上能编译”。**
+验证可交付性必须从一个干净克隆开始，而不是在开发工作区里跑测试。
+这条同样是“测试全绿但用户装不上”的类别。
+
 ---
 
 ## 附录：实验脚本
