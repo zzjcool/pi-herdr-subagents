@@ -1,0 +1,487 @@
+/**
+ * Session jsonl parsing + execution-outcome derivation.
+ *
+ * This is the ONLY trustworthy source for success/failure (findings F26-F31):
+ * herdr's `agent_status` reports "done" for success, LLM errors, AND kills alike.
+ *
+ * Authoritative stopReason enum (pi docs, session-format.md:88):
+ *   "stop" | "length" | "toolUse" | "error" | "aborted"
+ *
+ * Measured semantics:
+ *   F29 — `"aborted"` is never actually written. A graceful interrupt (esc) writes
+ *         `error` + an errorMessage containing "aborted". A hard kill writes NO
+ *         assistant message at all, so "missing reply" IS the abort signal.
+ *   F30 — tool errors are per-turn and do NOT make a turn fail.
+ *   F31 — only the LAST turn decides the outcome.
+ */
+
+import * as fs from "node:fs";
+import type {
+	Execution,
+	ParsedSession,
+	StopReason,
+	TurnRecord,
+	Usage,
+} from "./types.ts";
+
+const KNOWN_STOP_REASONS: ReadonlySet<string> = new Set([
+	"stop",
+	"length",
+	"toolUse",
+	"error",
+	"aborted",
+]);
+
+function emptyUsage(): Usage {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+}
+
+export function emptyParsedSession(): ParsedSession {
+	return {
+		output: "",
+		usage: emptyUsage(),
+		model: null,
+		stopReason: null,
+		turns: [],
+		toolErrors: 0,
+		lastTurnMissing: false,
+		tornLines: 0,
+	};
+}
+
+function asStopReason(value: unknown): StopReason | null {
+	return typeof value === "string" && KNOWN_STOP_REASONS.has(value)
+		? (value as StopReason)
+		: null;
+}
+
+function textOf(content: unknown): string | null {
+	if (!Array.isArray(content)) return null;
+	let last: string | null = null;
+	for (const part of content) {
+		if (
+			part &&
+			typeof part === "object" &&
+			(part as { type?: unknown }).type === "text"
+		) {
+			const t = (part as { text?: unknown }).text;
+			if (typeof t === "string" && t.trim()) last = t;
+		}
+	}
+	return last;
+}
+
+function toolsOf(content: unknown): string[] {
+	if (!Array.isArray(content)) return [];
+	const out: string[] = [];
+	for (const part of content) {
+		if (
+			part &&
+			typeof part === "object" &&
+			(part as { type?: unknown }).type === "toolCall"
+		) {
+			const n = (part as { name?: unknown }).name;
+			if (typeof n === "string") out.push(n);
+		}
+	}
+	return out;
+}
+
+function userTextOf(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	const parts: string[] = [];
+	for (const part of content) {
+		if (typeof part === "string") parts.push(part);
+		else if (
+			part &&
+			typeof part === "object" &&
+			typeof (part as { text?: unknown }).text === "string"
+		) {
+			parts.push((part as { text: string }).text);
+		}
+	}
+	return parts.join(" ");
+}
+
+/** Accumulate token usage from an assistant message into the running total. */
+function accumulateUsage(
+	target: Usage,
+	message: Record<string, unknown>,
+): void {
+	const usage = message.usage as Record<string, unknown> | undefined;
+	if (!usage || typeof usage !== "object") return;
+	const cost = usage.cost as Record<string, unknown> | undefined;
+	target.input += num(usage.input);
+	target.output += num(usage.output);
+	target.cacheRead += num(usage.cacheRead);
+	target.cacheWrite += num(usage.cacheWrite);
+	target.cost += num(cost?.total);
+}
+
+/** Find (or create) the turn an assistant/toolResult message belongs to. */
+function currentTurn(parsed: ParsedSession): TurnRecord {
+	const existing = parsed.turns.at(-1);
+	if (existing) return existing;
+	const created: TurnRecord = {
+		userText: "",
+		assistants: [],
+		toolResults: 0,
+		toolErrors: 0,
+	};
+	parsed.turns.push(created);
+	return created;
+}
+
+function applyAssistant(
+	parsed: ParsedSession,
+	message: Record<string, unknown>,
+): void {
+	const turn = currentTurn(parsed);
+	const stopReason = asStopReason(message.stopReason);
+	const text = textOf(message.content);
+
+	turn.assistants.push({
+		stopReason,
+		...(typeof message.stopReason === "string"
+			? { rawStopReason: message.stopReason }
+			: {}),
+		errorMessage:
+			typeof message.errorMessage === "string" ? message.errorMessage : null,
+		text,
+		tools: toolsOf(message.content),
+	});
+
+	accumulateUsage(parsed.usage, message);
+	if (typeof message.model === "string") parsed.model = message.model;
+	if (stopReason) parsed.stopReason = stopReason;
+	if (text) parsed.output = text;
+}
+
+function applyToolResult(
+	parsed: ParsedSession,
+	message: Record<string, unknown>,
+): void {
+	const turn = parsed.turns.at(-1);
+	if (!turn) return;
+	turn.toolResults += 1;
+	if (message.isError === true) {
+		turn.toolErrors += 1;
+		parsed.toolErrors += 1;
+	}
+}
+
+/**
+ * Parse session JSONL text into a structured view.
+ * Tolerates torn/partial lines (F12: a mid-turn kill leaves no corruption,
+ * but a crash could still truncate the final write).
+ */
+export function parseSessionText(text: string): ParsedSession {
+	const parsed = emptyParsedSession();
+	if (!text) return parsed;
+
+	for (const raw of text.split("\n")) {
+		const line = raw.trim();
+		if (!line) continue;
+
+		let event: Record<string, unknown>;
+		try {
+			event = JSON.parse(line) as Record<string, unknown>;
+		} catch {
+			parsed.tornLines += 1;
+			continue;
+		}
+
+		if (event.type !== "message") continue;
+		const message = event.message as Record<string, unknown> | undefined;
+		if (!message || typeof message !== "object") continue;
+
+		switch (message.role) {
+			case "user":
+				parsed.turns.push({
+					userText: userTextOf(message.content),
+					assistants: [],
+					toolResults: 0,
+					toolErrors: 0,
+				});
+				break;
+			case "assistant":
+				applyAssistant(parsed, message);
+				break;
+			case "toolResult":
+			case "tool":
+				applyToolResult(parsed, message);
+				break;
+			default:
+				break;
+		}
+	}
+
+	const last = parsed.turns.at(-1);
+	parsed.lastTurnMissing = Boolean(last && last.assistants.length === 0);
+	return parsed;
+}
+
+function num(v: unknown): number {
+	return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/** Parse a session file. A missing file yields an empty (not throwing) result. */
+export function parseSessionFile(path: string): ParsedSession {
+	try {
+		return parseSessionText(fs.readFileSync(path, "utf-8"));
+	} catch {
+		return emptyParsedSession();
+	}
+}
+
+/**
+ * Derive the execution outcome from a parsed session.
+ *
+ * Order matters: "no reply to the last prompt" is checked BEFORE stopReason,
+ * because a hard kill leaves the last assistant message as a stale `toolUse`.
+ */
+export function deriveOutcome(parsed: ParsedSession): Execution {
+	const turns = parsed.turns;
+
+	if (turns.length === 0) {
+		return {
+			status: "unknown",
+			reason: "no messages in session",
+			turns: 0,
+			toolErrors: parsed.toolErrors,
+		};
+	}
+
+	const last = turns.at(-1);
+	if (!last) {
+		return {
+			status: "unknown",
+			reason: "no messages in session",
+			turns: 0,
+			toolErrors: parsed.toolErrors,
+		};
+	}
+
+	// F29: hard kill / interrupt before any reply was persisted.
+	if (last.assistants.length === 0) {
+		return {
+			status: "aborted",
+			reason: "no assistant message for the last prompt",
+			turns: turns.length,
+			toolErrors: parsed.toolErrors,
+			lastTurn: { stopReason: null, toolErrors: last.toolErrors },
+			model: parsed.model,
+			usage: parsed.usage,
+		};
+	}
+
+	const final = last.assistants.at(-1);
+	if (!final) {
+		return {
+			status: "aborted",
+			reason: "no assistant message for the last prompt",
+			turns: turns.length,
+			toolErrors: parsed.toolErrors,
+		};
+	}
+
+	const base = {
+		turns: turns.length,
+		toolErrors: parsed.toolErrors,
+		lastTurn: { stopReason: final.stopReason, toolErrors: last.toolErrors },
+		model: parsed.model,
+		usage: parsed.usage,
+	};
+
+	return outcomeFromFinalMessage(final, base);
+}
+
+/** Map the final assistant message's stop reason onto an execution status. */
+function outcomeFromFinalMessage(
+	final: {
+		stopReason: StopReason | null;
+		rawStopReason?: string;
+		errorMessage: string | null;
+	},
+	base: Omit<Execution, "status" | "reason">,
+): Execution {
+	switch (final.stopReason) {
+		case "stop":
+			return { status: "success", stopReason: "stop", ...base };
+
+		case "length":
+			return { status: "truncated", stopReason: "length", ...base };
+
+		case "error": {
+			// F29: a graceful interrupt surfaces as `error` with an abort-ish message.
+			const msg = final.errorMessage ?? "";
+			if (/abort/i.test(msg)) {
+				return {
+					status: "aborted",
+					stopReason: "error",
+					errorMessage: msg,
+					reason: msg,
+					...base,
+				};
+			}
+			return {
+				status: "failed",
+				stopReason: "error",
+				errorMessage: msg,
+				reason: msg,
+				...base,
+			};
+		}
+
+		case "toolUse":
+			// Terminated while a tool call was outstanding.
+			return {
+				status: "aborted",
+				stopReason: "toolUse",
+				reason: "terminated during tool call",
+				...base,
+			};
+
+		case "aborted":
+			// F29 measured that pi does not currently write this value, but the type
+			// allows it, so it must map to `aborted` rather than falling through to
+			// the `failed` catch-all.
+			return {
+				status: "aborted",
+				stopReason: "aborted",
+				reason: "agent aborted the turn",
+				...base,
+			};
+
+		case null:
+			// Distinguish "the field was absent" (a truncated stream — treat like an
+			// abort) from "the field held a value we do not recognize" (report it as
+			// a failure so the unexpected value is visible rather than hidden).
+			if (final.rawStopReason === undefined) {
+				return {
+					status: "aborted",
+					stopReason: null,
+					reason: "assistant message has no stopReason",
+					...base,
+				};
+			}
+			return {
+				status: "failed",
+				stopReason: null,
+				errorMessage: final.errorMessage,
+				reason: `unknown stopReason: ${final.rawStopReason}`,
+				...base,
+			};
+
+		default:
+			return {
+				status: "failed",
+				stopReason: final.stopReason,
+				errorMessage: final.errorMessage,
+				reason: `unknown stopReason: ${String(final.stopReason)}`,
+				...base,
+			};
+	}
+}
+
+/**
+ * Extract a machine-readable self-reported verdict from agent output (F33).
+ *
+ * Two conventions are recognized, in order:
+ *   1. A JSON object with a boolean `ok` (bare, fenced, or embedded in prose).
+ *   2. A textual report whose FIRST non-empty line starts with `FAILED:` —
+ *      the convention the design's F32 example uses. This is deliberately
+ *      strict (first line only) to avoid flagging a report that merely
+ *      mentions failure somewhere in its body.
+ */
+export function extractVerdict(
+	text: string,
+): { ok: boolean; reason?: string } | null {
+	if (!text) return null;
+
+	const jsonVerdict = extractJsonVerdict(text);
+	if (jsonVerdict) return jsonVerdict;
+
+	return extractTextualFailure(text);
+}
+
+function extractJsonVerdict(
+	text: string,
+): { ok: boolean; reason?: string } | null {
+	const candidates: string[] = [];
+	const fenced = text.match(/```(?:json)?\s*\n([\s\S]*?)```/g);
+	if (fenced) {
+		for (const block of fenced) {
+			const inner = block
+				.replace(/```(?:json)?\s*\n?/, "")
+				.replace(/```$/, "")
+				.trim();
+			if (inner) candidates.push(inner);
+		}
+	}
+	candidates.push(text.trim());
+
+	// Also try the last balanced {...} span, so prose around the JSON still works.
+	const first = text.indexOf("{");
+	const last = text.lastIndexOf("}");
+	if (first !== -1 && last > first)
+		candidates.push(text.slice(first, last + 1));
+
+	for (const candidate of candidates) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(candidate);
+		} catch {
+			continue;
+		}
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+			continue;
+		const obj = parsed as Record<string, unknown>;
+		if (typeof obj.ok !== "boolean") continue;
+		const out: { ok: boolean; reason?: string } = { ok: obj.ok };
+		if (typeof obj.reason === "string") out.reason = obj.reason;
+		return out;
+	}
+	return null;
+}
+
+/** `FAILED: ...` on the first non-empty line means the agent gave up. */
+const TEXTUAL_FAILURE = /^[*_`\s]*FAILED\s*:\s*(.*)$/i;
+
+function extractTextualFailure(
+	text: string,
+): { ok: boolean; reason?: string } | null {
+	const firstLine = text
+		.split("\n")
+		.map((line) => line.trim())
+		.find((line) => line.length > 0);
+	if (!firstLine) return null;
+
+	const match = firstLine.match(TEXTUAL_FAILURE);
+	if (!match) return null;
+
+	const reason = (match[1] ?? "").trim();
+	return reason ? { ok: false, reason } : { ok: false };
+}
+
+/**
+ * Whether the last turn already has a terminal assistant reply.
+ *
+ * Used by `collect()` to avoid waiting when the turn has already settled —
+ * without this, a collect issued after completion would block for the full
+ * timeout because no NEW message ever appears.
+ */
+export function isLastTurnComplete(parsed: ParsedSession): boolean {
+	const last = parsed.turns.at(-1);
+	if (!last || last.assistants.length === 0) return false;
+	// A trailing `toolUse` means the agent is still mid-tool, not settled.
+	return last.assistants.at(-1)?.stopReason !== "toolUse";
+}
+
+/** Count assistant messages — used to detect turn progress while polling. */
+export function countAssistantMessages(parsed: ParsedSession): number {
+	return parsed.turns.reduce((n, t) => n + t.assistants.length, 0);
+}
+
+export type { TurnRecord };

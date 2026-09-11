@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+
+# npm pack output
+*.tgz
+
+# run artifacts produced by the plugin itself
+.pi-subagents/
+
+# local scratch
+*.log
+.DS_Store
+
+# transient agent handoff notes (not part of the package)
+STATE.md

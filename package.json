@@ -1,0 +1,62 @@
+{
+  "name": "@zzjcool/pi-herdr-subagents",
+  "version": "0.1.0",
+  "description": "Herdr-backed subagents for Pi: visible, steerable, resumable child agents in Herdr panes",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zzjcool/pi-herdr-subagents.git"
+  },
+  "homepage": "https://github.com/zzjcool/pi-herdr-subagents#readme",
+  "bugs": {
+    "url": "https://github.com/zzjcool/pi-herdr-subagents/issues"
+  },
+  "keywords": ["pi-package", "pi", "herdr", "subagents", "agents"],
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": "./index.ts",
+    "./api": "./src/api.ts"
+  },
+  "pi": {
+    "extensions": ["./index.ts"],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"]
+  },
+  "files": [
+    "index.ts",
+    "src/**/*.ts",
+    "agents/**/*.md",
+    "skills/**/*",
+    "prompts/**/*.md",
+    "docs/**/*.md",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/unit/*.test.ts",
+    "test:integration": "node --experimental-strip-types --test test/integration/*.test.ts",
+    "test:live": "node --experimental-strip-types --test test/live/*.test.ts",
+    "test:all": "npm run typecheck && npm run test && npm run test:integration"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-agent-core": { "optional": true },
+    "@earendil-works/pi-ai": { "optional": true },
+    "@earendil-works/pi-coding-agent": { "optional": true },
+    "@earendil-works/pi-tui": { "optional": true },
+    "typebox": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

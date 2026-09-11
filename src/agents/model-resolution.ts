@@ -1,0 +1,130 @@
+/**
+ * Model resolution (design §6.2).
+ *
+ * Precedence, strongest first:
+ *   1. per-run override
+ *   2. agentOverridesByProvider.<parentProvider>.<name>.model
+ *   3. agentOverrides.<name>.model
+ *   4. agent frontmatter `model`
+ *   5. subagents.defaultModel
+ *   6. the dispatching (parent) session model
+ *
+ * `model: "inherit"` at any of levels 1-4 explicitly selects the parent model.
+ */
+
+import type {
+	AgentConfig,
+	ModelSourceInfo,
+	SubagentsSettings,
+} from "../shared/types.ts";
+import { splitThinkingSuffix } from "./model-scope.ts";
+
+export interface ResolveModelInput {
+	agent: AgentConfig;
+	/** Per-run override (highest priority). */
+	override?: string;
+	/** The parent session's model as `provider/id`. */
+	dispatchModel?: string;
+	/** `subagents.defaultModel`. */
+	defaultModel?: string;
+	settings?: SubagentsSettings;
+	/** The parent session's provider, used to select provider-scoped overrides. */
+	parentProvider?: string;
+}
+
+export interface ResolvedModel {
+	model?: string;
+	source?: ModelSourceInfo;
+}
+
+/** Read a model string from a provider-scoped override map. */
+function providerScopedModel(
+	settings: SubagentsSettings | undefined,
+	provider: string | undefined,
+	agentName: string,
+): string | undefined {
+	if (!settings || !provider) return undefined;
+	const map = (settings as Record<string, unknown>).agentOverridesByProvider;
+	if (!map || typeof map !== "object") return undefined;
+	const forProvider = (map as Record<string, unknown>)[provider];
+	if (!forProvider || typeof forProvider !== "object") return undefined;
+	const entry = (forProvider as Record<string, unknown>)[agentName];
+	if (!entry || typeof entry !== "object") return undefined;
+	const model = (entry as Record<string, unknown>).model;
+	return typeof model === "string" && model.trim() ? model.trim() : undefined;
+}
+
+function overrideModel(
+	settings: SubagentsSettings | undefined,
+	agentName: string,
+): string | undefined {
+	const entry = settings?.agentOverrides?.[agentName];
+	const model = entry?.model;
+	return typeof model === "string" && model.trim() ? model.trim() : undefined;
+}
+
+/**
+ * Resolve the effective model for a child agent.
+ *
+ * Note: `thinking` is appended as a `:level` suffix by the caller (buildPiArgs),
+ * so this function returns a clean model id plus provenance.
+ */
+export function resolveModel(input: ResolveModelInput): ResolvedModel {
+	const name = input.agent.name;
+	const candidates: Array<{
+		value: string | undefined;
+		source: ModelSourceInfo["type"];
+		scope?: "user" | "project";
+	}> = [
+		{ value: input.override, source: "dispatch" },
+		{
+			value: providerScopedModel(input.settings, input.parentProvider, name),
+			source: "agentOverrides",
+		},
+		{ value: overrideModel(input.settings, name), source: "agentOverrides" },
+		{ value: input.agent.model, source: "frontmatter" },
+		{ value: input.defaultModel, source: "subagents.defaultModel" },
+	];
+
+	for (const candidate of candidates) {
+		const raw = candidate.value?.trim();
+		if (!raw) continue;
+
+		// Explicit inheritance request.
+		if (raw === "inherit") {
+			if (!input.dispatchModel) {
+				return { source: { type: "inherit", model: "inherit" } };
+			}
+			return {
+				model: input.dispatchModel,
+				source: { type: "inherit", model: input.dispatchModel },
+			};
+		}
+
+		return {
+			model: raw,
+			source: {
+				type: candidate.source,
+				model: raw,
+				...(candidate.scope ? { scope: candidate.scope } : {}),
+			},
+		};
+	}
+
+	// Fall through to the dispatching session's model.
+	if (input.dispatchModel) {
+		return {
+			model: input.dispatchModel,
+			source: { type: "dispatch", model: input.dispatchModel },
+		};
+	}
+	return {};
+}
+
+/** The provider half of a `provider/id` model string. */
+export function providerOf(model: string | undefined): string | undefined {
+	if (!model) return undefined;
+	const base = splitThinkingSuffix(model).baseModel;
+	const slash = base.indexOf("/");
+	return slash === -1 ? undefined : base.slice(0, slash);
+}
