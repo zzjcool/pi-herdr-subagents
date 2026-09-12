@@ -22,7 +22,11 @@ export function isValidAgentName(name: string): boolean {
  *  - truncates to 32 chars, leaving room for the `-<index>` suffix
  */
 export function makeName(agent: string, index: number): string {
-	const suffix = `-${Math.max(0, Math.trunc(index))}`;
+	// `Math.trunc(NaN)` is NaN and `Math.max(0, NaN)` is NaN, so a non-finite
+	// index used to produce `agent-NaN` — which is not a valid herdr name
+	// (uppercase, and not matching the pattern). Coerce to a usable integer.
+	const safeIndex = Number.isFinite(index) ? Math.max(0, Math.trunc(index)) : 0;
+	const suffix = `-${safeIndex}`;
 	const normalized = agent
 		.toLowerCase()
 		.replace(/[^a-z0-9_-]+/g, "-")

@@ -96,6 +96,62 @@ test("names", () => {
 	assert.ok(makeName("x".repeat(50), 3).length <= 32);
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BUG 21: `Math.trunc(NaN)` is NaN and `Math.max(0, NaN)` is NaN, so a
+// non-finite index produced `agent-NaN` — uppercase, and not a valid herdr name.
+// `allocateName` only ever passes 0..999, so this was unreachable in practice,
+// but `makeName` is exported and must never emit an invalid name.
+// ─────────────────────────────────────────────────────────────────────────────
+test("names: a non-finite index still yields a valid name", () => {
+	for (const index of [NaN, Infinity, -Infinity]) {
+		for (const agent of ["worker", "", "!!!", "9", "Review Agent"]) {
+			const name = makeName(agent, index);
+			assert.ok(
+				isValidAgentName(name),
+				`makeName(${JSON.stringify(agent)}, ${index}) produced invalid ${JSON.stringify(name)}`,
+			);
+		}
+	}
+});
+
+test("names: every generated name is valid, across hostile inputs", () => {
+	const agents = [
+		"",
+		"   ",
+		"!!!",
+		"9",
+		"-",
+		"_",
+		"a".repeat(200),
+		"Review Agent",
+		"Ünïcödé",
+		"a/b",
+		"a\\b",
+		"\u0000",
+		"..",
+		"CON",
+		"🎉",
+	];
+	const indexes = [0, 1, 999, -1, 1e9, NaN, Infinity, -Infinity, 1.5, -0.5];
+	for (const agent of agents) {
+		for (const index of indexes) {
+			const name = makeName(agent, index);
+			assert.ok(
+				isValidAgentName(name),
+				`invalid name ${JSON.stringify(name)} from agent=${JSON.stringify(agent)} index=${index}`,
+			);
+			assert.ok(name.length <= 32, `name too long: ${name}`);
+		}
+	}
+});
+
+test("names: distinct indexes yield distinct names", () => {
+	const names = new Set(
+		Array.from({ length: 50 }, (_, i) => makeName("worker", i)),
+	);
+	assert.equal(names.size, 50, "indexes must not collide");
+});
+
 test("nested path safety", () => {
 	assert.equal(isSafeNestedPathId("../../etc"), false);
 	assert.equal(isSafeNestedPathId("/abs"), false);
