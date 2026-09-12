@@ -391,3 +391,42 @@ test("glob semantics: full match, case-insensitive, star spans slashes", () => {
 	assert.equal(matchesScopePattern("cb/a+b", "cb/a+b"), true);
 	assert.equal(matchesScopePattern("cb/aab", "cb/a+b"), false, "'+' must be literal");
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUG 22: `agentOverrides` values were accepted as anything. A scalar passed
+// validation and was then ignored by the field-by-field merge, so the override
+// looked configured while doing nothing — the same "accepted but inert" trap
+// as F45, except here the user wrote the setting themselves.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("agentOverrides: a non-object value is rejected, not silently ignored", () => {
+	for (const value of ["x", 42, true, [], null]) {
+		assert.throws(
+			() =>
+				parseSubagentSettings(
+					{ subagents: { agentOverrides: { worker: value } } },
+					"/s.json",
+				),
+			/agentOverrides\.worker/,
+			`agentOverrides.worker = ${JSON.stringify(value)} must be rejected`,
+		);
+	}
+});
+
+test("agentOverrides: valid object values are accepted", () => {
+	const parsed = parseSubagentSettings(
+		{
+			subagents: {
+				agentOverrides: {
+					worker: { model: "cb/glm-5.3" },
+					reviewer: { disabled: true },
+				},
+			},
+		},
+		"/s.json",
+	);
+	assert.deepEqual(parsed.agentOverrides, {
+		worker: { model: "cb/glm-5.3" },
+		reviewer: { disabled: true },
+	});
+});

@@ -182,6 +182,18 @@ export function parseSubagentSettings(
 				`Subagent settings in '${filePath}' have invalid 'agentOverrides'; expected an object.`,
 			);
 		}
+		// Each value must itself be an object. A scalar was silently accepted and
+		// then ignored by the field-by-field merge, so the override looked
+		// configured while doing nothing (the F45 failure mode).
+		for (const [name, value] of Object.entries(
+			input.agentOverrides as Record<string, unknown>,
+		)) {
+			if (!value || typeof value !== "object" || Array.isArray(value)) {
+				throw new Error(
+					`Subagent settings in '${filePath}' have invalid 'agentOverrides.${name}'; expected an object of agent fields.`,
+				);
+			}
+		}
 		out.agentOverrides =
 			input.agentOverrides as SubagentsSettings["agentOverrides"];
 	}
