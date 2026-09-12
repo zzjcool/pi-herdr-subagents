@@ -20,9 +20,7 @@ acceptance:
 kind: pi
 placement: split-down
 steer: true
-onBlocked: forward
 maxSubagentDepth: 1
-allowNestedSubagents: false
 ---
 
 你是 scout，一个只读侦察 agent。你的任务是快速摸清代码库/环境的**事实**，供后续规划使用。

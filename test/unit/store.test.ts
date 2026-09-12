@@ -514,3 +514,65 @@ test("store works without a runs dir present", () => {
 test("RunStore requires rootDir", () => {
 	assert.throws(() => new RunStore({ rootDir: "" }), SubagentError);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUG 16: session pre-creation used a manual open/close with no guard. When
+// `closeSync` throws (EIO/ENOSPC on flush) the descriptor leaked, and the
+// launcher creates one session file per child — so a leak compounds across a
+// fan-out. `fs.writeFileSync(..., { flag: "wx" })` manages the fd internally and
+// also removes the TOCTOU window an `existsSync` check leaves open.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("sessionFileFor does not leak file descriptors across repeated calls", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "store-fd-"));
+	try {
+		const store = new RunStore({ rootDir: dir });
+		const run = store.createRun({ task: "t", cwd: "/tmp" });
+		const fdDir = "/proc/self/fd";
+		const canCount = fs.existsSync(fdDir);
+		const before = canCount ? fs.readdirSync(fdDir).length : 0;
+
+		// Repeat names exercise the EEXIST path; distinct names exercise creation.
+		for (let i = 0; i < 300; i += 1) {
+			store.sessionFileFor(run.runId, `worker-${i % 25}`);
+		}
+
+		if (canCount) {
+			const after = fs.readdirSync(fdDir).length;
+			assert.ok(
+				after - before <= 2,
+				`descriptors must not accumulate (before=${before} after=${after})`,
+			);
+		}
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("sessionFileFor keeps the pre-creation contract", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "store-precreate-"));
+	try {
+		const store = new RunStore({ rootDir: dir });
+		const run = store.createRun({ task: "t", cwd: "/tmp" });
+		const file = store.sessionFileFor(run.runId, "probe");
+
+		assert.equal(fs.existsSync(file), true, "the file must exist before the child starts (F4)");
+		assert.equal(fs.statSync(file).size, 0, "it must be empty");
+		assert.equal(
+			fs.statSync(file).mode & 0o777,
+			0o600,
+			"it must be owner-only",
+		);
+
+		// Calling again must be idempotent and must NOT truncate existing data.
+		fs.writeFileSync(file, "existing session data");
+		store.sessionFileFor(run.runId, "probe");
+		assert.equal(
+			fs.readFileSync(file, "utf-8"),
+			"existing session data",
+			"a repeat call must never clobber a session in progress",
+		);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});

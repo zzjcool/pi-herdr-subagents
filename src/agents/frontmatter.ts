@@ -79,10 +79,10 @@ export function parseFrontmatterList(
 	return items.length > 0 ? items : undefined;
 }
 
-function stripQuotes(raw: string): string {
+export function stripQuotes(raw: string): string {
 	if (raw.length >= 2) {
 		const first = raw[0];
-		const last = raw[raw.length - 1];
+		const last = raw.at(-1);
 		if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
 			return raw.slice(1, -1);
 		}

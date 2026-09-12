@@ -34,12 +34,51 @@ export function stripThinkingSuffix(model: string): string {
 	return splitThinkingSuffix(model).baseModel;
 }
 
-/** Escape RegExp specials except `*`, then translate `*` into `.*`. */
-function globToRegExp(pattern: string): RegExp {
-	const escaped = pattern
-		.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-		.replace(/\*/g, ".*");
-	return new RegExp(`^${escaped}$`, "i");
+/**
+ * Match a `*`-glob against `text`, case-insensitively, as a FULL match.
+ *
+ * Deliberately NOT a RegExp. Translating a glob into `.*` produces nested
+ * quantifiers (`*a*a*a…b` becomes `.*a.*a.*a…b`), which backtracks
+ * exponentially on a non-matching input. Since the patterns come from
+ * `.pi/settings.json` — a file that travels with a cloned repository — a
+ * hostile pattern would otherwise hang the host process (measured: a 100-star
+ * pattern took 14.5s, doubling per added star).
+ *
+ * This greedy two-pointer scan never revisits a position more than once per
+ * pattern literal, so it is bounded by O(text × pattern) with no exponential
+ * blow-up. `*` is the only metacharacter: no `?`, no character classes.
+ */
+export function globMatches(text: string, pattern: string): boolean {
+	let t = 0;
+	let p = 0;
+	// Position of the most recent `*`, and the text index it was matched at.
+	let starP = -1;
+	let starT = 0;
+
+	while (t < text.length) {
+		const pc = p < pattern.length ? pattern[p] : undefined;
+		if (pc === "*") {
+			starP = p;
+			starT = t;
+			p += 1;
+		} else if (pc !== undefined && pc.toLowerCase() === text[t]?.toLowerCase()) {
+			p += 1;
+			t += 1;
+		} else if (starP !== -1) {
+			// Backtrack to just after the last `*` and let it absorb one more
+			// character. Only the most recent star is retried, so this cannot
+			// compound into exponential work.
+			starT += 1;
+			t = starT;
+			p = starP + 1;
+		} else {
+			return false;
+		}
+	}
+
+	// Any trailing `*`s may match the empty remainder.
+	while (p < pattern.length && pattern[p] === "*") p += 1;
+	return p === pattern.length;
 }
 
 /**
@@ -47,7 +86,7 @@ function globToRegExp(pattern: string): RegExp {
  * Both sides compare case-insensitively on the full `provider/id`.
  */
 export function matchesScopePattern(model: string, pattern: string): boolean {
-	return globToRegExp(pattern).test(stripThinkingSuffix(model));
+	return globMatches(stripThinkingSuffix(model), pattern);
 }
 
 /**

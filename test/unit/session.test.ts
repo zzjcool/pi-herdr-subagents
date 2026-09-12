@@ -222,3 +222,67 @@ test("toolResult before any user message does not crash", () => {
 	assert.equal(parsed.toolErrors, 0); // dropped (no turn to attach to)
 	assert.doesNotThrow(() => deriveOutcome(parsed));
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUG 18: `JSON.parse` succeeds on bare scalars, so a session line of `null`
+// produced `null`, and reading `null.type` threw — taking down the entire parse
+// (and therefore `collect`). The session file is external input: a pane can be
+// closed mid-write, and a file can be truncated or hand-edited.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("scalar JSON lines are treated as damaged, never crash the parse", () => {
+	const scalars = ["null", "42", "true", "false", '"a string"', "[]", "[1,2]"];
+	for (const scalar of scalars) {
+		// Each scalar is counted as a torn line; the parse must not throw.
+		const parsed = parseSessionText(`${scalar}\n`);
+		assert.equal(
+			parsed.turns.length,
+			0,
+			`${scalar} must not produce a turn`,
+		);
+		assert.equal(
+			parsed.tornLines,
+			1,
+			`${scalar} must be counted as a damaged line`,
+		);
+	}
+});
+
+test("a null line does not prevent the valid lines around it from parsing", () => {
+	const text = [
+		sessionHeader(),
+		userMsg("go"),
+		"null",
+		assistantMsg({ stopReason: "stop", text: "done" }),
+	].join("\n");
+	const parsed = parseSessionText(text);
+	assert.equal(parsed.tornLines, 1, "the null line is counted as damaged");
+	assert.equal(parsed.turns.length, 1, "the surrounding turn still parses");
+	assert.equal(deriveOutcome(parsed).status, "success");
+});
+
+test("parseSessionText never throws on hostile input", () => {
+	const cases = [
+		"",
+		"\n\n\n",
+		"not json at all",
+		'{"type":"message","mess',
+		"null",
+		"[1,2,3]",
+		'"x"',
+		"42",
+		'{"type":"message","message":null}',
+		'{"type":"message","message":{"role":"assistant","content":null}}',
+		'{"type":"message","message":{"role":"assistant","content":[null]}}',
+		'{"type":"message","message":{"role":"user","content":[{"type":"text"}]}}',
+		'{"type":"message","message":{"role":"assistant","usage":{"cost":null}}}',
+		'{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"🎉"}]}}',
+		`{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"${"x".repeat(100_000)}"}]}}`,
+	];
+	for (const input of cases) {
+		assert.doesNotThrow(
+			() => deriveOutcome(parseSessionText(input)),
+			`must not throw on: ${input.slice(0, 60)}`,
+		);
+	}
+});

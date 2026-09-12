@@ -443,3 +443,300 @@ test("discovery: extra agent dirs load below the user dir in precedence", () => 
 		);
 	});
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A frontmatter key that is accepted but does nothing is worse than an unknown
+// one: the user believes it is in effect. Fields the runtime does not yet act
+// on are recorded on the agent so tool output can warn about them.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("unenforced fields are reported, not silently dropped", () => {
+	const doc = [
+		"---",
+		"name: probe",
+		"description: d",
+		"worktree: true",
+		"fallbackModels: [a/b, c/d]",
+		"toolBudget: '{\"maxToolCalls\": 5}'",
+		"---",
+		"body",
+	].join("\n");
+	const agent = parseAgentDocument(doc, "/x/probe.md", "user");
+	assert.ok(agent);
+	assert.deepEqual(
+		(agent.unenforcedFields ?? []).sort(),
+		["fallbackModels", "toolBudget", "worktree"],
+		"every inert field the agent sets must be reported",
+	);
+	// The values are still parsed and kept — they are not discarded.
+	assert.equal(agent.worktree, true);
+	assert.deepEqual(agent.fallbackModels, ["a/b", "c/d"]);
+});
+
+test("enforced fields are NOT reported as unenforced", () => {
+	const doc = [
+		"---",
+		"name: probe",
+		"description: d",
+		"kind: pi",
+		"placement: new-tab",
+		"tools: [read]",
+		"steer: true",
+		"---",
+		"body",
+	].join("\n");
+	const agent = parseAgentDocument(doc, "/x/probe.md", "user");
+	assert.ok(agent);
+	assert.deepEqual(
+		agent.unenforcedFields ?? [],
+		[],
+		"fields the runtime honours must not be listed",
+	);
+});
+
+test("acceptance.criteria is no longer reported unenforced (it is surfaced instead)", () => {
+	const withCriteria = parseAgentDocument(
+		[
+			"---",
+			"name: probe",
+			"description: d",
+			"acceptance: '{\"level\": \"attested\", \"criteria\": [{\"id\": \"c1\", \"must\": \"tests pass\"}]}'",
+			"---",
+			"body",
+		].join("\n"),
+		"/x/probe.md",
+		"user",
+	);
+	assert.ok(withCriteria);
+	assert.deepEqual(
+		withCriteria.unenforcedFields ?? [],
+		[],
+		"criteria are surfaced to the caller as a pending checklist, so they are not inert",
+	);
+	assert.equal(
+		withCriteria.acceptance?.criteria?.length,
+		1,
+		"the criteria themselves must still be parsed and kept",
+	);
+
+	const levelOnly = parseAgentDocument(
+		[
+			"---",
+			"name: probe",
+			"description: d",
+			"acceptance: '{\"level\": \"attested\"}'",
+			"---",
+			"body",
+		].join("\n"),
+		"/x/probe.md",
+		"user",
+	);
+	assert.ok(levelOnly);
+	assert.deepEqual(
+		levelOnly.unenforcedFields ?? [],
+		[],
+		"a plain acceptance.level IS honoured via verdict extraction",
+	);
+});
+
+test("a bundled role reports no unenforced fields", () => {
+	// The shipped roles must not carry inert configuration.
+	for (const name of BUILTIN_AGENT_NAMES) {
+		const agents = loadAgentsFromDir(
+			path.resolve(
+				path.dirname(new URL(import.meta.url).pathname),
+				"..",
+				"..",
+				"agents",
+			),
+			"builtin",
+		);
+		const found = agents.find((a) => a.name === name);
+		assert.ok(found, `${name} must load`);
+		assert.deepEqual(
+			found.unenforcedFields ?? [],
+			[],
+			`bundled role ${name} must not rely on unenforced fields`,
+		);
+	}
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUG 17: `timeoutMs` was parsed from frontmatter and then ignored — every
+// bundled role declares a budget (worker 30min, oracle 20min) but `collect`
+// always used the global 15min default. A role silently losing its configured
+// budget is worse than not offering the field at all.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("timeoutMs is parsed and is NOT reported as unenforced", () => {
+	const agent = parseAgentDocument(
+		["---", "name: probe", "description: d", "timeoutMs: 1800000", "---", "b"].join(
+			"\n",
+		),
+		"/x/probe.md",
+		"user",
+	);
+	assert.ok(agent);
+	assert.equal(agent.timeoutMs, 1_800_000);
+	assert.ok(
+		!(agent.unenforcedFields ?? []).includes("timeoutMs"),
+		"timeoutMs is honoured by collect(), so it must not be listed as inert",
+	);
+});
+
+test("toolTimeoutMs is still reported as unenforced", () => {
+	const agent = parseAgentDocument(
+		["---", "name: probe", "description: d", "toolTimeoutMs: 60000", "---", "b"].join(
+			"\n",
+		),
+		"/x/probe.md",
+		"user",
+	);
+	assert.ok(agent);
+	assert.ok(
+		(agent.unenforcedFields ?? []).includes("toolTimeoutMs"),
+		"a per-tool timeout is not applied by the runtime yet",
+	);
+});
+
+test("every bundled role declares a timeout budget the runtime honours", () => {
+	const agents = loadAgentsFromDir(
+		path.resolve(
+			path.dirname(new URL(import.meta.url).pathname),
+			"..",
+			"..",
+			"agents",
+		),
+		"builtin",
+	);
+	for (const name of BUILTIN_AGENT_NAMES) {
+		const found = agents.find((a) => a.name === name);
+		assert.ok(found, `${name} must load`);
+		assert.equal(
+			typeof found.timeoutMs,
+			"number",
+			`bundled role ${name} must declare timeoutMs`,
+		);
+		assert.ok(
+			(found.timeoutMs ?? 0) > 0,
+			`bundled role ${name} must declare a positive budget`,
+		);
+	}
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUG 20: the frontmatter parser is FLAT — a nested block like `acceptance:`
+// arrives as raw indented text, not an object. `parseAcceptance` only tried
+// `JSON.parse`, which always failed, so every bundled role's acceptance config
+// (level, role, criteria) was silently dropped. The YAML spelling is the one
+// the shipped roles actually use.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("acceptance: a nested YAML block is parsed, not just a JSON string", () => {
+	const doc = [
+		"---",
+		"name: probe",
+		"description: d",
+		"acceptance:",
+		"  level: attested",
+		"  role: read-only",
+		"  criteria:",
+		"    - id: c1",
+		"      must: tests pass",
+		"      evidence: [a, b]",
+		"      severity: required",
+		"---",
+		"body",
+	].join("\n");
+
+	const agent = parseAgentDocument(doc, "/x/probe.md", "user");
+	assert.ok(agent);
+	assert.equal(agent.acceptance?.level, "attested");
+	assert.equal(agent.acceptance?.role, "read-only");
+	assert.equal(agent.acceptance?.criteria?.length, 1);
+	assert.deepEqual(agent.acceptance?.criteria?.[0], {
+		id: "c1",
+		must: "tests pass",
+		evidence: ["a", "b"],
+		severity: "required",
+	});
+});
+
+test("acceptance: the JSON-string spelling still works", () => {
+	const doc = [
+		"---",
+		"name: probe",
+		"description: d",
+		"acceptance: '{\"level\": \"verified\", \"role\": \"writer\", \"criteria\": [{\"id\": \"j1\", \"must\": \"no secrets\"}]}'",
+		"---",
+		"body",
+	].join("\n");
+	const agent = parseAgentDocument(doc, "/x/probe.md", "user");
+	assert.ok(agent);
+	assert.equal(agent.acceptance?.level, "verified");
+	assert.equal(agent.acceptance?.role, "writer");
+	assert.equal(agent.acceptance?.criteria?.[0]?.id, "j1");
+});
+
+test("acceptance: an invalid level is rejected rather than guessed", () => {
+	const doc = [
+		"---",
+		"name: probe",
+		"description: d",
+		"acceptance:",
+		"  level: nonsense",
+		"---",
+		"body",
+	].join("\n");
+	const agent = parseAgentDocument(doc, "/x/probe.md", "user");
+	assert.ok(agent);
+	assert.equal(agent.acceptance, undefined);
+});
+
+test("acceptance: criteria missing id or must are dropped", () => {
+	const doc = [
+		"---",
+		"name: probe",
+		"description: d",
+		"acceptance:",
+		"  level: attested",
+		"  criteria:",
+		"    - id: good",
+		"      must: has both",
+		"    - id: no-must",
+		"    - must: no-id",
+		"---",
+		"body",
+	].join("\n");
+	const agent = parseAgentDocument(doc, "/x/probe.md", "user");
+	assert.ok(agent);
+	assert.deepEqual(
+		agent.acceptance?.criteria?.map((c) => c.id),
+		["good"],
+		"a criterion needs both an id and a must",
+	);
+});
+
+test("acceptance: every bundled role parses its acceptance block", () => {
+	const agents = loadAgentsFromDir(
+		path.resolve(
+			path.dirname(new URL(import.meta.url).pathname),
+			"..",
+			"..",
+			"agents",
+		),
+		"builtin",
+	);
+	for (const name of BUILTIN_AGENT_NAMES) {
+		const found = agents.find((a) => a.name === name);
+		assert.ok(found, `${name} must load`);
+		assert.ok(
+			found.acceptance,
+			`bundled role ${name} declares an acceptance block that must parse`,
+		);
+		assert.ok(
+			(found.acceptance?.criteria?.length ?? 0) > 0,
+			`bundled role ${name} declares criteria that must parse`,
+		);
+	}
+});

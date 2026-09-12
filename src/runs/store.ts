@@ -170,10 +170,18 @@ export class RunStore {
 		this.ensureRootUsable();
 		fs.mkdirSync(dir, { recursive: true });
 		const file = path.join(dir, `${sanitizeNameForFs(name)}${SESSION_EXT}`);
-		// Pre-create (F4). O_RDWR keeps the mode exact; a fresh fd is empty.
-		if (!fs.existsSync(file)) {
-			const fd = fs.openSync(file, "w", 0o600);
-			fs.closeSync(fd);
+		// Pre-create (F4). pi creates session files lazily, so an empty file must
+		// exist before the child starts or the first turn can be lost.
+		//
+		// `writeFileSync` with the exclusive flag manages the descriptor itself:
+		// a manual open/close leaks the fd when `closeSync` throws (EIO/ENOSPC),
+		// and the launcher creates one of these per child. `wx` also removes the
+		// TOCTOU window an `existsSync` check would leave.
+		try {
+			fs.writeFileSync(file, "", { flag: "wx", mode: 0o600 });
+		} catch (error) {
+			// EEXIST: a previous launch (or a resume) already made it — fine.
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 		}
 		// Enforce 0600 even if the file pre-existed with looser bits.
 		try {

@@ -114,6 +114,12 @@ export interface AgentConfig {
 	/** Which fields came from frontmatter (for override merging). */
 	frontmatterFields?: Set<string>;
 	modelSource?: ModelSourceInfo;
+	/**
+	 * Fields this agent sets that the runtime does not act on yet.
+	 * Surfaced so a key that looks accepted is never silently ignored.
+	 * Populated by `parseAgentDocument`; see `unenforcedFieldsIn`.
+	 */
+	unenforcedFields?: string[];
 }
 
 export type AgentSource = "builtin" | "user" | "project";
@@ -206,6 +212,17 @@ export interface AcceptanceResult {
 	level: AcceptanceLevel;
 	evidence?: string[];
 	reason?: string;
+	/**
+	 * Criteria the agent declared that nobody has verified yet.
+	 *
+	 * These are SEMANTIC requirements (`must: "tests pass"`), so the runtime
+	 * cannot decide them — an agent saying "done" is exactly the signal that
+	 * cannot be trusted (F32). Rather than silently claiming verification, the
+	 * checklist is handed to the caller, whose job it is to confirm them. This is
+	 * why `level` stays `attested` while this list is non-empty: a `verified`
+	 * claim is reserved for evidence someone actually checked.
+	 */
+	pendingCriteria?: AcceptanceCriterion[];
 }
 
 // =============================================================================
@@ -242,6 +259,12 @@ export interface ChildRecord {
 	// outcome (snapshot taken BEFORE recycle — F27)
 	execution?: Execution;
 	acceptance?: AcceptanceResult;
+	/**
+	 * Acceptance criteria declared by the agent, copied here at launch so a
+	 * `collect` in a later process (each tool call is a fresh process) can still
+	 * surface them without re-reading the agent definition.
+	 */
+	pendingCriteria?: AcceptanceCriterion[];
 
 	// artifacts
 	artifacts?: Array<{ kind: string; path: string }>;

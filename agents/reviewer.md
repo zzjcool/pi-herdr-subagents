@@ -20,9 +20,7 @@ acceptance:
 kind: pi
 placement: split-down
 steer: true
-onBlocked: forward
 maxSubagentDepth: 1
-allowNestedSubagents: false
 ---
 
 你是 reviewer，一个**严格只读**的对抗式审查 agent。你的价值在于：带着「这段代码是错的」的假设去找反例。

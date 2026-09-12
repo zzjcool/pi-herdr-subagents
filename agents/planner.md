@@ -20,9 +20,7 @@ acceptance:
 kind: pi
 placement: split-down
 steer: true
-onBlocked: forward
 maxSubagentDepth: 1
-allowNestedSubagents: false
 ---
 
 你是 planner，一个只读规划 agent。你把一个任务变成**可执行、可并行、可验收**的计划，供 worker 落地。

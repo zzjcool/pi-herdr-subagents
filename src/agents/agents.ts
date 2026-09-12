@@ -21,7 +21,11 @@ import type {
 	ToolBudgetConfig,
 	TurnBudgetConfig,
 } from "../shared/types.ts";
-import { parseFrontmatter, parseFrontmatterList } from "./frontmatter.ts";
+import {
+	parseFrontmatter,
+	parseFrontmatterList,
+	stripQuotes,
+} from "./frontmatter.ts";
 
 export const BUILTIN_AGENT_NAMES = [
 	"scout",
@@ -125,10 +129,13 @@ function int(value: unknown): number | undefined {
  */
 function list(value: unknown): string[] | undefined {
 	if (Array.isArray(value)) {
-		const items = value
-			.filter((v): v is string => typeof v === "string")
-			.map((v) => v.trim())
-			.filter(Boolean);
+		// Single pass: keep strings, trim, drop empties. A filter→map→filter
+		// chain walked the array three times for no benefit.
+		const items = value.flatMap((v) => {
+			if (typeof v !== "string") return [];
+			const trimmed = v.trim();
+			return trimmed ? [trimmed] : [];
+		});
 		return items.length > 0 ? items : undefined;
 	}
 	if (typeof value === "string") {
@@ -148,11 +155,121 @@ function listOrFalse(value: unknown): string[] | false | undefined {
 	return list(value);
 }
 
+/**
+ * Parse a small indented YAML block (as returned by the frontmatter parser for
+ * a nested key) into a plain object.
+ *
+ * Supports exactly the shape agent definitions use:
+ *
+ * ```text
+ * level: attested
+ * role: read-only
+ * criteria:
+ *   - id: a
+ *     must: something
+ *     evidence: [x, y]
+ * ```
+ *
+ * Deliberately minimal — no anchors, no multi-line scalars, no deep nesting
+ * beyond one list of objects. Returns `undefined` when the text does not look
+ * like a block, so a JSON string still takes the JSON path.
+ */
+function parseIndentedBlock(
+	text: string,
+): Record<string, unknown> | undefined {
+	const lines = text.split("\n");
+	// A block always starts with `key:` on the first line.
+	if (!/^[A-Za-z_][\w-]*:/.test(lines[0] ?? "")) return undefined;
+
+	const out: Record<string, unknown> = {};
+	let currentListKey: string | null = null;
+	let currentItem: Record<string, unknown> | null = null;
+
+	for (const rawLine of lines) {
+		if (!rawLine.trim()) continue;
+		const indent = rawLine.length - rawLine.trimStart().length;
+		const line = rawLine.trim();
+
+		// List item: `- key: value` starts a new object in the current list.
+		const itemMatch = line.match(/^-\s+([A-Za-z_][\w-]*):\s*(.*)$/);
+		if (itemMatch && currentListKey) {
+			currentItem = {};
+			const [, key, value] = itemMatch;
+			currentItem[key as string] = parseScalar(value as string);
+			const arr = out[currentListKey];
+			if (Array.isArray(arr)) arr.push(currentItem);
+			else out[currentListKey] = [currentItem];
+			continue;
+		}
+
+		const kvMatch = line.match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
+		if (!kvMatch) continue;
+		const [, key, value] = kvMatch;
+		const k = key as string;
+		const v = (value as string).trim();
+
+		if (v === "") {
+			// A key with no inline value opens either a nested map or a list.
+			currentListKey = k;
+			currentItem = null;
+			out[k] = [];
+			continue;
+		}
+
+		// A continuation line (deeper indent) belongs to the current list item.
+		if (currentItem && indent > 0) {
+			currentItem[k] = parseScalar(v);
+			continue;
+		}
+
+		currentListKey = null;
+		currentItem = null;
+		out[k] = parseScalar(v);
+	}
+
+	// An empty list means the key was a nested map, not a list — drop it.
+	for (const [k, v] of Object.entries(out)) {
+		if (Array.isArray(v) && v.length === 0) delete out[k];
+	}
+	return out;
+}
+
+/** Scalar for the block parser: flow list, number, boolean, or string. */
+function parseScalar(raw: string): unknown {
+	const value = raw.trim();
+	if (!value) return "";
+	if (value.startsWith("[") && value.endsWith("]")) {
+		const inner = value.slice(1, -1).trim();
+		if (!inner) return [];
+		return inner.split(",").flatMap((part) => {
+			const item = part.trim();
+			return item ? [item] : [];
+		});
+	}
+	if (value === "true") return true;
+	if (value === "false") return false;
+	return stripQuotes(value);
+}
+
 function parseAcceptance(value: unknown): AcceptanceConfig | undefined {
 	const raw = str(value);
 	if (!raw) return undefined;
+
+	// Two accepted spellings:
+	//   acceptance: '{"level":"attested"}'   (JSON string, one line)
+	//   acceptance:                            (nested YAML block, what the
+	//     level: attested                      bundled roles use)
+	// The frontmatter parser is flat, so a nested block arrives here as text.
+	let parsed: Record<string, unknown> | undefined;
 	try {
-		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		parsed = JSON.parse(raw) as Record<string, unknown>;
+	} catch {
+		parsed = parseIndentedBlock(raw);
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+		return undefined;
+
+	{
 		const level = str(parsed.level);
 		if (!level || !VALID_ACCEPTANCE_LEVELS.has(level)) return undefined;
 		const out: AcceptanceConfig = { level: level as AcceptanceConfig["level"] };
@@ -176,8 +293,6 @@ function parseAcceptance(value: unknown): AcceptanceConfig | undefined {
 				.filter((c) => c.id && c.must);
 		}
 		return out;
-	} catch {
-		return undefined;
 	}
 }
 
@@ -315,7 +430,41 @@ export function parseAgentDocument(
 	if (placement) config.placement = placement;
 	if (onBlocked) config.onBlocked = onBlocked;
 
+	config.unenforcedFields = unenforcedFieldsIn(config);
 	return config;
+}
+
+/**
+ * Fields that are parsed and validated but that the runtime does NOT act on
+ * yet. They are surfaced (tool output, `subagent action=list`) instead of being
+ * silently dropped, because a frontmatter key that looks accepted but does
+ * nothing is worse than an unknown one: the user believes it is in effect.
+ *
+ * Keep this list honest — remove a field the moment it starts being enforced.
+ */
+const UNENFORCED_FIELDS = [
+	"worktree",
+	"onBlocked",
+	"toolBudget",
+	"turnBudget",
+	"fallbackModels",
+	"completionGuard",
+	"allowNestedSubagents",
+	"alias",
+	"toolTimeoutMs",
+] as const;
+
+/** The subset of `UNENFORCED_FIELDS` this agent actually sets. */
+export function unenforcedFieldsIn(config: AgentConfig): string[] {
+	const set = config as unknown as Record<string, unknown>;
+	const out: string[] = [];
+	for (const field of UNENFORCED_FIELDS) {
+		if (set[field] !== undefined) out.push(field);
+	}
+	// NOTE: `acceptance.criteria` is NOT listed here. It is surfaced by
+	// `collect()` as an explicit checklist for the caller, which is the only
+	// honest treatment of a semantic requirement (see AcceptanceResult).
+	return out;
 }
 
 /** Load every usable `*.md` agent definition from a directory. */

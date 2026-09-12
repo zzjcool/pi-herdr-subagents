@@ -467,6 +467,15 @@ export class Orchestrator {
 				spawnedAt: new Date(this.now()).toISOString(),
 				agent: input.agent.name,
 				kind: input.agent.kind,
+				// Snapshot the declared criteria: `collect` may run in a later
+				// process that cannot re-read this agent definition.
+				...(input.agent.acceptance?.criteria?.length
+					? {
+							pendingCriteria: input.agent.acceptance.criteria.map((c) => ({
+								...c,
+							})),
+						}
+					: {}),
 				...(tabId ? { tabId } : {}),
 				...(input.model ? { model: input.model } : {}),
 			};
@@ -622,6 +631,19 @@ export class Orchestrator {
 				status: "rejected",
 				level: "none",
 				reason: execution.reason ?? execution.status,
+			};
+		}
+
+		// L3 criteria are SEMANTIC (`must: "tests pass"`), so the runtime cannot
+		// decide them. An agent asserting success is exactly the signal F32 shows
+		// cannot be trusted. So the checklist is carried forward for the caller
+		// instead of being silently dropped — and the level stays `attested`, so
+		// `verified` is never claimed without evidence someone actually checked.
+		const criteria = child.pendingCriteria;
+		if (criteria?.length) {
+			acceptance = {
+				...acceptance,
+				pendingCriteria: criteria.map((c) => ({ ...c })),
 			};
 		}
 

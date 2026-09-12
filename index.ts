@@ -223,8 +223,12 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 
 				if (action === "collect") {
 					try {
+						// Honour the agent's own `timeoutMs`: the bundled roles declare
+						// budgets (worker 30min, oracle 20min) that were previously
+						// parsed and then ignored in favour of the global default.
+						const agentDef = agents.find((a) => a.name === found.child.agent);
 						const collected = await orchestrator.collect(params.name, {
-							timeoutMs: DEFAULTS.turnTimeoutMs,
+							timeoutMs: agentDef?.timeoutMs ?? DEFAULTS.turnTimeoutMs,
 						});
 						await persistChild(store, found.runId, orchestrator, params.name);
 						return ok(renderCollect(params.name, collected));
@@ -271,7 +275,8 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 					try {
 						// A live agent is prompted in place; an exited one is rebuilt
 						// from its persisted session so context survives.
-						const alive = (await client.agentGet(params.name)).ok;
+						const agentState = await client.agentGet(params.name);
+						const alive = agentState.ok;
 						if (alive) {
 							await orchestrator.steer(params.name, params.message);
 							return ok(
@@ -320,6 +325,9 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 
 			const results: string[] = [];
 			const handles: string[] = [];
+			// Per-child collect budget, so the agent's own `timeoutMs` is honoured
+			// rather than every child sharing the global default.
+			const timeoutByName = new Map<string, number>();
 
 			for (const step of plan.steps) {
 				const agent = agents.find((a) => a.name === step.agent);
@@ -376,9 +384,20 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 					});
 					await store.addChild(run.runId, handle.child);
 					handles.push(handle.name);
+					if (agent.timeoutMs !== undefined) {
+						timeoutByName.set(handle.name, agent.timeoutMs);
+					}
 					results.push(
 						`▶ ${handle.name} (${agent.name}) pane=${handle.paneId}`,
 					);
+					// Surface frontmatter keys that are accepted but inert, so a user
+					// does not believe an unenforced setting is protecting them.
+					if (agent.unenforcedFields?.length) {
+						results.push(
+							`  ⚠ ${agent.name} sets fields that are not enforced yet: ` +
+								`${agent.unenforcedFields.join(", ")}`,
+						);
+					}
 				} catch (error) {
 					const message =
 						error instanceof SubagentError
@@ -394,7 +413,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 				for (const name of handles) {
 					try {
 						const collected = await orchestrator.collect(name, {
-							timeoutMs: DEFAULTS.turnTimeoutMs,
+							timeoutMs: timeoutByName.get(name) ?? DEFAULTS.turnTimeoutMs,
 						});
 						results.push(renderCollect(name, collected));
 					} catch (error) {
@@ -426,13 +445,18 @@ type Plan =
 	  }
 	| { ok: false; message: string };
 
-function buildPlan(params: {
+export function buildPlan(params: {
 	agent?: string;
 	task?: string;
 	tasks?: Array<{ agent: string; task: string; model?: string }>;
 	chain?: Array<{ agent: string; task: string; model?: string }>;
 }): Plan {
-	const hasSingle = Boolean(params.agent && params.task);
+	// `Boolean("   ")` is true, so a whitespace-only task used to pass and launch
+	// a child with a meaningless prompt. Presence is decided on trimmed content.
+	const present = (value: unknown): boolean =>
+		typeof value === "string" && value.trim().length > 0;
+
+	const hasSingle = present(params.agent) && present(params.task);
 	const hasTasks = Boolean(params.tasks?.length);
 	const hasChain = Boolean(params.chain?.length);
 	const count = Number(hasSingle) + Number(hasTasks) + Number(hasChain);
@@ -448,6 +472,12 @@ function buildPlan(params: {
 			message: "Provide exactly one of: (agent+task), tasks[], or chain[].",
 		};
 
+	const invalid = (step: { agent?: string; task?: string }, i: number) => {
+		if (!present(step?.agent)) return `step ${i + 1} has no \`agent\``;
+		if (!present(step?.task)) return `step ${i + 1} has an empty \`task\``;
+		return null;
+	};
+
 	if (hasSingle) {
 		return {
 			ok: true,
@@ -455,12 +485,22 @@ function buildPlan(params: {
 			steps: [{ agent: params.agent as string, task: params.task as string }],
 		};
 	}
+
+	// `tasks[]` and `chain[]` entries were previously taken on trust, so a
+	// missing or blank `agent`/`task` produced a step that launched a child with
+	// nothing to do (or an empty agent name that failed later, after resources
+	// were allocated). Validate every entry up front instead.
+
 	if (hasTasks) {
 		const tasks = params.tasks as Array<{
 			agent: string;
 			task: string;
 			model?: string;
 		}>;
+		for (let i = 0; i < tasks.length; i += 1) {
+			const problem = invalid(tasks[i] ?? {}, i);
+			if (problem) return { ok: false, message: `tasks[]: ${problem}.` };
+		}
 		return { ok: true, task: `${tasks.length} parallel tasks`, steps: tasks };
 	}
 
@@ -470,6 +510,10 @@ function buildPlan(params: {
 		task: string;
 		model?: string;
 	}>;
+	for (let i = 0; i < chain.length; i += 1) {
+		const problem = invalid(chain[i] ?? {}, i);
+		if (problem) return { ok: false, message: `chain[]: ${problem}.` };
+	}
 	const steps = chain.map((step, i) => ({
 		...step,
 		task:
@@ -508,10 +552,15 @@ function listAgents(agents: AgentConfig[]): AgentToolResult<unknown> {
 			"No agents found. Add definitions to ~/.pi/agent/agents/*.md or .pi/agents/*.md.",
 		);
 	}
-	const lines = agents.map(
-		(a) =>
-			`${a.name} [${a.source}] — ${a.description}${a.model ? ` (model: ${a.model})` : ""}`,
-	);
+	const lines = agents.map((a) => {
+		const model = a.model ? ` (model: ${a.model})` : "";
+		// A frontmatter key that is accepted but does nothing is worse than an
+		// unknown one, because the user believes it is in effect.
+		const inert = a.unenforcedFields?.length
+			? `\n    ⚠ not enforced yet: ${a.unenforcedFields.join(", ")}`
+			: "";
+		return `${a.name} [${a.source}] — ${a.description}${model}${inert}`;
+	});
 	return ok(lines.join("\n"));
 }
 
@@ -563,15 +612,39 @@ function renderCollect(
 	collected: {
 		execution: { status: string; reason?: string };
 		output: string;
-		acceptance: { status: string };
+		acceptance: {
+			status: string;
+			level?: string;
+			pendingCriteria?: Array<{
+				id: string;
+				must: string;
+				severity?: string;
+			}>;
+		};
 	},
 ): string {
-	return [
+	const lines = [
 		`── ${name} ──`,
 		`execution: ${collected.execution.status}${collected.execution.reason ? ` (${collected.execution.reason})` : ""}`,
-		`acceptance: ${collected.acceptance.status}`,
-		collected.output || "(no output)",
-	].join("\n");
+		`acceptance: ${collected.acceptance.status}${collected.acceptance.level ? ` (${collected.acceptance.level})` : ""}`,
+	];
+
+	// L3: semantic criteria the runtime cannot decide. An agent claiming success
+	// is exactly the signal that cannot be trusted (F32), so these are handed to
+	// the caller as an explicit checklist rather than assumed to hold.
+	const pending = collected.acceptance.pendingCriteria ?? [];
+	if (pending.length > 0) {
+		lines.push(
+			`unverified criteria — you must confirm these before trusting the result:`,
+		);
+		for (const c of pending) {
+			const tag = c.severity === "optional" ? " (optional)" : "";
+			lines.push(`  [ ] ${c.id}${tag}: ${c.must}`);
+		}
+	}
+
+	lines.push(collected.output || "(no output)");
+	return lines.join("\n");
 }
 
 function ok(text: string): AgentToolResult<unknown> {

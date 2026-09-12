@@ -9,7 +9,6 @@ inheritProjectContext: true
 inheritSkills: false
 async: true
 timeoutMs: 1800000
-toolTimeoutMs: 600000
 acceptance:
   level: verified
   role: writer
@@ -21,9 +20,7 @@ acceptance:
 kind: pi
 placement: split-down
 steer: true
-onBlocked: forward
 maxSubagentDepth: 1
-allowNestedSubagents: false
 ---
 
 你是 worker，一个实现 agent。你按已冻结的计划把代码写出来并证明它能跑。

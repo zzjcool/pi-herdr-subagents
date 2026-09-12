@@ -186,7 +186,21 @@ export function parseSessionText(text: string): ParsedSession {
 
 		let event: Record<string, unknown>;
 		try {
-			event = JSON.parse(line) as Record<string, unknown>;
+			const decoded: unknown = JSON.parse(line);
+			// `JSON.parse` succeeds on bare scalars: `null`, `42`, `true`, `"x"`.
+			// Only a plain object can carry a `type`, and `null.type` throws — which
+			// would take down the whole parse. The session file is external input
+			// (a pane can be closed mid-write), so anything that is not an object
+			// is treated as a damaged line instead.
+			if (
+				decoded === null ||
+				typeof decoded !== "object" ||
+				Array.isArray(decoded)
+			) {
+				parsed.tornLines += 1;
+				continue;
+			}
+			event = decoded as Record<string, unknown>;
 		} catch {
 			parsed.tornLines += 1;
 			continue;

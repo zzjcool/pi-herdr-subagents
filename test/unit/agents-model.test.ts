@@ -341,3 +341,53 @@ test("settings: loadSubagentSettings reports malformed JSON with the path", () =
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUG 14 (security): the glob → RegExp translation produced nested quantifiers
+// (`*a*a*a…b` → `.*a.*a.*a…b`), which backtrack exponentially. The patterns
+// come from `.pi/settings.json`, a file that travels with a cloned repository,
+// so a hostile repo could hang the host process. Measured before the fix: a
+// 100-star pattern against a non-matching model took 14.5s, doubling per star.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("glob matching is linear, not exponential, on adversarial patterns", () => {
+	// Worst case: many stars, and an input that never matches (forces the
+	// matcher to exhaust every alternative).
+	const stars = 200;
+	const pattern = `${"*a".repeat(stars)}*b`;
+	const model = `cb/${"a".repeat(stars + 5)}`;
+
+	const started = Date.now();
+	const matched = matchesScopePattern(model, pattern);
+	const elapsed = Date.now() - started;
+
+	assert.equal(matched, false, "a model without 'b' must not match");
+	assert.ok(
+		elapsed < 1000,
+		`glob matching must stay fast (took ${elapsed}ms; RegExp backtracking took ~14s at 100 stars)`,
+	);
+});
+
+test("glob semantics: full match, case-insensitive, star spans slashes", () => {
+	// A `*` is not path-aware here: it matches any characters, including `/`.
+	assert.equal(matchesScopePattern("cb/glm-5.3", "*"), true);
+	assert.equal(matchesScopePattern("cb/glm-5.3", "*glm*"), true);
+	assert.equal(matchesScopePattern("cb/glm-5.3", "cb/glm-*"), true);
+	assert.equal(matchesScopePattern("cb/glm-5.3", "CB/GLM-5.3"), true, "case-insensitive");
+	// Anchored at both ends.
+	assert.equal(matchesScopePattern("cb/glm-5.3", "glm-5.3"), false, "must be a full match");
+	assert.equal(matchesScopePattern("cb/glm-5.3", "cb/glm"), false, "must be a full match");
+	// Trailing stars may match the empty remainder.
+	assert.equal(matchesScopePattern("cb/x", "cb/x*"), true);
+	assert.equal(matchesScopePattern("cb/x", "cb/*"), true);
+	// A pattern with no star is an exact comparison.
+	assert.equal(matchesScopePattern("cb/x", "cb/x"), true);
+	assert.equal(matchesScopePattern("cb/xy", "cb/x"), false);
+	// Thinking suffixes are stripped before matching.
+	assert.equal(matchesScopePattern("cb/glm-5.3:high", "cb/glm-5.3"), true);
+	// Literal regex metacharacters are treated literally, not as syntax.
+	assert.equal(matchesScopePattern("cb/a.b", "cb/a.b"), true);
+	assert.equal(matchesScopePattern("cb/axb", "cb/a.b"), false, "'.' must be literal");
+	assert.equal(matchesScopePattern("cb/a+b", "cb/a+b"), true);
+	assert.equal(matchesScopePattern("cb/aab", "cb/a+b"), false, "'+' must be literal");
+});

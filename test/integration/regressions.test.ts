@@ -815,3 +815,98 @@ test("regression: a writable run root is unaffected", async () => {
 		rmSync(runDir, { recursive: true, force: true });
 	}
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUG 15: `acceptance.criteria` was parsed and then silently dropped. An agent
+// declaring `must: "tests pass"` got no checklist back, so a caller could not
+// tell that nothing had verified it. An agent asserting success is exactly the
+// signal that cannot be trusted (F32), so the criteria must reach the caller.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("regression: declared acceptance criteria reach the caller as a checklist", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-criteria-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+		});
+
+		const withCriteria = agent({
+			name: "audited",
+			acceptance: {
+				level: "attested",
+				criteria: [
+					{ id: "tests-pass", must: "the suite is green", severity: "required" },
+					{ id: "no-secrets", must: "no keys in the diff", severity: "optional" },
+				],
+			},
+		});
+
+		const handle = await orchestrator.launch({ agent: withCriteria, task: "t" });
+		assert.equal(
+			handle.child.pendingCriteria?.length,
+			2,
+			"criteria must be snapshotted onto the child at launch",
+		);
+
+		// The child answers with a passing verdict.
+		writeFileSync(
+			handle.sessionFile,
+			[
+				sessionHeader(),
+				user("t"),
+				assistantMsg({
+					stopReason: "stop",
+					text: '{"ok": true, "reason": "looks good"}',
+				}),
+			].join("\n"),
+		);
+
+		const collected = await orchestrator.collect(handle.name, { timeoutMs: 5_000 });
+		assert.equal(collected.acceptance.status, "accepted");
+		// The self-report is only ATTESTED — never silently promoted to verified.
+		assert.equal(
+			collected.acceptance.level,
+			"attested",
+			"an agent's own verdict cannot upgrade the level to verified",
+		);
+		assert.deepEqual(
+			collected.acceptance.pendingCriteria?.map((c) => c.id),
+			["tests-pass", "no-secrets"],
+			"the caller must receive the criteria it still has to confirm",
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("regression: an agent without criteria reports none", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-nocriteria-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+		});
+		const handle = await orchestrator.launch({ agent: agent(), task: "t" });
+		writeFileSync(
+			handle.sessionFile,
+			[
+				sessionHeader(),
+				user("t"),
+				assistantMsg({ stopReason: "stop", text: "done" }),
+			].join("\n"),
+		);
+		const collected = await orchestrator.collect(handle.name, { timeoutMs: 5_000 });
+		assert.equal(collected.acceptance.pendingCriteria, undefined);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});

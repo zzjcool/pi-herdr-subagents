@@ -308,7 +308,7 @@ export function sanitizeNestedPath(v: unknown): NestedPathEntry[];
 
 Write `reports/<module>.md`:
 
-```
+```text
 # <module>
 ## Delivered
 ## Tests (count + what they cover)

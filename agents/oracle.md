@@ -1,7 +1,6 @@
 ---
 name: oracle
 description: 终审顾问：用更强模型对争议方案/计划做第二意见裁决
-fallbackModels: cb/glm-5.3-flash
 model: cb/claude-opus-5
 thinking: xhigh
 tools: read, grep, find, ls
@@ -21,9 +20,7 @@ acceptance:
 kind: pi
 placement: split-down
 steer: true
-onBlocked: forward
 maxSubagentDepth: 1
-allowNestedSubagents: false
 ---
 
 你是 oracle，一个终审顾问 agent。当两个方案有争议、或计划有致命风险嫌疑时，由你做第二意见裁决。

@@ -995,6 +995,144 @@ index.ts(132,4): error TS7006: Parameter 'signal' implicitly has an 'any' type.
 
 ---
 
+## 16. 交付前安全/健壮性审计（F38–F45）
+
+对全部模块做了对抗式输入扫描（畸形会话文件、路径穿越、恶意配置、并发写）。
+以下 8 条是真缺陷，其余区域已验证健壮。
+
+### F38 — ReDoS：glob → RegExp 的嵌套量词（安全）
+
+`modelScope.allow` 的 glob 被翻译成 `.*`，于是 `*a*a*a…b` 变成 `.*a.*a.*a…b`——
+嵌套量词在**不匹配**的输入上指数回溯。
+
+```text
+实测：n=50 → 327ms, n=100 → 14565ms（每个 * 翻倍）
+```
+
+**威胁模型成立**：pattern 来自 `.pi/settings.json`，而该文件**随克隆的仓库一起来**。
+受害者 clone 一个恶意仓库，在其中调用一次 subagent 工具，主进程即被挂起。
+
+**修法**：不用正则，改用双指针贪心 glob 匹配（只回溯最近一个 `*`）。
+修复后 n=6400 仅 2ms。
+
+### F39 — fd 泄漏：`openSync`/`closeSync` 无保护
+
+```ts
+const fd = fs.openSync(file, "w", 0o600);
+fs.closeSync(fd);   // ← 抛错（EIO/ENOSPC）则 fd 永久泄漏
+```
+
+launcher 为**每个 child** 创建一个 session 文件，所以泄漏会随 fan-out 累积。
+实测：模拟 200 次中 67 次抛错 → fd 从 21 涨到 88。
+
+**修法**：`fs.writeFileSync(file, "", { flag: "wx", mode: 0o600 })`——
+由 Node 自己管理描述符，并且 `wx` 顺带消除了 `existsSync` 检查留下的 TOCTOU 窗口。
+
+### F40 — `JSON.parse("null")` 拖垮整个会话解析
+
+`JSON.parse` 对标量是成功的：`null` / `42` / `true` / `"x"`。
+随后 `event.type` 在 `null` 上抛异常，**整个 `parseSessionText` 崩溃**，
+于是 `collect` 也崩溃。会话文件是外部输入（pane 可能在写入中途被关闭）。
+
+**修法**：非对象、非数组的标量按损坏行计入 `tornLines`，继续解析其余行。
+
+### F41 — `tasks[]` / `chain[]` 的条目未校验
+
+单任务路径用 `Boolean(params.agent && params.task)` 把关，但数组路径直接放行：
+
+```text
+tasks:[{agent:"worker", task:""}]     → 放行，启动一个没任务的 child
+tasks:[{task:"do it"}]                → 放行，agent 名为 undefined
+chain:[{agent:"worker", task:"   "}] → 放行
+```
+
+**修法**：每个 step 在分配任何资源之前校验 `agent` 与 `task`。
+
+### F42 — `Boolean("   ")` 为真：纯空白 task 被放行
+
+即使单任务路径，`task: "   "` 也会通过，生成一个毫无意义的 `Task:` prompt。
+**修法**：存在性按 `trim()` 后的内容判定，而非 `Boolean()`。
+
+### F43 — `timeoutMs` 被解析却从不生效
+
+5 个自带角色都声明了预算，运行时却全部忽略，永远用全局默认 15 分钟：
+
+```text
+worker.md: timeoutMs: 1800000 (30min)  ← 被忽略
+oracle.md: timeoutMs: 1200000 (20min)  ← 被忽略
+DEFAULTS.turnTimeoutMs: 900000 (15min) ← 实际生效
+```
+
+**修法**：`collect` 采用 `agent.timeoutMs`（按 child 记录，逐个子 agent 生效）。
+
+### F44 — `acceptance.criteria` 被静默丢弃
+
+角色可以声明 `must: "测试通过"` 这类**语义**验收条件，代码解析后就不管了。
+调用方无法知道「没有任何东西验证过它」。
+
+这里**不能**假装自动校验：`must` 是自然语言，而 agent 自述成功恰恰是 F32 证明
+不可信的那个信号。
+
+**修法**：criteria 作为**待验证清单**回传调用方（`pendingCriteria`），
+且 `level` 保持 `attested`——**`verified` 只留给真正被人核对过的证据**。
+
+### F45 — 配置字段「看起来生效、实际无效」
+
+自带角色携带 `onBlocked` / `allowNestedSubagents` / `fallbackModels` / `toolTimeoutMs`，
+全部被解析、全部不生效。其中 `allowNestedSubagents: false` 最危险——
+它**看起来像个安全护栏**，实际真正的护栏是 `maxSubagentDepth: 1`。
+
+**修法**：
+
+1. 从自带角色移除这些字段（不发布误导性配置）；
+2. 新增 `AgentConfig.unenforcedFields`，在 `action=list` 与 `launch` 输出中
+   显式警告 `⚠ not enforced yet: ...`。
+
+**原则**：**一个被接受却不做事的键，比一个未知的键更危险**——
+用户会相信它已经在保护自己。
+
+### F46 — 嵌套 YAML 块从未被解析：自带角色的 acceptance 全部丢失
+
+frontmatter 解析器是**扁平的**（只处理 `key: value`）；一个嵌套块会以
+**剥掉公共缩进后的原始文本**返回：
+
+```text
+acceptance: "level: attested\nrole: read-only\ncriteria:\n  - id: ..."
+```
+
+而 `parseAcceptance` 只做了 `JSON.parse(raw)`——对这段文本永远失败，
+直接 `return undefined`。于是：
+
+```text
+实测：oracle/planner/reviewer/scout/worker 的 acceptance 全部 undefined
+      → level 丢失、role 丢失、criteria 丢失
+```
+
+这是最隐蔽的一类 bug：**配置写得很对、解析器也“成功返回”了，但结果是空**。
+它同时解释了为什么 F44 的 criteria 从来没出现在输出里——那些 criteria
+**根本没被解析出来**。
+
+**修法**：`parseAcceptance` 接受两种写法——单行 JSON 字符串（保留）
+与嵌套 YAML 块（自带角色实际使用的写法）。新增一个极简的
+`parseIndentedBlock()`，只支持 agent 定义用到的形状（标量 + 一层对象列表），
+不做完整 YAML。
+
+修复后：5 个角色的 `level` / `role` / `criteria` 全部正确解析，
+且 criteria 经 F44 的通道真实出现在 `collect` 输出中（容器实测）。
+
+### 已验证健壮的区域（对抗输入，0 崩溃）
+
+| 区域 | 输入 | 结果 |
+| --- | --- | --- |
+| 路径穿越 | `../../etc/passwd`、`..`、`/etc/passwd`、NUL、超长… 12 例 | 全部安全 |
+| herdr 响应解析 | 空/非 JSON/`null`/截断/BOM/stderr-only… 16 例 | 0 崩溃 |
+| argv 构造 | 空 task、NUL、`--flag` 注入、超长… 13 例 | 0 崩溃；`shell: false` |
+| 模型解析 / scope | 非法 thinking、空串、大小写… 15 例 | 正确处理 |
+| 并发写 | 50 并发 `addChild` / `updateChild` | 无丢失 |
+| retire | pane 已死 / agent 已退 | 安全降级 |
+
+---
+
 ## 附录：实验脚本
 
 - `/tmp/exp1.py` — turn 完成判定信号
