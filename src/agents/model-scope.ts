@@ -61,7 +61,10 @@ export function globMatches(text: string, pattern: string): boolean {
 			starP = p;
 			starT = t;
 			p += 1;
-		} else if (pc !== undefined && pc.toLowerCase() === text[t]?.toLowerCase()) {
+		} else if (
+			pc !== undefined &&
+			pc.toLowerCase() === text[t]?.toLowerCase()
+		) {
 			p += 1;
 			t += 1;
 		} else if (starP !== -1) {

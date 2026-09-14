@@ -174,9 +174,7 @@ function listOrFalse(value: unknown): string[] | false | undefined {
  * beyond one list of objects. Returns `undefined` when the text does not look
  * like a block, so a JSON string still takes the JSON path.
  */
-function parseIndentedBlock(
-	text: string,
-): Record<string, unknown> | undefined {
+function parseIndentedBlock(text: string): Record<string, unknown> | undefined {
 	const lines = text.split("\n");
 	// A block always starts with `key:` on the first line.
 	if (!/^[A-Za-z_][\w-]*:/.test(lines[0] ?? "")) return undefined;

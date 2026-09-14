@@ -53,7 +53,15 @@ test("plan: tasks[] entries are validated", () => {
 		["empty agent", { tasks: [{ agent: "", task: "do it" }] }],
 		["missing agent", { tasks: [{ task: "do it" }] }],
 		["missing task", { tasks: [{ agent: "worker" }] }],
-		["second entry bad", { tasks: [{ agent: "a", task: "x" }, { agent: "", task: "y" }] }],
+		[
+			"second entry bad",
+			{
+				tasks: [
+					{ agent: "a", task: "x" },
+					{ agent: "", task: "y" },
+				],
+			},
+		],
 	];
 	for (const [label, params] of bad) {
 		const plan = buildPlan(params as Parameters<typeof buildPlan>[0]);
