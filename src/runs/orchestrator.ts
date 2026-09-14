@@ -399,11 +399,7 @@ export class Orchestrator {
 			if (res.error.code !== ErrorCodes.PANE_BUSY) {
 				// A real error. F22: a missing binary shows up as a timeout, so
 				// attach the pane's contents to make the cause visible.
-				const diagnostic = await readPaneDiagnostic(
-					this.client,
-					input.paneId,
-					30,
-				);
+				const diagnostic = await readPaneDiagnostic(this.client, input.paneId, 30);
 				throw new SubagentError(
 					`agent start failed (${res.error.code}): ${res.error.message}${
 						diagnostic ? `\n--- pane output ---\n${diagnostic}` : ""
@@ -691,11 +687,7 @@ export class Orchestrator {
 			timedOut,
 			timeoutMs,
 		);
-		const acceptance = deriveAcceptance(
-			parsed,
-			execution,
-			child.pendingCriteria,
-		);
+		const acceptance = deriveAcceptance(parsed, execution, child.pendingCriteria);
 
 		child.state = "awaiting";
 		child.execution = execution;

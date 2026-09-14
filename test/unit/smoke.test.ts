@@ -74,9 +74,7 @@ test("tool error then clean stop => success with toolErrors", () => {
 });
 
 test("torn line tolerated", () => {
-	const s = parseSessionText(
-		[user("hi"), '{"type":"message","mess'].join("\n"),
-	);
+	const s = parseSessionText([user("hi"), '{"type":"message","mess'].join("\n"));
 	assert.equal(s.tornLines, 1);
 	assert.doesNotThrow(() => deriveOutcome(s));
 });
@@ -156,9 +154,8 @@ test("nested path safety", () => {
 	assert.equal(isSafeNestedPathId("../../etc"), false);
 	assert.equal(isSafeNestedPathId("/abs"), false);
 	assert.equal(
-		sanitizeNestedPath(
-			Array.from({ length: 9 }, (_, i) => ({ runId: `r${i}` })),
-		).length,
+		sanitizeNestedPath(Array.from({ length: 9 }, (_, i) => ({ runId: `r${i}` })))
+			.length,
 		4,
 	);
 });
@@ -174,10 +171,6 @@ test("herdr error on stderr", () => {
 });
 
 test("herdr success on stdout", () => {
-	const r = parseHerdrResponse(
-		'{"result":{"pane":{"pane_id":"w1:p1"}}}',
-		"",
-		0,
-	);
+	const r = parseHerdrResponse('{"result":{"pane":{"pane_id":"w1:p1"}}}', "", 0);
 	assert.equal(r.ok, true);
 });

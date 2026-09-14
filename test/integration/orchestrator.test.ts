@@ -104,9 +104,8 @@ function harness(options: { paneBusyMs?: number } = {}): Harness {
 		client,
 		runDir,
 		startAttempts: () =>
-			fake.commands.filter(
-				(c) => c.args[0] === "agent" && c.args[1] === "start",
-			).length,
+			fake.commands.filter((c) => c.args[0] === "agent" && c.args[1] === "start")
+				.length,
 		openPanes: () => fake.panes.size,
 		cleanup: () => rmSync(runDir, { recursive: true, force: true }),
 	};
@@ -263,10 +262,7 @@ test("collect reports abort when the agent is GONE and the last prompt has no re
 	const h = harness();
 	try {
 		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(
-			handle.sessionFile,
-			transcript([{ role: "user", text: "go" }]),
-		);
+		writeFileSync(handle.sessionFile, transcript([{ role: "user", text: "go" }]));
 
 		// F29's measured scenario is a HARD KILL: the pane dies mid-turn, so no
 		// assistant message is ever written and the agent is gone. Only the
@@ -290,10 +286,7 @@ test("collect reports `running` (not aborted) when the agent is still alive", as
 		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
 		// A user prompt with no reply yet, but the agent is alive: this is a slow
 		// turn, not an abort. Reporting `aborted` here would be a false alarm.
-		writeFileSync(
-			handle.sessionFile,
-			transcript([{ role: "user", text: "go" }]),
-		);
+		writeFileSync(handle.sessionFile, transcript([{ role: "user", text: "go" }]));
 
 		const result = await h.orchestrator.collect(handle.name, {
 			timeoutMs: 2_000,
@@ -332,10 +325,7 @@ test("collect turns a self-reported verdict into acceptance (F33)", async () => 
 test("collect on an unknown child throws", async () => {
 	const h = harness();
 	try {
-		await assert.rejects(
-			() => h.orchestrator.collect("nobody"),
-			/unknown child/,
-		);
+		await assert.rejects(() => h.orchestrator.collect("nobody"), /unknown child/);
 	} finally {
 		h.cleanup();
 	}
@@ -394,10 +384,7 @@ test("retire exits the agent and closes its pane", async () => {
 	const h = harness();
 	try {
 		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		assert.ok(
-			h.fake.agents.has(handle.name),
-			"agent should exist after launch",
-		);
+		assert.ok(h.fake.agents.has(handle.name), "agent should exist after launch");
 
 		await h.orchestrator.retire(handle.name);
 

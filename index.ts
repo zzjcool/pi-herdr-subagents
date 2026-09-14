@@ -72,9 +72,7 @@ const SubagentParams = Type.Object({
 	agent: Type.Optional(
 		Type.String({ description: "Agent name (single launch)" }),
 	),
-	task: Type.Optional(
-		Type.String({ description: "Task text (single launch)" }),
-	),
+	task: Type.Optional(Type.String({ description: "Task text (single launch)" })),
 	tasks: Type.Optional(
 		Type.Array(TaskItem, { description: "Parallel launches" }),
 	),

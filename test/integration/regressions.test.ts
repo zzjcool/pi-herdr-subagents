@@ -204,11 +204,7 @@ test("regression: the persisted child carries a real, unique ownerToken", async 
 			tokens.every((t) => t.length > 0),
 			"ownerToken must be present",
 		);
-		assert.notEqual(
-			tokens[0],
-			tokens[1],
-			"ownerTokens must be unique per child",
-		);
+		assert.notEqual(tokens[0], tokens[1], "ownerTokens must be unique per child");
 	} finally {
 		rmSync(runDir, { recursive: true, force: true });
 	}
@@ -539,11 +535,7 @@ test("regression: a name held by an unrelated live agent is avoided up front", a
 		const attempts = fake.commands.filter(
 			(c) => c.args[0] === "agent" && c.args[1] === "start",
 		).length;
-		assert.equal(
-			attempts,
-			1,
-			`expected a single start attempt, got ${attempts}`,
-		);
+		assert.equal(attempts, 1, `expected a single start attempt, got ${attempts}`);
 	} finally {
 		rmSync(runDir, { recursive: true, force: true });
 	}
@@ -788,7 +780,10 @@ test("regression: an unwritable run root fails with an actionable error", async 
 				const msg = String(err instanceof Error ? err.message : err);
 				assert.match(msg, /cannot write run artifacts/i);
 				assert.match(msg, /writable/i, "must say what to do about it");
-				assert.match(msg, new RegExp(fileAsDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+				assert.match(
+					msg,
+					new RegExp(fileAsDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+				);
 				return true;
 			},
 		);
@@ -866,7 +861,9 @@ test("regression: declared acceptance criteria reach the caller as a checklist",
 			].join("\n"),
 		);
 
-		const collected = await orchestrator.collect(handle.name, { timeoutMs: 5_000 });
+		const collected = await orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
 		assert.equal(collected.acceptance.status, "accepted");
 		// The self-report is only ATTESTED — never silently promoted to verified.
 		assert.equal(
@@ -904,7 +901,9 @@ test("regression: an agent without criteria reports none", async () => {
 				assistantMsg({ stopReason: "stop", text: "done" }),
 			].join("\n"),
 		);
-		const collected = await orchestrator.collect(handle.name, { timeoutMs: 5_000 });
+		const collected = await orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
 		assert.equal(collected.acceptance.pendingCriteria, undefined);
 	} finally {
 		rmSync(runDir, { recursive: true, force: true });

@@ -13,11 +13,7 @@
  *         not a clear error
  */
 
-import type {
-	CommandRunner,
-	PaneInfo,
-	TabInfo,
-} from "../../src/shared/types.ts";
+import type { CommandRunner } from "../../src/shared/types.ts";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -300,9 +296,6 @@ export class FakeHerdr {
 		if (head === "pane") {
 			const [sub, ...sargs] = rest;
 			if (sub === "split") {
-				const dir = sargs.includes("--direction")
-					? (sargs[sargs.indexOf("--direction") + 1] ?? "down")
-					: "down";
 				const cwdIdx = sargs.indexOf("--cwd");
 				const cwd = cwdIdx >= 0 ? (sargs[cwdIdx + 1] ?? null) : null;
 				const workspaceId = "w1";
@@ -372,7 +365,12 @@ export class FakeHerdr {
 			const [sub, ...sargs] = rest;
 			if (sub === "create") {
 				const workspaceId = "w1";
-				const tabId = `${workspaceId}:t${this.nextTab++}`;
+				// `addRootPane` pre-registers `w1:t1` without consuming the counter, so
+				// skip any id already taken — otherwise a created tab would overwrite it.
+				let tabId = `${workspaceId}:t${this.nextTab++}`;
+				while (this.tabs.has(tabId)) {
+					tabId = `${workspaceId}:t${this.nextTab++}`;
+				}
 				const labelIdx = sargs.indexOf("--label");
 				const label = labelIdx >= 0 ? (sargs[labelIdx + 1] ?? null) : null;
 				const paneId = `${workspaceId}:p${this.nextPane++}`;

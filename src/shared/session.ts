@@ -31,7 +31,6 @@ const KNOWN_STOP_REASONS: ReadonlySet<string> = new Set([
 	"error",
 	"aborted",
 ]);
-
 function emptyUsage(): Usage {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 }
