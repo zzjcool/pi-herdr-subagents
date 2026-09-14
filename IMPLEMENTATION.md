@@ -201,7 +201,7 @@ Requirements:
 
 1. `README.md` — what it is, install, quick start, config reference, the
    success/failure model, limitations (be honest about the no-isolation finding F23–F25).
-2. `docs/design.md` — **copy** `/root/tmp/herdr-subagents-design.md` verbatim.
+2. `docs/design.md` — the measured design (findings F1–F46), kept in-repo.
 3. `skills/pi-herdr-subagents/SKILL.md` — when/how the main agent should delegate.
    Frontmatter: `name`, `description` (follow the existing skill format used by other skills
    in `/root/.pi/agent/skills/`; read one for the exact shape).
@@ -317,4 +317,4 @@ Write `reports/<module>.md`:
 ```
 
 Then message the orchestrator:
-`herdr agent prompt orchestrator "<module> done. report: /root/tmp/herdr-subagents/reports/<module>.md"`
+`herdr agent prompt orchestrator "<module> done. report: reports/<module>.md"`
