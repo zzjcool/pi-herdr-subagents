@@ -9,7 +9,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPlan } from "../../index.ts";
+import { buildPlan, unknownAgentLine } from "../../index.ts";
+import type { AgentConfig } from "../../src/shared/types.ts";
 
 test("plan: exactly one request shape must be provided", () => {
 	const none = buildPlan({});
@@ -112,4 +113,21 @@ test("plan: chain substitutes {previous} in every step after the first", () => {
 		);
 	}
 	assert.match(plan.steps[1]?.task ?? "", /implement based on/);
+});
+
+test("plan: the unknown-agent refusal is a single, complete line", () => {
+	// This is the ONLY feedback a typo'd agent name produces, and the marker was
+	// accidentally doubled during a refactor without any test noticing. Assert the
+	// exact string so a future rewrite cannot silently re-prefix it.
+	const agents = [{ name: "scout" }, { name: "worker" }] as AgentConfig[];
+	assert.equal(
+		unknownAgentLine(agents, "nope"),
+		'✗ unknown agent "nope". Available: scout, worker',
+	);
+	// One marker, not two (the regression that prompted this test).
+	assert.equal((unknownAgentLine(agents, "nope").match(/✗/g) ?? []).length, 1);
+});
+
+test("plan: the unknown-agent refusal says \"none\" when no agent is known", () => {
+	assert.match(unknownAgentLine([], "nope"), /Available: none$/);
 });

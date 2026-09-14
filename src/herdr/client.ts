@@ -13,6 +13,7 @@
 
 import {
 	type AgentInfo,
+	type AgentKind,
 	type AgentStartResult,
 	type CommandRunner,
 	ErrorCodes,
@@ -297,6 +298,75 @@ function pushLaunchTrailer(
 	args.push(opts.focus ? "--focus" : "--no-focus");
 }
 
+function paneSplitCall(
+	call: Call,
+	opts: {
+		target?: string;
+		current?: boolean;
+		direction: "right" | "down";
+		cwd?: string;
+		env?: Record<string, string>;
+		focus?: boolean;
+	},
+): Promise<HerdrResult<PaneInfo>> {
+	return call<Record<string, unknown>>(paneSplitArgs(opts)).then((res) =>
+		res.ok ? ok(paneFromResult(res.value)) : res,
+	);
+}
+
+/** Build the `pane split` argv (extracted so the API factory stays flat). */
+function paneSplitArgs(opts: {
+	target?: string;
+	current?: boolean;
+	direction: "right" | "down";
+	cwd?: string;
+	env?: Record<string, string>;
+	focus?: boolean;
+}): string[] {
+	const args = ["pane", "split"];
+	if (opts.current) args.push("--current");
+	else if (opts.target) args.push(opts.target);
+	args.push("--direction", opts.direction);
+	pushLaunchTrailer(args, opts);
+	return args;
+}
+
+async function paneReadCall(
+	runner: CommandRunner,
+	paneId: string,
+	opts: { source?: ReadSource; lines?: number },
+): Promise<HerdrResult<string>> {
+	const args = ["pane", "read", paneId];
+	if (opts.source) args.push("--source", opts.source);
+	if (opts.lines) args.push("--lines", String(opts.lines));
+	// F6: `pane read` emits PLAIN TEXT, not JSON.
+	const { stdout, stderr, code } = await runner(args);
+	if (code !== 0 && !stdout)
+		return err({ code: "HERDR_ERROR", message: stderr.slice(0, 500) });
+	return ok(stdout);
+}
+
+function paneReportMetadataArgs(opts: {
+	paneId: string;
+	source: string;
+	displayAgent?: string;
+	title?: string;
+	tokens?: Record<string, string>;
+}): string[] {
+	const args = [
+		"pane",
+		"report-metadata",
+		opts.paneId,
+		"--source",
+		opts.source,
+	];
+	if (opts.displayAgent) args.push("--display-agent", opts.displayAgent);
+	if (opts.title) args.push("--title", opts.title);
+	for (const [k, v] of Object.entries(opts.tokens ?? {}))
+		args.push("--token", `${k}=${v}`);
+	return args;
+}
+
 function createPaneApi(
 	call: Call,
 	runner: CommandRunner,
@@ -311,71 +381,33 @@ function createPaneApi(
 	| "paneReportMetadata"
 > {
 	return {
-		async paneSplit(opts) {
-			const args = ["pane", "split"];
-			if (opts.current) args.push("--current");
-			else if (opts.target) args.push(opts.target);
-			args.push("--direction", opts.direction);
-			pushLaunchTrailer(args, opts);
+		paneSplit: (opts) => paneSplitCall(call, opts),
 
-			const res = await call<Record<string, unknown>>(args);
-			if (!res.ok) return res;
-			return ok(paneFromResult(res.value));
-		},
+		paneClose: (paneId) => call<void>(["pane", "close", paneId]),
 
-		paneClose(paneId) {
-			return call<void>(["pane", "close", paneId]);
-		},
+		paneRead: (paneId, opts = {}) => paneReadCall(runner, paneId, opts),
 
-		async paneRead(paneId, opts = {}) {
-			const args = ["pane", "read", paneId];
-			if (opts.source) args.push("--source", opts.source);
-			if (opts.lines) args.push("--lines", String(opts.lines));
-			// F6: `pane read` emits PLAIN TEXT, not JSON.
-			const { stdout, stderr, code } = await runner(args);
-			if (code !== 0 && !stdout)
-				return err({ code: "HERDR_ERROR", message: stderr.slice(0, 500) });
-			return ok(stdout);
-		},
+		paneList: () =>
+			call<Record<string, unknown>>(["pane", "list"]).then((res) => {
+				if (!res.ok) return res;
+				const panes = asRecord(res.value).panes;
+				return ok(Array.isArray(panes) ? panes.map(toPaneInfo) : []);
+			}),
 
-		async paneList() {
-			const res = await call<Record<string, unknown>>(["pane", "list"]);
-			if (!res.ok) return res;
-			const panes = asRecord(res.value).panes;
-			return ok(Array.isArray(panes) ? panes.map(toPaneInfo) : []);
-		},
+		paneGet: (paneId) =>
+			call<Record<string, unknown>>(["pane", "get", paneId]).then((res) =>
+				res.ok ? ok(paneFromResult(res.value)) : res,
+			),
 
-		async paneGet(paneId) {
-			const res = await call<Record<string, unknown>>(["pane", "get", paneId]);
-			if (!res.ok) return res;
-			return ok(paneFromResult(res.value));
-		},
-
-		async paneProcessInfo(paneId) {
-			const res = await call<Record<string, unknown>>([
+		paneProcessInfo: (paneId) =>
+			call<Record<string, unknown>>([
 				"pane",
 				"process-info",
 				"--pane",
 				paneId,
-			]);
-			if (!res.ok) return res;
-			return ok(toProcessInfo(res.value));
-		},
+			]).then((res) => (res.ok ? ok(toProcessInfo(res.value)) : res)),
 
-		paneReportMetadata(opts) {
-			const args = [
-				"pane",
-				"report-metadata",
-				opts.paneId,
-				"--source",
-				opts.source,
-			];
-			if (opts.displayAgent) args.push("--display-agent", opts.displayAgent);
-			if (opts.title) args.push("--title", opts.title);
-			for (const [k, v] of Object.entries(opts.tokens ?? {}))
-				args.push("--token", `${k}=${v}`);
-			return call<void>(args);
-		},
+		paneReportMetadata: (opts) => call<void>(paneReportMetadataArgs(opts)),
 	};
 }
 
@@ -417,6 +449,55 @@ function createTabApi(
 	};
 }
 
+function agentStartArgs(opts: {
+	name: string;
+	kind: AgentKind;
+	paneId: string;
+	args?: string[];
+	timeoutMs?: number;
+}): string[] {
+	const args = [
+		"agent",
+		"start",
+		opts.name,
+		"--kind",
+		opts.kind,
+		"--pane",
+		opts.paneId,
+	];
+	if (opts.timeoutMs) args.push("--timeout", String(opts.timeoutMs));
+	if (opts.args?.length) args.push("--", ...opts.args);
+	return args;
+}
+
+function agentPromptArgs(
+	target: string,
+	text: string,
+	opts: { wait?: boolean; timeoutMs?: number },
+): string[] {
+	const args = ["agent", "prompt", target, text];
+	if (opts.wait) args.push("--wait");
+	if (opts.timeoutMs) args.push("--timeout", String(opts.timeoutMs));
+	return args;
+}
+
+function agentWaitArgs(
+	target: string,
+	opts: { until?: string[]; timeoutMs?: number },
+): string[] {
+	const args = ["agent", "wait", target];
+	for (const state of opts.until ?? []) args.push("--until", state);
+	if (opts.timeoutMs) args.push("--timeout", String(opts.timeoutMs));
+	return args;
+}
+
+/** `agent list` -> a typed array, tolerating a non-array payload. */
+function agentListFrom(res: HerdrResult<Record<string, unknown>>) {
+	if (!res.ok) return res;
+	const agents = asRecord(res.value).agents;
+	return ok(Array.isArray(agents) ? agents.map(toAgentInfo) : []);
+}
+
 function createAgentApi(
 	call: Call,
 ): Pick<
@@ -429,61 +510,31 @@ function createAgentApi(
 	| "agentWait"
 > {
 	return {
-		async agentStart(opts) {
-			const args = [
-				"agent",
-				"start",
-				opts.name,
-				"--kind",
-				opts.kind,
-				"--pane",
-				opts.paneId,
-			];
-			if (opts.timeoutMs) args.push("--timeout", String(opts.timeoutMs));
-			if (opts.args?.length) args.push("--", ...opts.args);
-
-			const res = await call<Record<string, unknown>>(args, {
+		agentStart: (opts) =>
+			call<Record<string, unknown>>(agentStartArgs(opts), {
 				timeoutMs: (opts.timeoutMs ?? 45_000) + 15_000,
-			});
-			if (!res.ok) return res;
-			return ok(toAgentStartResult(res.value, opts));
-		},
+			}).then((res) => (res.ok ? ok(toAgentStartResult(res.value, opts)) : res)),
 
-		async agentPrompt(target, text, opts = {}) {
-			const args = ["agent", "prompt", target, text];
-			if (opts.wait) args.push("--wait");
-			if (opts.timeoutMs) args.push("--timeout", String(opts.timeoutMs));
-
-			const res = await call<Record<string, unknown>>(args, {
+		agentPrompt: (target, text, opts = {}) =>
+			call<Record<string, unknown>>(agentPromptArgs(target, text, opts), {
 				timeoutMs: (opts.timeoutMs ?? 0) + 20_000,
-			});
-			if (!res.ok) return res;
-			return ok(agentFromResult(res.value));
-		},
+			}).then((res) => (res.ok ? ok(agentFromResult(res.value)) : res)),
 
-		async agentGet(target) {
-			const res = await call<Record<string, unknown>>(["agent", "get", target]);
-			if (!res.ok) return res;
-			return ok(agentFromResult(res.value));
-		},
+		agentGet: (target) =>
+			call<Record<string, unknown>>(["agent", "get", target]).then((res) =>
+				res.ok ? ok(agentFromResult(res.value)) : res,
+			),
 
-		async agentList() {
-			const res = await call<Record<string, unknown>>(["agent", "list"]);
-			if (!res.ok) return res;
-			const agents = asRecord(res.value).agents;
-			return ok(Array.isArray(agents) ? agents.map(toAgentInfo) : []);
-		},
+		agentList: () =>
+			call<Record<string, unknown>>(["agent", "list"]).then(agentListFrom),
 
-		agentSendKeys(target, ...keys) {
-			return call<void>(["agent", "send-keys", target, ...keys]);
-		},
+		agentSendKeys: (target, ...keys) =>
+			call<void>(["agent", "send-keys", target, ...keys]),
 
-		agentWait(target, opts = {}) {
-			const args = ["agent", "wait", target];
-			for (const state of opts.until ?? []) args.push("--until", state);
-			if (opts.timeoutMs) args.push("--timeout", String(opts.timeoutMs));
-			return call<void>(args, { timeoutMs: (opts.timeoutMs ?? 0) + 10_000 });
-		},
+		agentWait: (target, opts = {}) =>
+			call<void>(agentWaitArgs(target, opts), {
+				timeoutMs: (opts.timeoutMs ?? 0) + 10_000,
+			}),
 	};
 }
 

@@ -13,7 +13,9 @@ import {
 	findNearestProjectAgentsDir,
 	discoverAgents,
 	BUILTIN_AGENT_NAMES,
+	BUILTIN_AGENTS_DIR,
 } from "../../src/agents/agents.ts";
+import type { AgentConfig } from "../../src/shared/types.ts";
 
 function withDir<T>(fn: (dir: string) => T): T {
 	const dir = mkdtempSync(path.join(tmpdir(), "agents-test-"));
@@ -22,6 +24,17 @@ function withDir<T>(fn: (dir: string) => T): T {
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+}
+
+/**
+ * Load the roles this package actually ships.
+ *
+ * Uses the module's own `BUILTIN_AGENTS_DIR` rather than re-deriving the path:
+ * the package resolves it with `fileURLToPath`, so a checkout path containing
+ * spaces survives, and there is one definition of where the roles live.
+ */
+function loadBundledAgents(): AgentConfig[] {
+	return loadAgentsFromDir(BUILTIN_AGENTS_DIR, "builtin");
 }
 
 // ─────────────────────────── frontmatter ───────────────────────────
@@ -539,19 +552,48 @@ test("acceptance.criteria is no longer reported unenforced (it is surfaced inste
 	);
 });
 
+test("the reviewer role is read-only", () => {
+	// `scripts/verify-agents.ts` used to check this. It is a real safety property
+	// (a reviewer that can edit the code it reviews is not a reviewer), so it
+	// belongs in the suite rather than in an unrunnable dev script.
+	const reviewer = loadBundledAgents().find((a) => a.name === "reviewer");
+	assert.ok(reviewer, "the reviewer role must load");
+
+	// An ABSENT `tools:` list must fail too, not just a writable one. `buildPiArgs`
+	// only emits `--tools` for a non-empty list, so a role with no `tools:` key is
+	// launched with pi's full default tool set — which includes edit and write.
+	// Asserting only `filter(...) == []` would therefore pass on exactly the
+	// regression this test exists to catch.
+	assert.ok(
+		reviewer.tools?.length,
+		"the reviewer must declare an explicit tool list (an absent list means pi's write-capable defaults)",
+	);
+	const writable = (reviewer.tools ?? []).filter((t) =>
+		["edit", "write"].includes(t),
+	);
+	assert.deepEqual(
+		writable,
+		[],
+		"the reviewer must not be able to edit or write files",
+	);
+});
+
+test("every bundled role ships a non-empty system prompt", () => {
+	// The prompt body IS the product; a truncated or stub role would otherwise
+	// load clean and ship silently. `scripts/verify-agents.ts` used to flag this
+	// with a console warning — nothing asserted it, so it could regress unnoticed.
+	for (const agent of loadBundledAgents()) {
+		assert.ok(
+			agent.systemPrompt.trim().length > 0,
+			`bundled role ${agent.name} must ship a non-empty system prompt`,
+		);
+	}
+});
+
 test("a bundled role reports no unenforced fields", () => {
 	// The shipped roles must not carry inert configuration.
 	for (const name of BUILTIN_AGENT_NAMES) {
-		const agents = loadAgentsFromDir(
-			path.resolve(
-				path.dirname(new URL(import.meta.url).pathname),
-				"..",
-				"..",
-				"agents",
-			),
-			"builtin",
-		);
-		const found = agents.find((a) => a.name === name);
+		const found = loadBundledAgents().find((a) => a.name === name);
 		assert.ok(found, `${name} must load`);
 		assert.deepEqual(
 			found.unenforcedFields ?? [],
@@ -600,15 +642,7 @@ test("toolTimeoutMs is still reported as unenforced", () => {
 });
 
 test("every bundled role declares a timeout budget the runtime honours", () => {
-	const agents = loadAgentsFromDir(
-		path.resolve(
-			path.dirname(new URL(import.meta.url).pathname),
-			"..",
-			"..",
-			"agents",
-		),
-		"builtin",
-	);
+	const agents = loadBundledAgents();
 	for (const name of BUILTIN_AGENT_NAMES) {
 		const found = agents.find((a) => a.name === name);
 		assert.ok(found, `${name} must load`);
@@ -718,15 +752,7 @@ test("acceptance: criteria missing id or must are dropped", () => {
 });
 
 test("acceptance: every bundled role parses its acceptance block", () => {
-	const agents = loadAgentsFromDir(
-		path.resolve(
-			path.dirname(new URL(import.meta.url).pathname),
-			"..",
-			"..",
-			"agents",
-		),
-		"builtin",
-	);
+	const agents = loadBundledAgents();
 	for (const name of BUILTIN_AGENT_NAMES) {
 		const found = agents.find((a) => a.name === name);
 		assert.ok(found, `${name} must load`);

@@ -47,16 +47,24 @@ export function stripThinkingSuffix(model: string): string {
  * This greedy two-pointer scan never revisits a position more than once per
  * pattern literal, so it is bounded by O(text × pattern) with no exponential
  * blow-up. `*` is the only metacharacter: no `?`, no character classes.
+ *
+ * Deliberately a hand-rolled index cursor rather than a `for...of`: the scan
+ * must be able to REWIND `t` to a star position it already passed, which an
+ * array iteration cannot express.
  */
-export function globMatches(text: string, pattern: string): boolean {
+function globMatches(text: string, pattern: string): boolean {
 	let t = 0;
 	let p = 0;
 	// Position of the most recent `*`, and the text index it was matched at.
 	let starP = -1;
 	let starT = 0;
+	// Hoisted: `text` never changes here, and comparing against a local keeps
+	// the scan's hot loop off the property load.
+	const textLen = text.length;
+	const patternLen = pattern.length;
 
-	while (t < text.length) {
-		const pc = p < pattern.length ? pattern[p] : undefined;
+	while (t < textLen) {
+		const pc = p < patternLen ? pattern[p] : undefined;
 		if (pc === "*") {
 			starP = p;
 			starT = t;
@@ -80,8 +88,8 @@ export function globMatches(text: string, pattern: string): boolean {
 	}
 
 	// Any trailing `*`s may match the empty remainder.
-	while (p < pattern.length && pattern[p] === "*") p += 1;
-	return p === pattern.length;
+	while (p < patternLen && pattern[p] === "*") p += 1;
+	return p === patternLen;
 }
 
 /**

@@ -507,5 +507,3 @@ export function isLastTurnComplete(parsed: ParsedSession): boolean {
 export function countAssistantMessages(parsed: ParsedSession): number {
 	return parsed.turns.reduce((n, t) => n + t.assistants.length, 0);
 }
-
-export type { TurnRecord };

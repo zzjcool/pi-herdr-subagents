@@ -497,7 +497,7 @@ const UNENFORCED_FIELDS = [
 ] as const;
 
 /** The subset of `UNENFORCED_FIELDS` this agent actually sets. */
-export function unenforcedFieldsIn(config: AgentConfig): string[] {
+function unenforcedFieldsIn(config: AgentConfig): string[] {
 	const set = config as unknown as Record<string, unknown>;
 	const out: string[] = [];
 	for (const field of UNENFORCED_FIELDS) {

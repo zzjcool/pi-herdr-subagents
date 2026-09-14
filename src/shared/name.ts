@@ -9,6 +9,10 @@
 const MAX_NAME_LENGTH = 32;
 const VALID_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 
+// Intent-named predicate over the herdr name grammar (F17): the regex is an
+// implementation detail, and callers (and tests) should not have to reach for
+// it. Not a type predicate, so it narrows nothing — it exists to name the rule.
+// pi-lens-ignore: pass-through-wrappers
 export function isValidAgentName(name: string): boolean {
 	return VALID_NAME.test(name);
 }

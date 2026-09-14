@@ -477,26 +477,20 @@ export interface TurnRecord {
 // Tool API (design §11)
 // =============================================================================
 
-export type SubagentAction =
-	| "launch"
-	| "continue"
-	| "steer"
-	| "resume"
-	| "retire"
-	| "status"
-	| "collect"
-	| "list";
+// The wire-level request/response shapes are NOT declared here: the tool's
+// schema is authored with TypeBox in `index.ts` (`SubagentParams`), which is
+// what the host validates against and what the model actually sees. Hand-
+// written twins (`SubagentAction`, `LaunchRequest`, `CollectResult`,
+// `SubagentToolParams`) used to live here and had already begun to drift from
+// that schema (and from `Handle`/`collect()`), so they were removed rather
+// than left as a second, silently-wrong source of truth.
 
-export interface LaunchRequest {
-	agent: string;
-	task: string;
-	cwd?: string;
-	model?: string;
-	placement?: Placement;
-	async?: boolean;
-	name?: string;
-}
-
+/**
+ * What a successful `launch()` returns to its caller.
+ *
+ * `child` is the authoritative record — see its doc comment for why callers
+ * must persist THIS rather than rebuild an equivalent object.
+ */
 export interface Handle {
 	name: string;
 	paneId: string | null;
@@ -511,33 +505,6 @@ export interface Handle {
 	 * silently defeated the ownership audit.
 	 */
 	child: ChildRecord;
-}
-
-export interface CollectResult {
-	handle: Handle;
-	state: TaskState;
-	execution: Execution;
-	acceptance: AcceptanceResult;
-	output: string;
-	usage: Usage | null;
-	model: string | null;
-}
-
-export interface SubagentToolParams {
-	action?: SubagentAction;
-	// launch
-	agent?: string;
-	task?: string;
-	tasks?: Array<{ agent: string; task: string; cwd?: string; model?: string }>;
-	chain?: Array<{ agent: string; task: string; cwd?: string; model?: string }>;
-	async?: boolean;
-	model?: string;
-	cwd?: string;
-	placement?: Placement;
-	agentScope?: AgentScope;
-	// control
-	name?: string;
-	message?: string;
 }
 
 // =============================================================================
@@ -595,6 +562,9 @@ export const THINKING_LEVELS = [
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 /** True when `value` is a recognized thinking level. */
+// A one-statement type guard IS the point: it narrows at the call site, which
+// a bare `THINKING_LEVELS.includes(...)` would not.
+// pi-lens-ignore: pass-through-wrappers
 export function isThinkingLevel(value: string): value is ThinkingLevel {
 	return (THINKING_LEVELS as readonly string[]).includes(value);
 }
@@ -603,6 +573,9 @@ export function isThinkingLevel(value: string): value is ThinkingLevel {
 // Errors
 // =============================================================================
 
+// A thin Error subclass: two fields and the two lines of constructor that
+// assign them. It has no responsibilities to split.
+// pi-lens-ignore: large-class
 export class SubagentError extends Error {
 	readonly code: string;
 	readonly details?: unknown;

@@ -128,6 +128,9 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 		].join(" "),
 		parameters: SubagentParams,
 
+		// The parameter list is fixed by Pi's `ExtensionAPI.registerTool`
+		// contract — an options object is not ours to choose.
+		// pi-lens-ignore: long-parameter-list
 		async execute(
 			_id,
 			params,
@@ -455,42 +458,26 @@ async function launchStep(
 	session: LaunchSession,
 	step: { agent: string; task: string; model?: string },
 ): Promise<void> {
-	const { params, agents, settings, results } = session;
-
-	const agent = agents.find((a) => a.name === step.agent);
+	const agent = session.agents.find((a) => a.name === step.agent);
 	if (!agent) {
-		const available = agents.map((a) => a.name).join(", ") || "none";
-		results.push(`✗ unknown agent "${step.agent}". Available: ${available}`);
+		session.results.push(unknownAgentLine(session.agents, step.agent));
 		return;
 	}
 	if (agent.disabled) {
-		results.push(`✗ agent "${step.agent}" is disabled`);
+		session.results.push(`✗ agent "${step.agent}" is disabled`);
 		return;
 	}
 
-	const resolved = resolveModel({
-		agent,
-		...((step.model ?? params.model)
-			? { override: step.model ?? params.model }
-			: {}),
-		...(session.dispatchModel ? { dispatchModel: session.dispatchModel } : {}),
-		...(settings.defaultModel ? { defaultModel: settings.defaultModel } : {}),
-		// Enables `agentOverridesByProvider.<provider>.<agent>` (design §6.2,
-		// level 2). Without this the provider-scoped overrides parsed from
-		// settings would never apply.
-		...(session.dispatchModel
-			? { parentProvider: providerOf(session.dispatchModel) }
-			: {}),
-		settings,
-	});
+	const model = resolveStepModel(session, agent, step);
+	const resolved = model.resolved;
 
 	const violation = checkModelScope(
 		resolved.model,
-		settings.modelScope,
+		session.settings.modelScope,
 		"explicit",
 	);
 	if (violation && violation.severity === "error") {
-		results.push(`✗ ${violation.message}`);
+		session.results.push(`✗ ${violation.message}`);
 		return;
 	}
 
@@ -502,20 +489,18 @@ async function launchStep(
 			agent,
 			task: step.task,
 			...(resolved.model ? { model: resolved.model } : {}),
-			...(params.placement
-				? { placement: params.placement as Placement }
-				: {}),
+			...(model.placement ? { placement: model.placement } : {}),
 		});
 		await session.store.addChild(session.runId, handle.child);
 		session.handles.push(handle.name);
 		if (agent.timeoutMs !== undefined) {
 			session.timeoutByName.set(handle.name, agent.timeoutMs);
 		}
-		results.push(`▶ ${handle.name} (${agent.name}) pane=${handle.paneId}`);
+		session.results.push(`▶ ${handle.name} (${agent.name}) pane=${handle.paneId}`);
 		// Surface frontmatter keys that are accepted but inert, so a user does
 		// not believe an unenforced setting is protecting them.
 		if (agent.unenforcedFields?.length) {
-			results.push(
+			session.results.push(
 				`  ⚠ ${agent.name} sets fields that are not enforced yet: ` +
 					`${agent.unenforcedFields.join(", ")}`,
 			);
@@ -525,8 +510,54 @@ async function launchStep(
 			error instanceof SubagentError
 				? `${error.code}: ${error.message}`
 				: String(error);
-		results.push(`✗ ${step.agent}: ${message}`);
+		session.results.push(`✗ ${step.agent}: ${message}`);
 	}
+}
+
+/**
+ * The complete "no such agent" refusal line, marker included.
+ *
+ * Exported because the refusal lines are the ONLY feedback a caller gets on a
+ * typo'd agent name, and this one regressed once to a doubled `✗` marker with
+ * no test noticing. Owning the marker here (rather than at the call site)
+ * makes that mistake impossible to repeat.
+ */
+export function unknownAgentLine(
+	agents: AgentConfig[],
+	requested: string,
+): string {
+	const available = agents.map((a) => a.name).join(", ") || "none";
+	return `✗ unknown agent "${requested}". Available: ${available}`;
+}
+
+/**
+ * Resolve the model and placement a step will launch with.
+ *
+ * `parentProvider` is derived from the dispatching model so that
+ * `agentOverridesByProvider.<provider>.<agent>` (design §6.2, level 2) applies;
+ * without it the provider-scoped overrides parsed from settings are dead.
+ */
+function resolveStepModel(
+	session: LaunchSession,
+	agent: AgentConfig,
+	step: { model?: string },
+): { resolved: ReturnType<typeof resolveModel>; placement?: Placement } {
+	const { params, settings } = session;
+	const override = step.model ?? params.model;
+	const resolved = resolveModel({
+		agent,
+		...(override ? { override } : {}),
+		...(session.dispatchModel ? { dispatchModel: session.dispatchModel } : {}),
+		...(settings.defaultModel ? { defaultModel: settings.defaultModel } : {}),
+		...(session.dispatchModel
+			? { parentProvider: providerOf(session.dispatchModel) }
+			: {}),
+		settings,
+	});
+	return {
+		resolved,
+		...(params.placement ? { placement: params.placement as Placement } : {}),
+	};
 }
 
 /** Wait for each launched child's turn, appending its outcome. */

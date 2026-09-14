@@ -9,8 +9,8 @@
 import { spawn } from "node:child_process";
 import type { CommandRunner } from "../shared/types.ts";
 
-export const HERDR_BIN_ENV = "HERDR_BIN";
-export const HERDR_BIN_PATH_ENV = "HERDR_BIN_PATH";
+const HERDR_BIN_ENV = "HERDR_BIN";
+const HERDR_BIN_PATH_ENV = "HERDR_BIN_PATH";
 
 export function resolveHerdrBin(env: NodeJS.ProcessEnv = process.env): string {
 	return env[HERDR_BIN_ENV] || env[HERDR_BIN_PATH_ENV] || "herdr";
