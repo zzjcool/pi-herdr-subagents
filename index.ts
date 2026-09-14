@@ -11,7 +11,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { createHerdrClient } from "./src/herdr/client.ts";
 import { discoverAgents } from "./src/agents/agents.ts";
 import {
@@ -31,6 +31,7 @@ import {
 	type AgentScope,
 	DEFAULTS,
 	ErrorCodes,
+	type HerdrClient,
 	type Placement,
 	SubagentError,
 } from "./src/shared/types.ts";
@@ -108,6 +109,18 @@ const SubagentParams = Type.Object({
 	),
 });
 
+/** The validated tool parameters, as the model supplies them. */
+type SubagentParams = Static<typeof SubagentParams>;
+
+/** Everything the two execution paths need from the request. */
+interface RunContext {
+	params: SubagentParams;
+	client: HerdrClient;
+	store: RunStore;
+	cwd: string;
+	agents: AgentConfig[];
+}
+
 // ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
@@ -142,295 +155,317 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 			const action = params.action ?? "launch";
 			const cwd = params.cwd ?? ctx.cwd;
 			const store = new RunStore({ rootDir: path.join(cwd, ".pi-subagents") });
+			const { agents, settings } = loadCatalog(ctx.cwd, cwd, params.agentScope);
 
-			// ── agent discovery ────────────────────────────────────────────────
-			const scope: AgentScope = params.agentScope ?? "user";
-
-			const settingsPath = path.join(ctx.cwd, ".pi", "settings.json");
-			const settings = resolveSubagentSettings(
-				loadSubagentSettings({ userSettingsPath: settingsPath }),
-				{},
-			);
-
-			// The bundled roles ship with the package, so a fresh install has a
-			// working set with no user setup at all. `subagents.disableBuiltins`
-			// opts out for users who want only their own definitions.
-			const discovery = discoverAgents(cwd, scope, {
-				includeBuiltin: settings.disableBuiltins !== true,
-			});
-
-			const agents = applyDefaultModel(
-				applyAgentOverrides(discovery.agents, settings.agentOverrides),
-				settings.defaultModel,
-			);
-
-			// ── control actions ───────────────────────────────────────────────
 			if (action === "list") return listAgents(agents);
 
+			// Control actions address an EXISTING child; launch-family actions
+			// create new ones. The two share almost nothing, so they are separate.
 			if (action !== "launch") {
-				if (!params.name) {
-					return fail(
-						`\`name\` is required for the "${action}" action.`,
-						ErrorCodes.INVALID_PARAMS,
-					);
-				}
-				const found = findChild(store.listRuns(), params.name);
-				if (!found) {
-					// Child records live under `<cwd>/.pi-subagents`, so a control call
-					// from a different directory cannot see them. Say so explicitly —
-					// a bare "unknown child" sends the caller hunting for a typo.
-					const known = store
-						.listRuns()
-						.flatMap((r) => r.children.map((c) => c.name));
-					return fail(
-						`unknown child: ${params.name} (no run under ${cwd}/.pi-subagents` +
-							`${known.length ? `; known here: ${known.join(", ")}` : ""}). ` +
-							`Child records are scoped to the \`cwd\` they were launched from — ` +
-							`pass the same \`cwd\` you used for \`launch\`.`,
-						ErrorCodes.NOT_FOUND,
-					);
-				}
-
-				// Rehydrate from the persisted run: each tool invocation runs in a
-				// fresh process, so in-memory orchestrator state is gone and the
-				// control actions must be driven from run.json.
-				//
-				// `onChildUpdate` is synchronous but RunStore is async, so the
-				// callback only mirrors state in memory; persistence happens
-				// explicitly below, after the operation completes.
-				const orchestrator = new Orchestrator({
-					client,
-					runDir: store.runDir(found.runId),
-					cwd,
-				});
-				orchestrator.restore(found.run);
-
-				if (action === "status") return renderChild(found.child, "status");
-
-				if (action === "steer") {
-					if (!params.message)
-						return fail(
-							"`message` is required for steer.",
-							ErrorCodes.INVALID_PARAMS,
-						);
-					try {
-						await orchestrator.steer(params.name, params.message);
-						return ok(`Steered ${params.name}.`);
-					} catch (error) {
-						return fail(`steer failed: ${String(error)}`, ErrorCodes.NOT_FOUND);
-					}
-				}
-
-				if (action === "collect") {
-					try {
-						// Honour the agent's own `timeoutMs`: the bundled roles declare
-						// budgets (worker 30min, oracle 20min) that were previously
-						// parsed and then ignored in favour of the global default.
-						const agentDef = agents.find((a) => a.name === found.child.agent);
-						const collected = await orchestrator.collect(params.name, {
-							timeoutMs: agentDef?.timeoutMs ?? DEFAULTS.turnTimeoutMs,
-						});
-						await persistChild(store, found.runId, orchestrator, params.name);
-						return ok(renderCollect(params.name, collected));
-					} catch (error) {
-						return fail(
-							`collect failed: ${String(error)}`,
-							ErrorCodes.NOT_FOUND,
-						);
-					}
-				}
-
-				if (action === "retire") {
-					// Actually recycle: snapshot the outcome, exit the agent, close the pane.
-					try {
-						const child = await orchestrator.retire(params.name);
-						await persistChild(store, found.runId, orchestrator, params.name);
-						return ok(
-							`Retired ${params.name} (execution=${child.execution?.status ?? "unknown"}). ` +
-								`Pane closed; session kept for resume: ${child.sessionFile}`,
-						);
-					} catch (error) {
-						return fail(
-							`retire failed: ${String(error)}`,
-							ErrorCodes.RETIRE_FAILED,
-						);
-					}
-				}
-
-				if (action === "continue" || action === "resume") {
-					if (!params.message) {
-						return fail(
-							`\`message\` is required for ${action}.`,
-							ErrorCodes.INVALID_PARAMS,
-						);
-					}
-					const agentDef = agents.find((a) => a.name === found.child.agent);
-					if (!agentDef) {
-						return fail(
-							`agent "${found.child.agent}" is no longer defined`,
-							ErrorCodes.UNKNOWN_AGENT,
-						);
-					}
-
-					try {
-						// A live agent is prompted in place; an exited one is rebuilt
-						// from its persisted session so context survives.
-						const agentState = await client.agentGet(params.name);
-						const alive = agentState.ok;
-						if (alive) {
-							await orchestrator.steer(params.name, params.message);
-							return ok(
-								`${action === "resume" ? "Resumed" : "Continued"} ${params.name} (live agent prompted).`,
-							);
-						}
-
-						const handle = await orchestrator.launch({
-							agent: agentDef,
-							task: params.message,
-							name: params.name,
-							...(found.child.model ? { model: found.child.model } : {}),
-						});
-						return ok(
-							`Resumed ${handle.name} from its session (pane ${handle.paneId}). ` +
-								`Context preserved from ${handle.sessionFile}`,
-						);
-					} catch (error) {
-						return fail(
-							`${action} failed: ${String(error)}`,
-							ErrorCodes.START_FAILED,
-						);
-					}
-				}
-
-				return fail(`unhandled action: ${action}`, ErrorCodes.INVALID_PARAMS);
+				return controlAction({ action, params, client, store, cwd, agents });
 			}
 
-			// ── launch-family actions ─────────────────────────────────────────
-			const dispatchModel = ctx.model
-				? `${ctx.model.provider}/${ctx.model.id}`
-				: undefined;
-
-			const plan = buildPlan(params);
-			if (!plan.ok) return fail(plan.message, ErrorCodes.INVALID_PARAMS);
-
-			const run = store.createRun({ task: plan.task, cwd });
-			const orchestrator = new Orchestrator({
-				client,
-				runDir: store.runDir(run.runId),
-				cwd,
-				// Enforce the session spawn budget so a runaway fan-out cannot
-				// exhaust the machine (ErrorCodes.BUDGET_EXCEEDED).
-				maxSpawns: settings.maxSubagentSpawnsPerSession ?? null,
-			});
-
-			const results: string[] = [];
-			const handles: string[] = [];
-			// Per-child collect budget, so the agent's own `timeoutMs` is honoured
-			// rather than every child sharing the global default.
-			const timeoutByName = new Map<string, number>();
-
-			for (const step of plan.steps) {
-				const agent = agents.find((a) => a.name === step.agent);
-				if (!agent) {
-					results.push(
-						`✗ unknown agent "${step.agent}". Available: ${agents.map((a) => a.name).join(", ") || "none"}`,
-					);
-					continue;
-				}
-				if (agent.disabled) {
-					results.push(`✗ agent "${step.agent}" is disabled`);
-					continue;
-				}
-
-				const resolved = resolveModel({
-					agent,
-					...((step.model ?? params.model)
-						? { override: step.model ?? params.model }
-						: {}),
-					...(dispatchModel ? { dispatchModel } : {}),
-					...(settings.defaultModel
-						? { defaultModel: settings.defaultModel }
-						: {}),
-					// Enables `agentOverridesByProvider.<provider>.<agent>` (design
-					// §6.2, level 2). Without this the provider-scoped overrides
-					// parsed from settings would never apply.
-					...(dispatchModel
-						? { parentProvider: providerOf(dispatchModel) }
-						: {}),
-					settings,
-				});
-
-				const violation = checkModelScope(
-					resolved.model,
-					settings.modelScope,
-					"explicit",
-				);
-				if (violation && violation.severity === "error") {
-					results.push(`✗ ${violation.message}`);
-					continue;
-				}
-
-				try {
-					// Let `launch()` allocate: it consults the GLOBAL herdr name
-					// namespace. Pre-allocating here from local state alone would
-					// bypass that check and collide with another session's agent.
-					const handle = await orchestrator.launch({
-						agent,
-						task: step.task,
-						...(resolved.model ? { model: resolved.model } : {}),
-						...(params.placement
-							? { placement: params.placement as Placement }
-							: {}),
-					});
-					await store.addChild(run.runId, handle.child);
-					handles.push(handle.name);
-					if (agent.timeoutMs !== undefined) {
-						timeoutByName.set(handle.name, agent.timeoutMs);
-					}
-					results.push(
-						`▶ ${handle.name} (${agent.name}) pane=${handle.paneId}`,
-					);
-					// Surface frontmatter keys that are accepted but inert, so a user
-					// does not believe an unenforced setting is protecting them.
-					if (agent.unenforcedFields?.length) {
-						results.push(
-							`  ⚠ ${agent.name} sets fields that are not enforced yet: ` +
-								`${agent.unenforcedFields.join(", ")}`,
-						);
-					}
-				} catch (error) {
-					const message =
-						error instanceof SubagentError
-							? `${error.code}: ${error.message}`
-							: String(error);
-					results.push(`✗ ${step.agent}: ${message}`);
-				}
-			}
-
-			// ── collect (unless async) ────────────────────────────────────────
-			const isAsync = params.async ?? true;
-			if (!isAsync && handles.length > 0) {
-				for (const name of handles) {
-					try {
-						const collected = await orchestrator.collect(name, {
-							timeoutMs: timeoutByName.get(name) ?? DEFAULTS.turnTimeoutMs,
-						});
-						results.push(renderCollect(name, collected));
-					} catch (error) {
-						results.push(`✗ ${name}: collect failed: ${String(error)}`);
-					}
-				}
-			}
-
-			// Persist whatever the run produced (children + their outcomes).
-			for (const name of handles)
-				await persistChild(store, run.runId, orchestrator, name);
-			return {
-				content: [{ type: "text", text: results.join("\n") }],
-				details: { runId: run.runId, handles, async: isAsync },
-			};
+			return launchFamily({ params, ctx, client, store, cwd, agents, settings });
 		},
 	});
+}
+
+/**
+ * Load the effective agent catalog for a request.
+ *
+ * Settings come from the PROJECT (`.pi/settings.json` under the session cwd),
+ * while agent directories are resolved from the run's `cwd`. Bundled roles are
+ * included unless `subagents.disableBuiltins` opts out.
+ */
+function loadCatalog(
+	sessionCwd: string,
+	runCwd: string,
+	scope: AgentScope | undefined,
+): { agents: AgentConfig[]; settings: ReturnType<typeof resolveSubagentSettings> } {
+	const settingsPath = path.join(sessionCwd, ".pi", "settings.json");
+	const settings = resolveSubagentSettings(
+		loadSubagentSettings({ userSettingsPath: settingsPath }),
+		{},
+	);
+	const discovery = discoverAgents(runCwd, scope ?? "user", {
+		includeBuiltin: settings.disableBuiltins !== true,
+	});
+	return {
+		agents: applyDefaultModel(
+			applyAgentOverrides(discovery.agents, settings.agentOverrides),
+			settings.defaultModel,
+		),
+		settings,
+	};
+}
+
+/**
+ * Act on an EXISTING child: status, steer, collect, retire, continue, resume.
+ *
+ * Each tool invocation runs in a fresh process, so the orchestrator is rebuilt
+ * from `run.json` rather than from memory. `onChildUpdate` is synchronous while
+ * RunStore is async, so persistence happens explicitly after each operation.
+ */
+async function controlAction(input: {
+	action: string;
+	params: SubagentParams;
+	client: HerdrClient;
+	store: RunStore;
+	cwd: string;
+	agents: AgentConfig[];
+}): Promise<AgentToolResult<unknown>> {
+	const { action, params, client, store, cwd, agents } = input;
+
+	if (!params.name) {
+		return fail(
+			`\`name\` is required for the "${action}" action.`,
+			ErrorCodes.INVALID_PARAMS,
+		);
+	}
+
+	const found = findChild(store.listRuns(), params.name);
+	if (!found) {
+		// Child records live under `<cwd>/.pi-subagents`, so a control call from a
+		// different directory cannot see them. Say so explicitly — a bare
+		// "unknown child" sends the caller hunting for a typo.
+		const known = store.listRuns().flatMap((r) => r.children.map((c) => c.name));
+		return fail(
+			`unknown child: ${params.name} (no run under ${cwd}/.pi-subagents` +
+				`${known.length ? `; known here: ${known.join(", ")}` : ""}). ` +
+				`Child records are scoped to the \`cwd\` they were launched from — ` +
+				`pass the same \`cwd\` you used for \`launch\`.`,
+			ErrorCodes.NOT_FOUND,
+		);
+	}
+
+	const orchestrator = new Orchestrator({
+		client,
+		runDir: store.runDir(found.runId),
+		cwd,
+	});
+	orchestrator.restore(found.run);
+
+	if (action === "status") return renderChild(found.child, "status");
+
+	if (action === "steer") {
+		if (!params.message)
+			return fail("`message` is required for steer.", ErrorCodes.INVALID_PARAMS);
+		try {
+			await orchestrator.steer(params.name, params.message);
+			return ok(`Steered ${params.name}.`);
+		} catch (error) {
+			return fail(`steer failed: ${String(error)}`, ErrorCodes.NOT_FOUND);
+		}
+	}
+
+	if (action === "collect") {
+		try {
+			// Honour the agent's own `timeoutMs`: the bundled roles declare budgets
+			// (worker 30min, oracle 20min) that were previously parsed and ignored.
+			const agentDef = agents.find((a) => a.name === found.child.agent);
+			const collected = await orchestrator.collect(params.name, {
+				timeoutMs: agentDef?.timeoutMs ?? DEFAULTS.turnTimeoutMs,
+			});
+			await persistChild(store, found.runId, orchestrator, params.name);
+			return ok(renderCollect(params.name, collected));
+		} catch (error) {
+			return fail(`collect failed: ${String(error)}`, ErrorCodes.NOT_FOUND);
+		}
+	}
+
+	if (action === "retire") {
+		// Actually recycle: snapshot the outcome, exit the agent, close the pane.
+		try {
+			const child = await orchestrator.retire(params.name);
+			await persistChild(store, found.runId, orchestrator, params.name);
+			return ok(
+				`Retired ${params.name} (execution=${child.execution?.status ?? "unknown"}). ` +
+					`Pane closed; session kept for resume: ${child.sessionFile}`,
+			);
+		} catch (error) {
+			return fail(`retire failed: ${String(error)}`, ErrorCodes.RETIRE_FAILED);
+		}
+	}
+
+	if (action === "continue" || action === "resume") {
+		if (!params.message) {
+			return fail(
+				`\`message\` is required for ${action}.`,
+				ErrorCodes.INVALID_PARAMS,
+			);
+		}
+		const agentDef = agents.find((a) => a.name === found.child.agent);
+		if (!agentDef) {
+			return fail(
+				`agent "${found.child.agent}" is no longer defined`,
+				ErrorCodes.UNKNOWN_AGENT,
+			);
+		}
+
+		try {
+			// A live agent is prompted in place; an exited one is rebuilt from its
+			// persisted session so context survives.
+			const agentState = await client.agentGet(params.name);
+			if (agentState.ok) {
+				await orchestrator.steer(params.name, params.message);
+				return ok(
+					`${action === "resume" ? "Resumed" : "Continued"} ${params.name} (live agent prompted).`,
+				);
+			}
+
+			const handle = await orchestrator.launch({
+				agent: agentDef,
+				task: params.message,
+				name: params.name,
+				...(found.child.model ? { model: found.child.model } : {}),
+			});
+			return ok(
+				`Resumed ${handle.name} from its session (pane ${handle.paneId}). ` +
+					`Context preserved from ${handle.sessionFile}`,
+			);
+		} catch (error) {
+			return fail(`${action} failed: ${String(error)}`, ErrorCodes.START_FAILED);
+		}
+	}
+
+	return fail(`unhandled action: ${action}`, ErrorCodes.INVALID_PARAMS);
+}
+
+/**
+ * Create children: a single `agent`+`task`, a `tasks[]` fan-out, or a `chain[]`.
+ *
+ * One child failure must not abort the rest, so each step reports its own line.
+ */
+async function launchFamily(input: {
+	params: SubagentParams;
+	ctx: ExtensionContext;
+	client: HerdrClient;
+	store: RunStore;
+	cwd: string;
+	agents: AgentConfig[];
+	settings: ReturnType<typeof resolveSubagentSettings>;
+}): Promise<AgentToolResult<unknown>> {
+	const { params, ctx, client, store, cwd, agents, settings } = input;
+
+	const plan = buildPlan(params);
+	if (!plan.ok) return fail(plan.message, ErrorCodes.INVALID_PARAMS);
+
+	const run = store.createRun({ task: plan.task, cwd });
+	const orchestrator = new Orchestrator({
+		client,
+		runDir: store.runDir(run.runId),
+		cwd,
+		// Enforce the session spawn budget so a runaway fan-out cannot exhaust
+		// the machine (ErrorCodes.BUDGET_EXCEEDED).
+		maxSpawns: settings.maxSubagentSpawnsPerSession ?? null,
+	});
+
+	const dispatchModel = ctx.model
+		? `${ctx.model.provider}/${ctx.model.id}`
+		: undefined;
+
+	const results: string[] = [];
+	const handles: string[] = [];
+	// Per-child collect budget, so each child's own `timeoutMs` is honoured
+	// rather than every child sharing the global default.
+	const timeoutByName = new Map<string, number>();
+
+	for (const step of plan.steps) {
+		const agent = agents.find((a) => a.name === step.agent);
+		if (!agent) {
+			results.push(
+				`✗ unknown agent "${step.agent}". Available: ${agents.map((a) => a.name).join(", ") || "none"}`,
+			);
+			continue;
+		}
+		if (agent.disabled) {
+			results.push(`✗ agent "${step.agent}" is disabled`);
+			continue;
+		}
+
+		const resolved = resolveModel({
+			agent,
+			...((step.model ?? params.model)
+				? { override: step.model ?? params.model }
+				: {}),
+			...(dispatchModel ? { dispatchModel } : {}),
+			...(settings.defaultModel ? { defaultModel: settings.defaultModel } : {}),
+			// Enables `agentOverridesByProvider.<provider>.<agent>` (design §6.2,
+			// level 2). Without this the provider-scoped overrides parsed from
+			// settings would never apply.
+			...(dispatchModel ? { parentProvider: providerOf(dispatchModel) } : {}),
+			settings,
+		});
+
+		const violation = checkModelScope(
+			resolved.model,
+			settings.modelScope,
+			"explicit",
+		);
+		if (violation && violation.severity === "error") {
+			results.push(`✗ ${violation.message}`);
+			continue;
+		}
+
+		try {
+			// Let `launch()` allocate: it consults the GLOBAL herdr name namespace.
+			// Pre-allocating here from local state alone would bypass that check and
+			// collide with another session's agent.
+			const handle = await orchestrator.launch({
+				agent,
+				task: step.task,
+				...(resolved.model ? { model: resolved.model } : {}),
+				...(params.placement
+					? { placement: params.placement as Placement }
+					: {}),
+			});
+			await store.addChild(run.runId, handle.child);
+			handles.push(handle.name);
+			if (agent.timeoutMs !== undefined) {
+				timeoutByName.set(handle.name, agent.timeoutMs);
+			}
+			results.push(`▶ ${handle.name} (${agent.name}) pane=${handle.paneId}`);
+			// Surface frontmatter keys that are accepted but inert, so a user does
+			// not believe an unenforced setting is protecting them.
+			if (agent.unenforcedFields?.length) {
+				results.push(
+					`  ⚠ ${agent.name} sets fields that are not enforced yet: ` +
+						`${agent.unenforcedFields.join(", ")}`,
+				);
+			}
+		} catch (error) {
+			const message =
+				error instanceof SubagentError
+					? `${error.code}: ${error.message}`
+					: String(error);
+			results.push(`✗ ${step.agent}: ${message}`);
+		}
+	}
+
+	// Collect inline unless the caller asked for async (the default).
+	const isAsync = params.async ?? true;
+	if (!isAsync) {
+		for (const name of handles) {
+			try {
+				const collected = await orchestrator.collect(name, {
+					timeoutMs: timeoutByName.get(name) ?? DEFAULTS.turnTimeoutMs,
+				});
+				results.push(renderCollect(name, collected));
+			} catch (error) {
+				results.push(`✗ ${name}: collect failed: ${String(error)}`);
+			}
+		}
+	}
+
+	// Persist whatever the run produced (children + their outcomes).
+	for (const name of handles) {
+		await persistChild(store, run.runId, orchestrator, name);
+	}
+
+	return {
+		content: [{ type: "text", text: results.join("\n") }],
+		details: { runId: run.runId, handles, async: isAsync },
+	};
 }
 
 // ---------------------------------------------------------------------------

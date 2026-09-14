@@ -334,102 +334,110 @@ export function parseAgentDocument(
 	const description = str(fm.description);
 	if (!name || !description) return null;
 
-	// Validate enums; an invalid value falls back to the default rather than
-	// failing the whole file, so a typo degrades instead of breaking discovery.
-	const rawKind = str(fm.kind);
-	const kind: AgentKind =
-		rawKind && VALID_KINDS.has(rawKind) ? (rawKind as AgentKind) : "pi";
-
-	const rawPlacement = str(fm.placement);
-	const placement: Placement | undefined =
-		rawPlacement && VALID_PLACEMENTS.has(rawPlacement)
-			? (rawPlacement as Placement)
-			: undefined;
-
-	const rawOnBlocked = str(fm.onBlocked);
-	const onBlocked: OnBlockedPolicy | undefined =
-		rawOnBlocked && VALID_ON_BLOCKED.has(rawOnBlocked)
-			? (rawOnBlocked as OnBlockedPolicy)
-			: undefined;
-
-	const rawMode = str(fm.systemPromptMode);
-	const systemPromptMode: SystemPromptMode =
-		rawMode === "append" ? "append" : "replace";
-
 	const config: AgentConfig = {
 		name,
 		description,
-		systemPromptMode,
+		systemPromptMode: promptMode(fm.systemPromptMode),
 		// Defaults chosen to match pi-subagents conventions (design §6.1).
 		inheritProjectContext: bool(fm.inheritProjectContext) ?? true,
 		inheritSkills: bool(fm.inheritSkills) ?? false,
-		kind,
+		kind: enumOr<AgentKind>(fm.kind, VALID_KINDS, "pi"),
 		systemPrompt: body,
 		source,
 		filePath,
 		frontmatterFields: new Set(Object.keys(frontmatter)),
 	};
 
-	const model = str(fm.model);
-	if (model) config.model = model;
-	const fallback = list(fm.fallbackModels);
-	if (fallback) config.fallbackModels = fallback;
-
-	const thinking = fm.thinking;
-	if (thinking === false || thinking === "false") config.thinking = false;
-	else if (str(thinking)) config.thinking = str(thinking);
-
-	const tools = list(fm.tools);
-	if (tools) config.tools = tools;
-	const skills = listOrFalse(fm.skills);
-	if (skills !== undefined) config.skills = skills;
-	const skillPath = list(fm.skillPath);
-	if (skillPath) config.skillPath = skillPath;
-	const extensions = list(fm.extensions);
-	if (extensions) config.extensions = extensions;
-	const subagentOnly = list(fm.subagentOnlyExtensions);
-	if (subagentOnly) config.subagentOnlyExtensions = subagentOnly;
-	const alias = list(fm.alias) ?? list(fm.aliases);
-	if (alias) config.alias = alias;
-
-	const output = str(fm.output);
-	if (output) config.output = output;
-	const defaultReads = list(fm.defaultReads);
-	if (defaultReads) config.defaultReads = defaultReads;
-
-	const progress = bool(fm.defaultProgress);
-	if (progress !== undefined) config.defaultProgress = progress;
-	const async = bool(fm.async);
-	if (async !== undefined) config.async = async;
-	const timeoutMs = int(fm.timeoutMs);
-	if (timeoutMs !== undefined) config.timeoutMs = timeoutMs;
-	const toolTimeoutMs = int(fm.toolTimeoutMs);
-	if (toolTimeoutMs !== undefined) config.toolTimeoutMs = toolTimeoutMs;
-	const guard = bool(fm.completionGuard);
-	if (guard !== undefined) config.completionGuard = guard;
-	const depth = int(fm.maxSubagentDepth);
-	if (depth !== undefined) config.maxSubagentDepth = depth;
-	const nested = bool(fm.allowNestedSubagents);
-	if (nested !== undefined) config.allowNestedSubagents = nested;
-	const disabled = bool(fm.disabled);
-	if (disabled !== undefined) config.disabled = disabled;
-	const worktree = bool(fm.worktree);
-	if (worktree !== undefined) config.worktree = worktree;
-	const steer = bool(fm.steer);
-	if (steer !== undefined) config.steer = steer;
-
-	const acceptance = parseAcceptance(fm.acceptance);
-	if (acceptance) config.acceptance = acceptance;
-	const toolBudget = parseBudget(fm.toolBudget);
-	if (toolBudget) config.toolBudget = toolBudget;
-	const turnBudget = parseTurnBudget(fm.turnBudget);
-	if (turnBudget) config.turnBudget = turnBudget;
-
-	if (placement) config.placement = placement;
-	if (onBlocked) config.onBlocked = onBlocked;
+	applyModelFields(config, fm);
+	applyCapabilityFields(config, fm);
+	applyBehaviorFields(config, fm);
+	applyHerdrFields(config, fm);
 
 	config.unenforcedFields = unenforcedFieldsIn(config);
 	return config;
+}
+
+/**
+ * Assign `value` when present. Keeps the field appliers below free of the
+ * repeated `if (x !== undefined)` shape that made this parser hard to scan.
+ */
+function setIf<T>(target: object, key: string, value: T | undefined): void {
+	if (value !== undefined) (target as Record<string, unknown>)[key] = value;
+}
+
+/**
+ * Pick a value only when it is a member of `allowed`.
+ * An invalid enum degrades to the default rather than failing the whole file,
+ * so a typo in one field cannot break discovery.
+ */
+function enumOr<T extends string>(
+	value: unknown,
+	allowed: ReadonlySet<string>,
+	fallback: T,
+): T {
+	const raw = str(value);
+	return raw && allowed.has(raw) ? (raw as T) : fallback;
+}
+
+/** `systemPromptMode` is a closed set of two; anything else means `replace`. */
+function promptMode(value: unknown): SystemPromptMode {
+	return str(value) === "append" ? "append" : "replace";
+}
+
+/** `model`, `fallbackModels`, `thinking` (design §6.2). */
+function applyModelFields(config: AgentConfig, fm: AgentFrontmatter): void {
+	setIf(config, "model", str(fm.model));
+	setIf(config, "fallbackModels", list(fm.fallbackModels));
+
+	// `thinking: false` disables reasoning and must stay distinct from absent.
+	const thinking = fm.thinking;
+	if (thinking === false || thinking === "false") config.thinking = false;
+	else setIf(config, "thinking", str(thinking));
+}
+
+/** tools / skills / extensions / reads — what the child may reach. */
+function applyCapabilityFields(
+	config: AgentConfig,
+	fm: AgentFrontmatter,
+): void {
+	setIf(config, "tools", list(fm.tools));
+	// `skills: false` disables inheritance, so it is not the same as absent.
+	setIf(config, "skills", listOrFalse(fm.skills));
+	setIf(config, "skillPath", list(fm.skillPath));
+	setIf(config, "extensions", list(fm.extensions));
+	setIf(config, "subagentOnlyExtensions", list(fm.subagentOnlyExtensions));
+	setIf(config, "alias", list(fm.alias) ?? list(fm.aliases));
+	setIf(config, "output", str(fm.output));
+	setIf(config, "defaultReads", list(fm.defaultReads));
+}
+
+/** Budgets, guards and lifecycle flags. */
+function applyBehaviorFields(config: AgentConfig, fm: AgentFrontmatter): void {
+	setIf(config, "defaultProgress", bool(fm.defaultProgress));
+	setIf(config, "async", bool(fm.async));
+	setIf(config, "timeoutMs", int(fm.timeoutMs));
+	setIf(config, "toolTimeoutMs", int(fm.toolTimeoutMs));
+	setIf(config, "completionGuard", bool(fm.completionGuard));
+	setIf(config, "maxSubagentDepth", int(fm.maxSubagentDepth));
+	setIf(config, "allowNestedSubagents", bool(fm.allowNestedSubagents));
+	setIf(config, "disabled", bool(fm.disabled));
+	setIf(config, "worktree", bool(fm.worktree));
+	setIf(config, "steer", bool(fm.steer));
+	setIf(config, "acceptance", parseAcceptance(fm.acceptance));
+	setIf(config, "toolBudget", parseBudget(fm.toolBudget));
+	setIf(config, "turnBudget", parseTurnBudget(fm.turnBudget));
+}
+
+/** herdr-specific placement and blocking policy. */
+function applyHerdrFields(config: AgentConfig, fm: AgentFrontmatter): void {
+	const placement = str(fm.placement);
+	if (placement && VALID_PLACEMENTS.has(placement)) {
+		config.placement = placement as Placement;
+	}
+	const onBlocked = str(fm.onBlocked);
+	if (onBlocked && VALID_ON_BLOCKED.has(onBlocked)) {
+		config.onBlocked = onBlocked as OnBlockedPolicy;
+	}
 }
 
 /**
