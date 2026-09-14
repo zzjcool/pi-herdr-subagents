@@ -323,6 +323,9 @@ test("regression: launch propagates lineage and depth to the child pane", async 
 		});
 
 		await orchestrator.launch({ agent: agent(), task: "t" });
+		// The FIRST child receives the run tab's root pane; lineage env is set on
+		// the tab creation that produced it (the second child would split).
+		await orchestrator.launch({ agent: agent({ name: "second" }), task: "t2" });
 
 		const split = fake.commands.find(
 			(c) => c.args[0] === "pane" && c.args[1] === "split",
@@ -696,6 +699,9 @@ test("regression: split placement is honoured when HERDR_PANE_ID is present", as
 			sleep: async (ms) => fake.advance(ms),
 		});
 
+		// Two children: the first takes the tab's root pane, the second must split
+		// it, so `placement` decides the split direction exercised here.
+		await orchestrator.launch({ agent: agent({ name: "first" }), task: "t" });
 		await orchestrator.launch({
 			agent: agent({ name: "worker", placement: "split-right" }),
 			task: "t",
@@ -704,14 +710,22 @@ test("regression: split placement is honoured when HERDR_PANE_ID is present", as
 		const split = fake.commands.filter(
 			(c) => c.args[0] === "pane" && c.args[1] === "split",
 		);
-		assert.equal(split.length, 1, "inside a pane, the split must be used");
-		assert.ok(
-			split[0]?.args.includes("--current"),
-			"the split must target the current pane",
-		);
+		assert.equal(split.length, 1, "the second child must be split in");
 		assert.ok(
 			split[0]?.args.includes("right"),
 			"the requested direction must be kept",
+		);
+		// The split targets the run tab's ROOT pane by explicit id rather than
+		// `--current`: that is what keeps the pane inside the task tab and works
+		// with no HERDR_PANE_ID at all.
+		const target =
+			split[0]?.args.includes("--pane") === true
+				? split[0]?.args[split[0].args.indexOf("--pane") + 1]
+				: split[0]?.args.find((a) => /^w\d+:p\d+$/.test(a));
+		assert.ok(target, "the split must name its target pane");
+		assert.ok(
+			!split[0]?.args.includes("--current"),
+			"--current must not be used: it needs HERDR_PANE_ID",
 		);
 	} finally {
 		if (saved === undefined) delete process.env.HERDR_PANE_ID;
@@ -959,6 +973,158 @@ test("regression: a multi-line task never lands in argv (F38)", async () => {
 			/task\.md$/,
 			"the reference must point at the task file",
 		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Design §8.1: palette = one task = ONE tab; each subagent is a PANE inside it.
+// The shipped defaults split the CALLER's pane instead, so a run never got its
+// own tab and its agents were scattered across the caller's tab forever.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("regression: a run owns one task tab and puts every child inside it", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-runtab-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+		});
+
+		const first = await orchestrator.launch({
+			agent: agent({ name: "a" }),
+			task: "t",
+		});
+		const second = await orchestrator.launch({
+			agent: agent({ name: "b" }),
+			task: "t",
+		});
+
+		// Exactly one tab for the run, not one per child.
+		const tabCreates = fake.commands.filter(
+			(c) => c.args[0] === "tab" && c.args[1] === "create",
+		);
+		assert.equal(tabCreates.length, 1, "one run must create exactly one tab");
+
+		const tabId = orchestrator.tabId;
+		assert.ok(tabId, "the run must expose its task tab");
+		assert.equal(first.child.tabId, tabId, "child 1 belongs to the run tab");
+		assert.equal(second.child.tabId, tabId, "child 2 belongs to the run tab");
+
+		// Both panes are inside that tab; the second was split in (not the
+		// caller's pane), and the split names the tab's ROOT pane explicitly.
+		const panes = [...fake.panes.values()].filter((p) => p.tab_id === tabId);
+		assert.equal(panes.length, 2, "both children are panes of the run tab");
+
+		const split = fake.commands.find(
+			(c) => c.args[0] === "pane" && c.args[1] === "split",
+		);
+		assert.ok(split, "the second child must be split into the tab");
+		assert.ok(
+			!split.args.includes("--current"),
+			"--current must not be used: it requires HERDR_PANE_ID",
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("regression: a run tab is created even outside a herdr pane (headless)", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-runtab-headless-"));
+	const saved = process.env.HERDR_PANE_ID;
+	delete process.env.HERDR_PANE_ID;
+	try {
+		const fake = new FakeHerdr();
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+		});
+
+		// No ambient pane exists at all: the old `--current` split failed here.
+		const handle = await orchestrator.launch({ agent: agent(), task: "t" });
+		assert.ok(handle.paneId, "the child must still get a pane");
+		assert.ok(orchestrator.tabId, "the run tab must exist without a pane");
+	} finally {
+		if (saved !== undefined) process.env.HERDR_PANE_ID = saved;
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// One task = one tab must hold ACROSS tool calls, not just within one. Each
+// tool call is a fresh process with no in-memory tab, so a later `launch` used
+// to create a SECOND tab and fragment one task across two.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("regression: a later launch reuses the run tab instead of creating a second (one task = one tab)", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-tabreuse-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+
+		// Process 1 creates the tab.
+		const first = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+		});
+		const a = await first.launch({ agent: agent({ name: "a" }), task: "t" });
+		const tabId = first.tabId;
+		assert.ok(tabId, "the first launch must create the run tab");
+
+		// Process 2 is a fresh orchestrator carrying the persisted tab id — what a
+		// later tool call does after `restore`.
+		const later = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+			runTabId: tabId,
+		});
+		const b = await later.launch({ agent: agent({ name: "b" }), task: "t" });
+
+		assert.equal(b.child.tabId, tabId, "the later child must join the same tab");
+		const tabCreates = fake.commands.filter(
+			(c) => c.args[0] === "tab" && c.args[1] === "create",
+		);
+		assert.equal(tabCreates.length, 1, "only ONE tab may exist for the task");
+		assert.notEqual(a.paneId, b.paneId, "each child still gets its own pane");
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("regression: a recycled run tab is replaced, not reused", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-tabstale-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+
+		// A tab id that no longer exists (e.g. retire closed its last pane).
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+			runTabId: "w1:tZZ",
+		});
+		const handle = await orchestrator.launch({ agent: agent(), task: "t" });
+
+		assert.ok(handle.paneId, "the launch must still succeed");
+		assert.notEqual(
+			handle.child.tabId,
+			"w1:tZZ",
+			"a stale tab id must not be reused",
+		);
+		assert.ok(orchestrator.tabId, "a fresh tab must have been created");
 	} finally {
 		rmSync(runDir, { recursive: true, force: true });
 	}

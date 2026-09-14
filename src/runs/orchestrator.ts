@@ -74,6 +74,23 @@ export interface OrchestratorDeps {
 	 * exhaust the machine. `null`/undefined means unlimited.
 	 */
 	maxSpawns?: number | null;
+	/**
+	 * Label for the run's task tab. One launch is one task, so the run owns
+	 * exactly one tab and every child becomes a pane inside it (design §8.1).
+	 * Defaults to `task:<runId>`.
+	 */
+	runTabLabel?: string;
+	/**
+	 * The task tab this run already owns, restored from `run.json`.
+	 *
+	 * Each tool call is a fresh process, so a later `launch` (adding one more
+	 * agent to an existing task) builds a new Orchestrator with no in-memory tab.
+	 * Without this it would create a SECOND tab and the task's agents would be
+	 * split across two — the exact fragmentation the one-tab-per-task model exists
+	 * to prevent. The id is validated against herdr before use, because the tab
+	 * may since have been recycled.
+	 */
+	runTabId?: string;
 }
 
 /** Environment variable carrying the lineage chain into a child process. */
@@ -209,6 +226,21 @@ export class Orchestrator {
 	private readonly parentPath: NestedPathEntry[];
 	private readonly maxDepth: number;
 	private readonly maxSpawns: number | null;
+	private readonly runTabLabel: string;
+	/** The run's task tab. Every child of this run lives inside it (design §8.1). */
+	private runTabId: string | null;
+	private runTabRootPaneId: string | null = null;
+	/**
+	 * The tab id restored from `run.json` (a prior process), not yet validated.
+	 * A tab that still exists skips creation; one that does not is replaced.
+	 */
+	private readonly restoredTabId: string | undefined;
+	/** Whether the restored tab has been considered (so it is not re-adopted). */
+	private restoredTabAdopted = false;
+	/** In-flight tab creation, so concurrent launches cannot create two tabs. */
+	private runTabPending: Promise<void> | null = null;
+	/** Whether the tab's root pane has been handed to a child already. */
+	private rootPaneUsed = false;
 	private spawned = 0;
 	private readonly children = new Map<string, ChildRecord>();
 	private readonly counter = new Map<string, number>();
@@ -235,6 +267,9 @@ export class Orchestrator {
 		if (!Number.isFinite(this.maxDepth) || this.maxDepth < 1)
 			this.maxDepth = MAX_NESTED_PATH_ENTRIES;
 		this.maxSpawns = deps.maxSpawns ?? null;
+		this.runTabLabel = deps.runTabLabel ?? `task:${path.basename(deps.runDir)}`;
+		this.restoredTabId = deps.runTabId;
+		this.runTabId = deps.runTabId ?? null;
 	}
 
 	/** The lineage path a child of this process would receive. */
@@ -289,32 +324,127 @@ export class Orchestrator {
 		return makeName(agent, seen);
 	}
 
-	/**
-	 * Whether `pane split --current` can work.
-	 *
-	 * herdr resolves `--current` from `HERDR_PANE_ID`, which only exists when pi
-	 * itself runs inside a herdr pane. In a headless invocation (a script, CI, a
-	 * plain terminal, or a container without an attached pane) the variable is
-	 * absent and EVERY split placement fails with "--current requires
-	 * HERDR_PANE_ID". Falling back to a new tab keeps the tool usable there —
-	 * and a tab is the better isolation unit anyway (F15).
-	 */
-	private canSplit(): boolean {
-		return Boolean(process.env.HERDR_PANE_ID);
+	/** The task tab this run owns, once it exists (null before the first launch). */
+	get tabId(): string | null {
+		return this.runTabId;
 	}
 
 	/**
-	 * Resolve the placement actually used, downgrading a split to `new-tab` when
-	 * there is no current pane to split.
+	 * The run's task tab, created on first use (design §8.1).
+	 *
+	 * One launch = one task = ONE tab; every child of this run becomes a pane
+	 * inside it. Children are added by splitting the tab's ROOT pane by explicit
+	 * id rather than `--current`.
+	 *
+	 * That choice is load-bearing: `--current` is resolved from `HERDR_PANE_ID`,
+	 * which is absent in a headless run (script, CI, plain container) and made
+	 * every split fail with "--current requires HERDR_PANE_ID" — the whole reason
+	 * F34 needed a downgrade path. Splitting an explicit id works in BOTH cases
+	 * (measured), so the headless failure mode no longer exists and no fallback
+	 * is required.
 	 */
-	private effectivePlacement(requested: Placement): Placement {
-		if (requested === "new-tab") return "new-tab";
-		return this.canSplit() ? requested : "new-tab";
+	private async ensureRunTab(
+		env?: Record<string, string>,
+	): Promise<{ tabId: string; rootPaneId: string }> {
+		if (this.runTabId && this.runTabRootPaneId) {
+			return { tabId: this.runTabId, rootPaneId: this.runTabRootPaneId };
+		}
+		if (this.runTabPending) {
+			await this.runTabPending;
+			if (this.runTabId && this.runTabRootPaneId) {
+				return { tabId: this.runTabId, rootPaneId: this.runTabRootPaneId };
+			}
+		}
+
+		// Adopt the tab a PREVIOUS process created for this run, if it is still
+		// alive: a later launcher adds an agent to the existing task instead of
+		// starting a second tab (the model is one task = one tab).
+		const adopted = await this.adoptRestoredTab();
+		if (adopted) return adopted;
+
+		const pending = (async () => {
+			const res = await this.client.tabCreate({
+				cwd: this.cwd,
+				label: this.runTabLabel,
+				// Lineage env must be set on the tab's root pane process too,
+				// otherwise a child launched into it loses its ancestry (F35).
+				...(env ? { env } : {}),
+				focus: false,
+			});
+			if (!res.ok) {
+				throw new SubagentError(
+					`tab create failed: ${res.error.message}`,
+					res.error.code,
+				);
+			}
+			this.runTabId = res.value.tab.tab_id;
+			this.runTabRootPaneId = res.value.rootPaneId;
+		})();
+		this.runTabPending = pending;
+		try {
+			await pending;
+		} finally {
+			this.runTabPending = null;
+		}
+
+		if (this.runTabId && this.runTabRootPaneId) {
+			return { tabId: this.runTabId, rootPaneId: this.runTabRootPaneId };
+		}
+		throw new SubagentError("run tab was not created", ErrorCodes.START_FAILED);
+	}
+
+	/**
+	 * Reuse the run tab recorded by an earlier process, when it still exists.
+	 *
+	 * Validated against herdr rather than trusted: a tab can since have been
+	 * recycled (`retire` closing its last pane closes the tab too), in which case
+	 * reusing the stale id would make every subsequent split fail. A tab that is
+	 * gone is simply replaced by a fresh one.
+	 *
+	 * Runs at most once — `restoredTabId` is consumed so a later launch in the
+	 * same process cannot re-adopt after the tab was legitimately recycled.
+	 */
+	private async adoptRestoredTab(): Promise<{
+		tabId: string;
+		rootPaneId: string;
+	} | null> {
+		const candidate = this.restoredTabId;
+		if (!candidate || this.restoredTabAdopted) return null;
+		this.restoredTabAdopted = true;
+
+		const tabs = await this.client.tabList();
+		if (!tabs.ok || !tabs.value.some((t) => t.tab_id === candidate)) {
+			// Gone (or unlistable): fall through to creating a new tab.
+			this.runTabId = null;
+			return null;
+		}
+
+		// The tab lives; a child must split from its EXISTING root pane, so find
+		// the pane herdr gave it. Without a root pane there is nothing to split.
+		const panes = await this.client.paneList();
+		if (!panes.ok) return null;
+		const inTab = panes.value.filter((p) => p.tab_id === candidate);
+		const root = inTab[0];
+		if (!root) {
+			this.runTabId = null;
+			return null;
+		}
+
+		this.runTabId = candidate;
+		this.runTabRootPaneId = root.pane_id;
+		// The restored tab's root pane may already host a live child, so it must
+		// not be handed out again as a fresh child's pane.
+		this.rootPaneUsed = true;
+		return { tabId: candidate, rootPaneId: root.pane_id };
 	}
 
 	/**
 	 * Create the pane an agent will occupy.
-	 * `new-tab` gives a task its own tab — the atomic recycling + isolation unit (F15).
+	 *
+	 * `new-tab` gives the child a tab of its OWN (design §8.3, long-lived chain
+	 * steps). Everything else lands inside the run's task tab: the first child
+	 * takes the tab's root pane, later ones split it, so N agents of one task
+	 * appear as N panes of one tab.
 	 */
 	private async createPane(
 		placement: Placement,
@@ -325,9 +455,6 @@ export class Orchestrator {
 			const res = await this.client.tabCreate({
 				cwd: this.cwd,
 				label,
-				// The tab's root pane is the child's process. Lineage env must be
-				// passed here too, otherwise a child launched via the new-tab
-				// fallback loses its ancestry and the depth ceiling.
 				...(env ? { env } : {}),
 				focus: false,
 			});
@@ -339,8 +466,16 @@ export class Orchestrator {
 			}
 			return { paneId: res.value.rootPaneId, tabId: res.value.tab.tab_id };
 		}
+
+		const runTab = await this.ensureRunTab(env);
+		// The first child owns the root pane; there is nothing to split yet.
+		if (this.children.size === 0 && !this.rootPaneUsed) {
+			this.rootPaneUsed = true;
+			return { paneId: runTab.rootPaneId, tabId: runTab.tabId };
+		}
+
 		const res = await this.client.paneSplit({
-			current: true,
+			target: runTab.rootPaneId,
 			direction: placement === "split-right" ? "right" : "down",
 			cwd: this.cwd,
 			...(env ? { env } : {}),
@@ -351,7 +486,7 @@ export class Orchestrator {
 				`pane split failed: ${res.error.message}`,
 				res.error.code,
 			);
-		return { paneId: res.value.pane_id };
+		return { paneId: res.value.pane_id, tabId: runTab.tabId };
 	}
 
 	/**
@@ -452,10 +587,9 @@ export class Orchestrator {
 		preCreateSessionFile(sessionFile);
 
 		const tempDir = fs.mkdtempSync(path.join(this.runDir, `tmp-${name}-`));
-		// A split needs a current pane; without one, fall back to a new tab.
-		const placement = this.effectivePlacement(
-			input.placement ?? input.agent.placement ?? "split-down",
-		);
+		// Default to a pane inside the run's own task tab (design §8.1); the tab is
+		// created on first use. `new-tab` stays available for a dedicated tab.
+		const placement = input.placement ?? input.agent.placement ?? "split-down";
 
 		let paneId: string | null = null;
 		try {

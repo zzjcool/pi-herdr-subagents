@@ -171,6 +171,27 @@ export class FakeHerdr {
 		return paneId;
 	}
 
+	/**
+	 * Create an out-of-band pane inside an EXISTING tab.
+	 * Models a pane created by someone else, which is what the orphan audit must
+	 * detect. `addRootPane` cannot serve this purpose: it always lands in `w1:t1`.
+	 */
+	addPaneInTab(tabId: string, workspaceId = "w1"): string {
+		const paneId = `${workspaceId}:p${this.nextPane++}`;
+		this.panes.set(paneId, {
+			pane_id: paneId,
+			tab_id: tabId,
+			workspace_id: workspaceId,
+			cwd: "/tmp/project",
+			agent_status: undefined,
+			busyUntil: 0,
+			screen: [],
+			processes: [],
+		});
+		this.tabs.get(tabId)?.paneIds.push(paneId);
+		return paneId;
+	}
+
 	/** Pre-register a live agent (bypasses agent start, e.g. for name-taken tests). */
 	addAgent(
 		name: string,
@@ -299,7 +320,20 @@ export class FakeHerdr {
 				const cwdIdx = sargs.indexOf("--cwd");
 				const cwd = cwdIdx >= 0 ? (sargs[cwdIdx + 1] ?? null) : null;
 				const workspaceId = "w1";
-				const tabId = sargs.includes("--current") ? "w1:t1" : "w1:t1";
+				// The tab is decided by the split TARGET: real herdr splits that pane,
+				// so the new pane inherits its tab. `--current` resolves to the ambient
+				// pane (w1:t1 in the fake). A bare positional is only a pane id when it
+				// looks like one — flag values (e.g. `--direction down`) must not match.
+				const targetIdx = sargs.indexOf("--pane");
+				const positional = sargs.find((a) => /^w\d+:p\w+$/.test(a));
+				const explicitTarget = targetIdx >= 0 ? sargs[targetIdx + 1] : positional;
+				const targetPane = explicitTarget
+					? this.panes.get(explicitTarget)
+					: undefined;
+				if (explicitTarget && !targetPane) {
+					return fail("target_pane_not_found", `no pane ${explicitTarget}`);
+				}
+				const tabId = targetPane?.tab_id ?? "w1:t1";
 				const paneId = `${workspaceId}:p${this.nextPane++}`;
 				this.panes.set(paneId, {
 					pane_id: paneId,

@@ -475,14 +475,14 @@ test("steer on a missing child throws", async () => {
 test("auditOrphans reports panes in the tab that the tree does not know about", async () => {
 	const h = harness();
 	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		const tabId = h.fake.agents.get(handle.name)?.paneId
-			? (h.fake.panes.get(h.fake.agents.get(handle.name)!.paneId)?.tab_id ??
-				"w1:t1")
-			: "w1:t1";
+		// The run owns one task tab; its children live inside it.
+		await h.orchestrator.launch({ agent: agent(), task: "t" });
+		const tabId = h.orchestrator.tabId;
+		assert.ok(tabId, "the launch must have created the run tab");
 
-		// An out-of-band pane in the same tab, created by someone else.
-		const orphanPane = h.fake.addRootPane("w1");
+		// An out-of-band pane in the SAME tab, created by someone else: a new tab
+		// would be invisible to the audit, which is scoped to one tab.
+		const orphanPane = h.fake.addPaneInTab(tabId, "w1");
 		void orphanPane;
 
 		const orphans = await h.orchestrator.auditOrphans(tabId);

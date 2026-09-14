@@ -233,6 +233,9 @@ async function controlAction(input: {
 		client: input.client,
 		runDir: store.runDir(found.runId),
 		cwd,
+		// Reuse the task tab this run created in an EARLIER process, so adding an
+		// agent here lands in the same tab instead of fragmenting the task (§8.1).
+		...(found.run.herdr?.tabId ? { runTabId: found.run.herdr.tabId } : {}),
 	});
 	orchestrator.restore(found.run);
 
@@ -441,6 +444,19 @@ async function launchFamily(input: {
 	// Persist whatever the run produced (children + their outcomes).
 	for (const name of session.handles) {
 		await persistChild(store, run.runId, orchestrator, name);
+	}
+
+	// Record the task tab this run owns (design §8.1). Written once, after the
+	// launches, because the tab is created lazily by the first child; a later
+	// process reads it back to know where the task's panes belong.
+	if (orchestrator.tabId) {
+		await store.updateRun(run.runId, (r) => {
+			r.herdr = {
+				...r.herdr,
+				tabId: orchestrator.tabId ?? undefined,
+				tabLabel: `task:${run.runId}`,
+			};
+		});
 	}
 
 	return {
