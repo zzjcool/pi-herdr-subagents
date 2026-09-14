@@ -144,7 +144,11 @@ function deriveAcceptance(
 	pendingCriteria: ChildRecord["pendingCriteria"],
 ): AcceptanceResult {
 	let acceptance: AcceptanceResult = { status: "unknown", level: "none" };
-	const verdict = extractVerdict(parsed.output);
+	// MUST read `lastTurnOutput`, not `output`: `output` is the last non-empty text
+	// anywhere in the session, so it survives into a turn that produced none — and
+	// a stale "ok" from an earlier turn would then be reported as
+	// accepted/attested while `execution` says aborted (F39).
+	const verdict = extractVerdict(parsed.lastTurnOutput ?? "");
 
 	if (verdict) {
 		acceptance = {

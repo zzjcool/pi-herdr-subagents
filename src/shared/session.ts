@@ -38,6 +38,7 @@ function emptyUsage(): Usage {
 export function emptyParsedSession(): ParsedSession {
 	return {
 		output: "",
+		lastTurnOutput: null,
 		usage: emptyUsage(),
 		model: null,
 		stopReason: null,
@@ -154,6 +155,7 @@ function applyAssistant(
 	accumulateUsage(parsed.usage, message);
 	if (typeof message.model === "string") parsed.model = message.model;
 	if (stopReason) parsed.stopReason = stopReason;
+	// `output`: the last non-empty text anywhere (kept for display/back-compat).
 	if (text) parsed.output = text;
 }
 
@@ -193,6 +195,11 @@ export function parseSessionText(text: string): ParsedSession {
 
 	const last = parsed.turns.at(-1);
 	parsed.lastTurnMissing = Boolean(last && last.assistants.length === 0);
+	// Derived from the definition rather than tracked incrementally: "the final
+	// assistant message of the last turn". Tracking it as messages arrive leaves
+	// an earlier turn's text in place whenever the last turn has no assistant
+	// message at all (a hard kill), which is exactly the stale-verdict bug (F39).
+	parsed.lastTurnOutput = last?.assistants.at(-1)?.text ?? null;
 	return parsed;
 }
 

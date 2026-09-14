@@ -1130,3 +1130,146 @@ test("regression: a recycled run tab is replaced, not reused", async () => {
 	}
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// F39 (reported by an adversarial reviewer, then reproduced): the acceptance
+// verdict was derived from `parsed.output`, which is the last non-empty text
+// ANYWHERE in the session. A turn that ended without text (a tool call, or a
+// mid-turn kill) left an EARLIER turn's "ok" in place, so a run could report
+// `execution: aborted` together with `acceptance: accepted/attested`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("regression: an aborted turn must not inherit the previous turn's verdict (F39)", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-f39-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+		});
+		const handle = await orchestrator.launch({ agent: agent(), task: "t" });
+
+		// Turn 1 succeeds with a verdict; turn 2 is killed mid-tool with no text.
+		writeFileSync(
+			handle.sessionFile,
+			[
+				sessionHeader(),
+				user("do the thing"),
+				assistantMsg({
+					stopReason: "stop",
+					text: '{"ok": true, "reason": "turn 1 all good"}',
+				}),
+				user("now do more"),
+				assistantMsg({ stopReason: "toolUse", text: "" }),
+			].join("\n"),
+		);
+		// A kill is what makes this an abort rather than "still running": with the
+		// agent alive, `resolveExecution` correctly reports `running` (F29).
+		fake.agents.delete(handle.name);
+
+		const collected = await orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+
+		assert.equal(collected.execution.status, "aborted");
+		assert.notEqual(
+			collected.acceptance.status,
+			"accepted",
+			"an aborted turn must never report the previous turn's acceptance",
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("regression: a hard-killed turn must not inherit the previous verdict either (F39)", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-f39b-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+		});
+		const handle = await orchestrator.launch({ agent: agent(), task: "t" });
+
+		// Turn 1 has a verdict; turn 2 got NO assistant message at all.
+		writeFileSync(
+			handle.sessionFile,
+			[
+				sessionHeader(),
+				user("do the thing"),
+				assistantMsg({
+					stopReason: "stop",
+					text: '{"ok": true, "reason": "turn 1 all good"}',
+				}),
+				user("now do more"),
+			].join("\n"),
+		);
+		fake.agents.delete(handle.name);
+
+		const collected = await orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+
+		assert.equal(collected.execution.status, "aborted");
+		assert.notEqual(
+			collected.acceptance.status,
+			"accepted",
+			"a killed turn must never report the previous turn's acceptance",
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("regression: a LATER turn's rejection must override an earlier acceptance (F39)", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-f39c-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+		});
+		const handle = await orchestrator.launch({ agent: agent(), task: "t" });
+
+		// The converse leak: turn 1 accepted, turn 2 REJECTS. Reading a stale
+		// earlier verdict would hide the rejection.
+		writeFileSync(
+			handle.sessionFile,
+			[
+				sessionHeader(),
+				user("do the thing"),
+				assistantMsg({
+					stopReason: "stop",
+					text: '{"ok": true, "reason": "turn 1 fine"}',
+				}),
+				user("retry"),
+				assistantMsg({
+					stopReason: "stop",
+					text: '{"ok": false, "reason": "turn 2 rejected"}',
+				}),
+			].join("\n"),
+		);
+
+		const collected = await orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+		assert.equal(collected.execution.status, "success");
+		assert.equal(
+			collected.acceptance.status,
+			"rejected",
+			"the LAST turn's verdict must win",
+		);
+		assert.match(String(collected.acceptance.reason), /turn 2 rejected/);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});

@@ -445,6 +445,20 @@ export type ReadSource =
 
 export interface ParsedSession {
 	output: string;
+	/**
+	 * Text of the FINAL assistant message of the LAST turn — the same message
+	 * whose `stopReason` decides the execution outcome.
+	 *
+	 * `output` above is the last non-empty text ANYWHERE in the session, so it
+	 * keeps pointing at an earlier turn whenever the final turn ends without text
+	 * (a tool call, or a mid-turn kill). Deriving the self-reported verdict from
+	 * `output` therefore let a stale "ok" from turn 1 be reported as
+	 * `accepted/attested` while execution said `aborted` (F39). Verdict derivation
+	 * MUST read this field instead, so both layers describe the same message.
+	 *
+	 * `null` when that message carried no text.
+	 */
+	lastTurnOutput: string | null;
 	usage: Usage;
 	model: string | null;
 	stopReason: StopReason | null;
