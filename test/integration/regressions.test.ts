@@ -909,3 +909,58 @@ test("regression: an agent without criteria reports none", async () => {
 		rmSync(runDir, { recursive: true, force: true });
 	}
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F38 (found by exercising the installed plugin end-to-end): herdr refuses an
+// argv element containing a control character — `agent start` fails with
+// `invalid_agent_argument` ("cannot be encoded safely for the target shell").
+// Nearly every real task card is multi-line, so passing the task as one argv
+// element made the common case unlaunchable. The task is now ALWAYS written to
+// a file and referenced with `@path`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("regression: a multi-line task never lands in argv (F38)", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-multiline-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+		});
+
+		const task = "line one\nline two\ttabbed\nline three";
+		await orchestrator.launch({ agent: agent(), task });
+
+		const start = fake.commands.find(
+			(c) => c.args[0] === "agent" && c.args[1] === "start",
+		);
+		assert.ok(start, "agent start must have been invoked");
+
+		// No argv element may contain a control character, or herdr rejects the
+		// launch outright.
+		for (const arg of start.args) {
+			assert.doesNotMatch(
+				arg,
+				/[\n\r\t]/,
+				`control character leaked into argv: ${JSON.stringify(arg)}`,
+			);
+		}
+
+		// The task must still reach the child — by file reference. (The temp file
+		// itself is removed when `launch` returns, so its CONTENT is asserted by
+		// the `buildPiArgs` unit test; here the transport is what matters.)
+		const taskArg = start.args.find((a) => a.startsWith("@"));
+		assert.ok(taskArg, "the task must be passed as an @file reference");
+		assert.match(
+			taskArg,
+			/task\.md$/,
+			"the reference must point at the task file",
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+

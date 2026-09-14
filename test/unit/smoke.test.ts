@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import {
 	parseSessionText,
 	deriveOutcome,
@@ -11,6 +14,7 @@ import {
 	isSafeNestedPathId,
 } from "../../src/shared/nested-path.ts";
 import { parseHerdrResponse } from "../../src/herdr/client.ts";
+import { buildPiArgs } from "../../src/runs/args.ts";
 
 const user = (t: string) =>
 	JSON.stringify({ type: "message", message: { role: "user", content: t } });
@@ -173,4 +177,76 @@ test("herdr error on stderr", () => {
 test("herdr success on stdout", () => {
 	const r = parseHerdrResponse('{"result":{"pane":{"pane_id":"w1:p1"}}}', "", 0);
 	assert.equal(r.ok, true);
+});
+
+// F38: a multi-line task must never travel as an argv element — herdr rejects
+// any argument containing a control character. `buildPiArgs` writes the task to
+// a file and passes `@path` instead, so the text still reaches the child.
+test("buildPiArgs: a multi-line task goes through a file, not argv", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "args-f38-"));
+	try {
+		const task = "line one\nline two\ttabbed";
+		const built = buildPiArgs({
+			agent: {
+				name: "a",
+				description: "d",
+				systemPrompt: "",
+				systemPromptMode: "replace",
+				inheritProjectContext: true,
+				inheritSkills: false,
+				kind: "pi",
+				source: "user",
+				filePath: "/f.md",
+			},
+			task,
+			sessionFile: "/tmp/s.jsonl",
+			tempDir: dir,
+		});
+
+		for (const arg of built.args) {
+			assert.doesNotMatch(
+				arg,
+				/[\n\r\t]/,
+				`control character leaked into argv: ${JSON.stringify(arg)}`,
+			);
+		}
+
+		const taskArg = built.args.find((a) => a.startsWith("@"));
+		assert.ok(taskArg, "the task must be passed as an @file reference");
+		assert.match(
+			readFileSync(taskArg.slice(1), "utf8"),
+			/line one\nline two\ttabbed/,
+			"the file must carry the task text verbatim",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("buildPiArgs: a short single-line task also uses the file (no context switch)", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "args-f38b-"));
+	try {
+		const built = buildPiArgs({
+			agent: {
+				name: "a",
+				description: "d",
+				systemPrompt: "",
+				systemPromptMode: "replace",
+				inheritProjectContext: true,
+				inheritSkills: false,
+				kind: "pi",
+				source: "user",
+				filePath: "/f.md",
+			},
+			task: "short",
+			sessionFile: "/tmp/s.jsonl",
+			tempDir: dir,
+		});
+		assert.ok(
+			built.args.some((a) => a.startsWith("@")),
+			"even a short task must use the file transport",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });

@@ -35,7 +35,11 @@ export function applyThinkingSuffix(
 	return `${model}:${thinking}`;
 }
 
-/** Task text longer than this is passed via a file to avoid argv limits. */
+/**
+ * Task text longer than this is passed via a file to avoid argv limits.
+ *
+ * NOTE: length is NOT the only reason to use a file — see `pushTaskArg`.
+ */
 export const TASK_ARG_LIMIT = 8_000;
 
 export interface BuildArgsInput {
@@ -146,9 +150,20 @@ function pushSystemPromptArgs(
 }
 
 /**
- * The task itself, inline unless it would exceed the argv budget.
- * An over-long task is written to a file and referenced with `@path`, which pi
- * expands — the alternative is an E2BIG failure at exec time.
+ * The task itself, always written to a file and referenced with `@path`.
+ *
+ * Two independent reasons make the file the ONLY safe carrier:
+ *
+ *   F38 — herdr refuses an argv element containing a control character
+ *         (newline, tab, CR): `agent start` fails with `invalid_agent_argument`
+ *         ("agent arguments cannot be encoded safely for the target shell").
+ *         Nearly every real task card is multi-line, so passing the text as a
+ *         single argv element made the common case unlaunchable. The flag is
+ *         raised for newline AND tab — a quoted string with spaces is fine.
+ *   E2BIG — an over-long argv element fails at exec time.
+ *
+ * pi expands `@path` in the task position, so the child still receives the
+ * text; only the transport differs.
  */
 function pushTaskArg(
 	args: string[],
@@ -156,10 +171,6 @@ function pushTaskArg(
 	input: BuildArgsInput,
 ): void {
 	const taskText = `Task: ${input.task}`;
-	if (taskText.length <= TASK_ARG_LIMIT) {
-		args.push(taskText);
-		return;
-	}
 	const file = path.join(input.tempDir, "task.md");
 	fs.writeFileSync(file, taskText, { mode: 0o600 });
 	tempFiles.push(file);
