@@ -213,14 +213,21 @@ function decodeEvent(line: string): Record<string, unknown> | null {
 	} catch {
 		return null;
 	}
-	if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
+	if (
+		decoded === null ||
+		typeof decoded !== "object" ||
+		Array.isArray(decoded)
+	) {
 		return null;
 	}
 	return decoded as Record<string, unknown>;
 }
 
 /** Fold one decoded event into the parsed session. */
-function applyEvent(parsed: ParsedSession, event: Record<string, unknown>): void {
+function applyEvent(
+	parsed: ParsedSession,
+	event: Record<string, unknown>,
+): void {
 	if (event.type !== "message") return;
 	const message = event.message as Record<string, unknown> | undefined;
 	if (!message || typeof message !== "object") return;

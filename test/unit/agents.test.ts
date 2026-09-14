@@ -513,7 +513,7 @@ test("acceptance.criteria is no longer reported unenforced (it is surfaced inste
 			"---",
 			"name: probe",
 			"description: d",
-			"acceptance: '{\"level\": \"attested\", \"criteria\": [{\"id\": \"c1\", \"must\": \"tests pass\"}]}'",
+			'acceptance: \'{"level": "attested", "criteria": [{"id": "c1", "must": "tests pass"}]}\'',
 			"---",
 			"body",
 		].join("\n"),
@@ -537,7 +537,7 @@ test("acceptance.criteria is no longer reported unenforced (it is surfaced inste
 			"---",
 			"name: probe",
 			"description: d",
-			"acceptance: '{\"level\": \"attested\"}'",
+			'acceptance: \'{"level": "attested"}\'',
 			"---",
 			"body",
 		].join("\n"),
@@ -612,9 +612,14 @@ test("a bundled role reports no unenforced fields", () => {
 
 test("timeoutMs is parsed and is NOT reported as unenforced", () => {
 	const agent = parseAgentDocument(
-		["---", "name: probe", "description: d", "timeoutMs: 1800000", "---", "b"].join(
-			"\n",
-		),
+		[
+			"---",
+			"name: probe",
+			"description: d",
+			"timeoutMs: 1800000",
+			"---",
+			"b",
+		].join("\n"),
 		"/x/probe.md",
 		"user",
 	);
@@ -628,9 +633,14 @@ test("timeoutMs is parsed and is NOT reported as unenforced", () => {
 
 test("toolTimeoutMs is still reported as unenforced", () => {
 	const agent = parseAgentDocument(
-		["---", "name: probe", "description: d", "toolTimeoutMs: 60000", "---", "b"].join(
-			"\n",
-		),
+		[
+			"---",
+			"name: probe",
+			"description: d",
+			"toolTimeoutMs: 60000",
+			"---",
+			"b",
+		].join("\n"),
 		"/x/probe.md",
 		"user",
 	);
@@ -701,7 +711,7 @@ test("acceptance: the JSON-string spelling still works", () => {
 		"---",
 		"name: probe",
 		"description: d",
-		"acceptance: '{\"level\": \"verified\", \"role\": \"writer\", \"criteria\": [{\"id\": \"j1\", \"must\": \"no secrets\"}]}'",
+		'acceptance: \'{"level": "verified", "role": "writer", "criteria": [{"id": "j1", "must": "no secrets"}]}\'',
 		"---",
 		"body",
 	].join("\n");

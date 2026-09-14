@@ -680,12 +680,22 @@ export class Orchestrator {
 		// Without this the wait below would never observe new growth and would
 		// block for the entire timeout.
 		const alreadySettled = isLastTurnComplete(initial);
-		const timedOut =
-			alreadySettled ? false : await this.awaitTurn(child, initial, deadline);
+		const timedOut = alreadySettled
+			? false
+			: await this.awaitTurn(child, initial, deadline);
 
 		const parsed = parseSessionFile(child.sessionFile);
-		const execution = await this.resolveExecution(name, parsed, timedOut, timeoutMs);
-		const acceptance = deriveAcceptance(parsed, execution, child.pendingCriteria);
+		const execution = await this.resolveExecution(
+			name,
+			parsed,
+			timedOut,
+			timeoutMs,
+		);
+		const acceptance = deriveAcceptance(
+			parsed,
+			execution,
+			child.pendingCriteria,
+		);
 
 		child.state = "awaiting";
 		child.execution = execution;
@@ -858,8 +868,7 @@ export class Orchestrator {
 				// Keep going: one bad child must not block the rest.
 			}
 		}
-		if (opts.tabId)
-			await bestEffort(this.client.tabClose(opts.tabId));
+		if (opts.tabId) await bestEffort(this.client.tabClose(opts.tabId));
 		return retired;
 	}
 

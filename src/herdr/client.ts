@@ -241,7 +241,9 @@ function paneFromResult(value: unknown): PaneInfo {
 }
 
 /** Map one entry of `pane process-info`'s `foreground_processes`. */
-function toForegroundProcess(raw: unknown): ProcessInfo["foregroundProcesses"][number] {
+function toForegroundProcess(
+	raw: unknown,
+): ProcessInfo["foregroundProcesses"][number] {
 	const p = asRecord(raw);
 	return {
 		argv: Array.isArray(p.argv) ? p.argv.map(String) : [],
@@ -274,7 +276,10 @@ type Call = <T>(
 ) => Promise<HerdrResult<T>>;
 
 /** Append `--env K=V` for each entry. Shared by pane split and tab create. */
-function pushEnvArgs(args: string[], env: Record<string, string> | undefined): void {
+function pushEnvArgs(
+	args: string[],
+	env: Record<string, string> | undefined,
+): void {
 	for (const [key, value] of Object.entries(env ?? {})) {
 		args.push("--env", `${key}=${value}`);
 	}
@@ -513,7 +518,9 @@ function createAgentApi(
 		agentStart: (opts) =>
 			call<Record<string, unknown>>(agentStartArgs(opts), {
 				timeoutMs: (opts.timeoutMs ?? 45_000) + 15_000,
-			}).then((res) => (res.ok ? ok(toAgentStartResult(res.value, opts)) : res)),
+			}).then((res) =>
+				res.ok ? ok(toAgentStartResult(res.value, opts)) : res,
+			),
 
 		agentPrompt: (target, text, opts = {}) =>
 			call<Record<string, unknown>>(agentPromptArgs(target, text, opts), {

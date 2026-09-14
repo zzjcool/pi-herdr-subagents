@@ -128,6 +128,6 @@ test("plan: the unknown-agent refusal is a single, complete line", () => {
 	assert.equal((unknownAgentLine(agents, "nope").match(/✗/g) ?? []).length, 1);
 });
 
-test("plan: the unknown-agent refusal says \"none\" when no agent is known", () => {
+test('plan: the unknown-agent refusal says "none" when no agent is known', () => {
 	assert.match(unknownAgentLine([], "nope"), /Available: none$/);
 });

@@ -238,7 +238,12 @@ async function controlAction(input: {
 	});
 	orchestrator.restore(found.run);
 
-	const ctx: ChildContext = { ...input, name: params.name, found, orchestrator };
+	const ctx: ChildContext = {
+		...input,
+		name: params.name,
+		found,
+		orchestrator,
+	};
 
 	if (action === "status") return renderChild(found.child, "status");
 	if (action === "steer") return steerChild(ctx);
@@ -286,7 +291,9 @@ function unknownChild(
 }
 
 /** Send a message to a running child without waiting for its reply. */
-async function steerChild(ctx: ChildContext): Promise<AgentToolResult<unknown>> {
+async function steerChild(
+	ctx: ChildContext,
+): Promise<AgentToolResult<unknown>> {
 	if (!ctx.params.message) {
 		return fail("`message` is required for steer.", ErrorCodes.INVALID_PARAMS);
 	}
@@ -299,7 +306,9 @@ async function steerChild(ctx: ChildContext): Promise<AgentToolResult<unknown>> 
 }
 
 /** Wait for the child's current turn and derive its outcome from the session. */
-async function collectChild(ctx: ChildContext): Promise<AgentToolResult<unknown>> {
+async function collectChild(
+	ctx: ChildContext,
+): Promise<AgentToolResult<unknown>> {
 	try {
 		// Honour the agent's own `timeoutMs`: the bundled roles declare budgets
 		// (worker 30min, oracle 20min) that were previously parsed and ignored.
@@ -315,7 +324,9 @@ async function collectChild(ctx: ChildContext): Promise<AgentToolResult<unknown>
 }
 
 /** Recycle the child: snapshot the outcome, exit the agent, close the pane. */
-async function retireChild(ctx: ChildContext): Promise<AgentToolResult<unknown>> {
+async function retireChild(
+	ctx: ChildContext,
+): Promise<AgentToolResult<unknown>> {
 	try {
 		const child = await ctx.orchestrator.retire(ctx.name);
 		await persistChild(ctx.store, ctx.found.runId, ctx.orchestrator, ctx.name);
@@ -334,7 +345,9 @@ async function retireChild(ctx: ChildContext): Promise<AgentToolResult<unknown>>
  * A live agent is prompted in place; an exited one is relaunched from its
  * persisted session so its context survives the pane being gone (F12).
  */
-async function reviveChild(ctx: ChildContext): Promise<AgentToolResult<unknown>> {
+async function reviveChild(
+	ctx: ChildContext,
+): Promise<AgentToolResult<unknown>> {
 	const { action, params, client, name, found, orchestrator } = ctx;
 
 	if (!params.message) {
@@ -412,7 +425,9 @@ async function launchFamily(input: {
 		settings,
 		runId: run.runId,
 		orchestrator,
-		dispatchModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+		dispatchModel: ctx.model
+			? `${ctx.model.provider}/${ctx.model.id}`
+			: undefined,
 		results: [],
 		handles: [],
 		timeoutByName: new Map(),
@@ -496,7 +511,9 @@ async function launchStep(
 		if (agent.timeoutMs !== undefined) {
 			session.timeoutByName.set(handle.name, agent.timeoutMs);
 		}
-		session.results.push(`▶ ${handle.name} (${agent.name}) pane=${handle.paneId}`);
+		session.results.push(
+			`▶ ${handle.name} (${agent.name}) pane=${handle.paneId}`,
+		);
 		// Surface frontmatter keys that are accepted but inert, so a user does
 		// not believe an unenforced setting is protecting them.
 		if (agent.unenforcedFields?.length) {
@@ -666,7 +683,8 @@ function isPresent(value: unknown): boolean {
 function firstInvalidStep(steps: PlanStep[], label: string): string | null {
 	for (let i = 0; i < steps.length; i += 1) {
 		const step = steps[i] ?? ({} as PlanStep);
-		if (!isPresent(step.agent)) return `${label}: step ${i + 1} has no \`agent\`.`;
+		if (!isPresent(step.agent))
+			return `${label}: step ${i + 1} has no \`agent\`.`;
 		if (!isPresent(step.task)) {
 			return `${label}: step ${i + 1} has an empty \`task\`.`;
 		}
