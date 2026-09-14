@@ -151,70 +151,13 @@ export function parseSubagentSettings(
 	const input = raw as Record<string, unknown>;
 	const out: SubagentsSettings = {};
 
-	if (input.defaultModel !== undefined) {
-		if (typeof input.defaultModel !== "string" || !input.defaultModel.trim()) {
-			throw new Error(
-				`Subagent settings in '${filePath}' have invalid 'defaultModel'; expected a non-empty string.`,
-			);
-		}
-		out.defaultModel = input.defaultModel.trim();
-	}
-
-	if (input.defaultProvider !== undefined) {
-		if (
-			typeof input.defaultProvider !== "string" ||
-			!input.defaultProvider.trim()
-		) {
-			throw new Error(
-				`Subagent settings in '${filePath}' have invalid 'defaultProvider'; expected a non-empty string.`,
-			);
-		}
-		out.defaultProvider = input.defaultProvider.trim();
-	}
-
-	if (input.agentOverrides !== undefined) {
-		if (
-			!input.agentOverrides ||
-			typeof input.agentOverrides !== "object" ||
-			Array.isArray(input.agentOverrides)
-		) {
-			throw new Error(
-				`Subagent settings in '${filePath}' have invalid 'agentOverrides'; expected an object.`,
-			);
-		}
-		// Each value must itself be an object. A scalar was silently accepted and
-		// then ignored by the field-by-field merge, so the override looked
-		// configured while doing nothing (the F45 failure mode).
-		for (const [name, value] of Object.entries(
-			input.agentOverrides as Record<string, unknown>,
-		)) {
-			if (!value || typeof value !== "object" || Array.isArray(value)) {
-				throw new Error(
-					`Subagent settings in '${filePath}' have invalid 'agentOverrides.${name}'; expected an object of agent fields.`,
-				);
-			}
-		}
-		out.agentOverrides =
-			input.agentOverrides as SubagentsSettings["agentOverrides"];
-	}
-
-	if (input.disableBuiltins !== undefined) {
-		if (typeof input.disableBuiltins !== "boolean") {
-			throw new Error(
-				`Subagent settings in '${filePath}' have invalid 'disableBuiltins'; expected a boolean.`,
-			);
-		}
-		out.disableBuiltins = input.disableBuiltins;
-	}
-
-	if (input.disableThinking !== undefined) {
-		if (typeof input.disableThinking !== "boolean") {
-			throw new Error(
-				`Subagent settings in '${filePath}' have invalid 'disableThinking'; expected a boolean.`,
-			);
-		}
-		out.disableThinking = input.disableThinking;
-	}
+	// Each reader validates one field and returns `undefined` when absent, so a
+	// missing key and a rejected key stay distinguishable (only the latter throws).
+	setIf(out, "defaultModel", requiredString(input.defaultModel, "defaultModel", filePath));
+	setIf(out, "defaultProvider", requiredString(input.defaultProvider, "defaultProvider", filePath));
+	setIf(out, "agentOverrides", parseAgentOverrides(input.agentOverrides, filePath));
+	setIf(out, "disableBuiltins", requiredBoolean(input.disableBuiltins, "disableBuiltins", filePath));
+	setIf(out, "disableThinking", requiredBoolean(input.disableThinking, "disableThinking", filePath));
 
 	const maxSpawns = positiveInt(
 		input.maxSubagentSpawnsPerSession,
@@ -230,6 +173,74 @@ export function parseSubagentSettings(
 	if (herdr) out.herdr = herdr;
 
 	return out;
+}
+
+/** Assign `value` when present, leaving the key absent otherwise. */
+function setIf<T extends object, K extends keyof T>(
+	target: T,
+	key: K,
+	value: T[K] | undefined,
+): void {
+	if (value !== undefined) target[key] = value;
+}
+
+/** A non-empty trimmed string, or `undefined` when the key is absent. */
+function requiredString(
+	value: unknown,
+	key: string,
+	filePath: string,
+): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || !value.trim()) {
+		throw new Error(
+			`Subagent settings in '${filePath}' have invalid '${key}'; expected a non-empty string.`,
+		);
+	}
+	return value.trim();
+}
+
+/** A boolean, or `undefined` when the key is absent. */
+function requiredBoolean(
+	value: unknown,
+	key: string,
+	filePath: string,
+): boolean | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "boolean") {
+		throw new Error(
+			`Subagent settings in '${filePath}' have invalid '${key}'; expected a boolean.`,
+		);
+	}
+	return value;
+}
+
+/**
+ * Validate `agentOverrides`.
+ *
+ * Each value must be an object. A scalar used to pass validation and was then
+ * ignored by the field-by-field merge, so the override looked configured while
+ * doing nothing (the F45 failure mode).
+ */
+function parseAgentOverrides(
+	value: unknown,
+	filePath: string,
+): SubagentsSettings["agentOverrides"] {
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error(
+			`Subagent settings in '${filePath}' have invalid 'agentOverrides'; expected an object.`,
+		);
+	}
+	for (const [name, override] of Object.entries(
+		value as Record<string, unknown>,
+	)) {
+		if (!override || typeof override !== "object" || Array.isArray(override)) {
+			throw new Error(
+				`Subagent settings in '${filePath}' have invalid 'agentOverrides.${name}'; expected an object of agent fields.`,
+			);
+		}
+	}
+	return value as SubagentsSettings["agentOverrides"];
 }
 
 /**

@@ -15,6 +15,7 @@ import type {
 	AgentScope,
 	AgentSource,
 	AcceptanceConfig,
+	AcceptanceCriterion,
 	OnBlockedPolicy,
 	Placement,
 	SystemPromptMode,
@@ -180,49 +181,12 @@ function parseIndentedBlock(text: string): Record<string, unknown> | undefined {
 	if (!/^[A-Za-z_][\w-]*:/.test(lines[0] ?? "")) return undefined;
 
 	const out: Record<string, unknown> = {};
-	let currentListKey: string | null = null;
-	let currentItem: Record<string, unknown> | null = null;
+	const state: BlockState = { listKey: null, item: null };
 
 	for (const rawLine of lines) {
 		if (!rawLine.trim()) continue;
 		const indent = rawLine.length - rawLine.trimStart().length;
-		const line = rawLine.trim();
-
-		// List item: `- key: value` starts a new object in the current list.
-		const itemMatch = line.match(/^-\s+([A-Za-z_][\w-]*):\s*(.*)$/);
-		if (itemMatch && currentListKey) {
-			currentItem = {};
-			const [, key, value] = itemMatch;
-			currentItem[key as string] = parseScalar(value as string);
-			const arr = out[currentListKey];
-			if (Array.isArray(arr)) arr.push(currentItem);
-			else out[currentListKey] = [currentItem];
-			continue;
-		}
-
-		const kvMatch = line.match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
-		if (!kvMatch) continue;
-		const [, key, value] = kvMatch;
-		const k = key as string;
-		const v = (value as string).trim();
-
-		if (v === "") {
-			// A key with no inline value opens either a nested map or a list.
-			currentListKey = k;
-			currentItem = null;
-			out[k] = [];
-			continue;
-		}
-
-		// A continuation line (deeper indent) belongs to the current list item.
-		if (currentItem && indent > 0) {
-			currentItem[k] = parseScalar(v);
-			continue;
-		}
-
-		currentListKey = null;
-		currentItem = null;
-		out[k] = parseScalar(v);
+		applyBlockLine(out, state, rawLine.trim(), indent);
 	}
 
 	// An empty list means the key was a nested map, not a list — drop it.
@@ -230,6 +194,58 @@ function parseIndentedBlock(text: string): Record<string, unknown> | undefined {
 		if (Array.isArray(v) && v.length === 0) delete out[k];
 	}
 	return out;
+}
+
+/** Parser position: the list currently being filled, and its open item. */
+interface BlockState {
+	listKey: string | null;
+	item: Record<string, unknown> | null;
+}
+
+/**
+ * Apply one line of an indented block. Three shapes matter:
+ *   `- key: value`  a new object in the current list
+ *   `key:`          opens a list (or a nested map, resolved at the end)
+ *   `key: value`    a scalar, or a continuation of the open list item
+ */
+function applyBlockLine(
+	out: Record<string, unknown>,
+	state: BlockState,
+	line: string,
+	indent: number,
+): void {
+	const itemMatch = line.match(/^-\s+([A-Za-z_][\w-]*):\s*(.*)$/);
+	if (itemMatch && state.listKey) {
+		const [, key, value] = itemMatch;
+		state.item = { [key as string]: parseScalar(value as string) };
+		const arr = out[state.listKey];
+		if (Array.isArray(arr)) arr.push(state.item);
+		else out[state.listKey] = [state.item];
+		return;
+	}
+
+	const kvMatch = line.match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
+	if (!kvMatch) return;
+	const key = kvMatch[1] as string;
+	const value = (kvMatch[2] as string).trim();
+
+	if (value === "") {
+		// A key with no inline value opens either a nested map or a list.
+		state.listKey = key;
+		state.item = null;
+		out[key] = [];
+		return;
+	}
+
+	// A deeper-indented line continues the open list item.
+	if (state.item && indent > 0) {
+		state.item[key] = parseScalar(value);
+		return;
+	}
+
+	state.listKey = null;
+	state.item = null;
+	out[key] = parseScalar(value);
 }
 
 /** Scalar for the block parser: flow list, number, boolean, or string. */
@@ -267,31 +283,51 @@ function parseAcceptance(value: unknown): AcceptanceConfig | undefined {
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
 		return undefined;
 
-	{
-		const level = str(parsed.level);
-		if (!level || !VALID_ACCEPTANCE_LEVELS.has(level)) return undefined;
-		const out: AcceptanceConfig = { level: level as AcceptanceConfig["level"] };
-		const role = str(parsed.role);
-		if (role === "read-only" || role === "writer" || role === "unknown")
-			out.role = role;
-		if (Array.isArray(parsed.criteria)) {
-			out.criteria = parsed.criteria
-				.filter(
-					(c): c is Record<string, unknown> =>
-						Boolean(c) && typeof c === "object",
-				)
-				.map((c) => ({
-					id: str(c.id) ?? "",
-					must: str(c.must) ?? "",
-					...(list(c.evidence) ? { evidence: list(c.evidence) } : {}),
-					...(str(c.severity) === "required" || str(c.severity) === "optional"
-						? { severity: str(c.severity) as "required" | "optional" }
-						: {}),
-				}))
-				.filter((c) => c.id && c.must);
-		}
-		return out;
+	const level = str(parsed.level);
+	if (!level || !VALID_ACCEPTANCE_LEVELS.has(level)) return undefined;
+
+	const out: AcceptanceConfig = { level: level as AcceptanceConfig["level"] };
+	const role = str(parsed.role);
+	if (role === "read-only" || role === "writer" || role === "unknown") {
+		out.role = role;
 	}
+	const criteria = parseCriteria(parsed.criteria);
+	if (criteria) out.criteria = criteria;
+	return out;
+}
+
+/**
+ * Parse the `criteria` list.
+ *
+ * A criterion without both `id` and `must` is dropped rather than kept in a
+ * half-filled state: it could not be reported back to the caller usefully.
+ * Returns `undefined` when nothing usable remains.
+ */
+function parseCriteria(value: unknown): AcceptanceCriterion[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+
+	const criteria = value.flatMap((entry): AcceptanceCriterion[] => {
+		if (!entry || typeof entry !== "object") return [];
+		const record = entry as Record<string, unknown>;
+		const id = str(record.id);
+		const must = str(record.must);
+		if (!id || !must) return [];
+
+		const evidence = list(record.evidence);
+		const severity = str(record.severity);
+		return [
+			{
+				id,
+				must,
+				...(evidence ? { evidence } : {}),
+				...(severity === "required" || severity === "optional"
+					? { severity: severity as AcceptanceCriterion["severity"] }
+					: {}),
+			},
+		];
+	});
+
+	return criteria.length > 0 ? criteria : undefined;
 }
 
 function parseBudget(value: unknown): ToolBudgetConfig | undefined {
@@ -565,57 +601,68 @@ export function discoverAgents(
 	scope: AgentScope,
 	opts: DiscoverOptions = {},
 ): AgentDiscoveryResult {
-	const builtinAgentsDir = opts.builtinAgentsDir ?? BUILTIN_AGENTS_DIR;
-	const userDir = opts.userAgentsDir ?? path.join(homeAgentDir(), "agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd, opts.configDirName);
-
-	// The bundled roles are scope-independent: they are the shipped defaults.
-	const builtinAgents =
-		opts.includeBuiltin === false
-			? []
-			: loadAgentsFromDir(builtinAgentsDir, "builtin");
-
-	const extras =
-		scope === "project"
-			? []
-			: (opts.extraAgentDirs ?? extraAgentDirs()).flatMap((dir) =>
-					loadAgentsFromDir(dir, "user"),
-				);
-
-	const userAgents =
-		scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
-	const projectAgents =
-		scope === "user" || !projectAgentsDir
-			? []
-			: loadAgentsFromDir(projectAgentsDir, "project");
+	const layers = agentLayers(scope, projectAgentsDir, opts);
 
 	const byName = new Map<string, AgentConfig>();
 	const order: string[] = [];
 
-	const add = (agent: AgentConfig, overwrite: boolean) => {
-		if (!byName.has(agent.name)) order.push(agent.name);
-		else if (!overwrite) return;
-		byName.set(agent.name, agent);
-	};
-
-	// Lower precedence first; each later layer may overwrite.
-	for (const agent of builtinAgents) add(agent, false);
-	for (const agent of extras) add(agent, false);
-
-	if (scope === "project") {
-		for (const agent of projectAgents) add(agent, true);
-	} else if (scope === "user") {
-		for (const agent of userAgents) add(agent, true);
-	} else {
-		for (const agent of userAgents) add(agent, true);
-		for (const agent of projectAgents) add(agent, true);
+	// Lower precedence first; each later layer may overwrite by name.
+	for (const layer of layers) {
+		for (const agent of layer) {
+			if (!byName.has(agent.name)) order.push(agent.name);
+			byName.set(agent.name, agent);
+		}
 	}
 
 	return {
 		agents: order.map((name) => byName.get(name) as AgentConfig),
 		projectAgentsDir,
-		builtinAgentsDir,
+		builtinAgentsDir: opts.builtinAgentsDir ?? BUILTIN_AGENTS_DIR,
 	};
+}
+
+/**
+ * The agent directories to merge, lowest precedence first.
+ *
+ * Scope decides which layers participate: `project` skips the user layers,
+ * `user` skips the project layer, `both` includes everything. The bundled roles
+ * are scope-independent (they are the shipped defaults) and are always first so
+ * any user or project definition can shadow them.
+ */
+function agentLayers(
+	scope: AgentScope,
+	projectAgentsDir: string | null,
+	opts: DiscoverOptions,
+): AgentConfig[][] {
+	const layers: AgentConfig[][] = [];
+
+	// The bundled roles ship with the package, so a fresh install has a working
+	// set with no user setup at all.
+	if (opts.includeBuiltin !== false) {
+		layers.push(
+			loadAgentsFromDir(opts.builtinAgentsDir ?? BUILTIN_AGENTS_DIR, "builtin"),
+		);
+	}
+
+	if (scope !== "project") {
+		// Extra read-only dirs (Nix store, container) rank below the real user dir.
+		for (const dir of opts.extraAgentDirs ?? extraAgentDirs()) {
+			layers.push(loadAgentsFromDir(dir, "user"));
+		}
+		layers.push(
+			loadAgentsFromDir(
+				opts.userAgentsDir ?? path.join(homeAgentDir(), "agents"),
+				"user",
+			),
+		);
+	}
+
+	if (scope !== "user" && projectAgentsDir) {
+		layers.push(loadAgentsFromDir(projectAgentsDir, "project"));
+	}
+
+	return layers;
 }
 
 /** Resolve `~/.pi/agent` without importing pi internals. */

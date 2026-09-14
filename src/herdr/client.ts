@@ -200,6 +200,69 @@ function toTabInfo(raw: unknown): TabInfo {
 	};
 }
 
+/**
+ * herdr wraps an agent in `{agent: {...}}` for some calls and returns it
+ * directly for others, so both shapes have to be accepted.
+ */
+function agentFromResult(value: unknown): AgentInfo {
+	const record = asRecord(value);
+	return toAgentInfo(record.agent ?? value);
+}
+
+/**
+ * Map `agent start`'s payload to `AgentStartResult`.
+ * The session path is the resume credential (F1), so it is only included when
+ * herdr actually reported one — a non-pi kind reports `null` (F7).
+ */
+function toAgentStartResult(
+	value: unknown,
+	opts: { name: string; paneId: string },
+): AgentStartResult {
+	const record = asRecord(value);
+	const agent = toAgentInfo(record.agent);
+	const sessionPath = agent.agent_session?.value;
+	return {
+		name: agent.name ?? opts.name,
+		paneId: agent.pane_id || opts.paneId,
+		argv: Array.isArray(record.argv) ? record.argv.map(String) : [],
+		...(sessionPath ? { sessionPath } : {}),
+		agentStatus: agent.agent_status,
+	};
+}
+
+/**
+ * herdr wraps a pane in `{pane: {...}}` for some calls and returns it directly
+ * for others, so both shapes have to be accepted.
+ */
+function paneFromResult(value: unknown): PaneInfo {
+	const record = asRecord(value);
+	return toPaneInfo(record.pane ?? value);
+}
+
+/** Map one entry of `pane process-info`'s `foreground_processes`. */
+function toForegroundProcess(raw: unknown): ProcessInfo["foregroundProcesses"][number] {
+	const p = asRecord(raw);
+	return {
+		argv: Array.isArray(p.argv) ? p.argv.map(String) : [],
+		cmdline: str(p.cmdline) ?? "",
+		pid: typeof p.pid === "number" ? p.pid : 0,
+		name: str(p.name) ?? "",
+		cwd: str(p.cwd),
+	};
+}
+
+/** Map the `pane process-info` payload into `ProcessInfo`. */
+function toProcessInfo(value: unknown): ProcessInfo {
+	const info = asRecord(asRecord(value).process_info ?? value);
+	const procs = Array.isArray(info.foreground_processes)
+		? info.foreground_processes
+		: [];
+	return {
+		foregroundProcesses: procs.map(toForegroundProcess),
+		shellPid: typeof info.shell_pid === "number" ? info.shell_pid : undefined,
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -208,6 +271,31 @@ type Call = <T>(
 	args: string[],
 	opts?: { timeoutMs?: number },
 ) => Promise<HerdrResult<T>>;
+
+/** Append `--env K=V` for each entry. Shared by pane split and tab create. */
+function pushEnvArgs(args: string[], env: Record<string, string> | undefined): void {
+	for (const [key, value] of Object.entries(env ?? {})) {
+		args.push("--env", `${key}=${value}`);
+	}
+}
+
+/**
+ * The `--cwd` / `--env` / focus trailer shared by `pane split` and `tab create`.
+ * Both accept the same three options, and keeping them in one place means the
+ * focus flag can never be forgotten on one path (it must always be explicit).
+ */
+function pushLaunchTrailer(
+	args: string[],
+	opts: {
+		cwd?: string;
+		env?: Record<string, string>;
+		focus?: boolean;
+	},
+): void {
+	if (opts.cwd) args.push("--cwd", opts.cwd);
+	pushEnvArgs(args, opts.env);
+	args.push(opts.focus ? "--focus" : "--no-focus");
+}
 
 function createPaneApi(
 	call: Call,
@@ -228,14 +316,11 @@ function createPaneApi(
 			if (opts.current) args.push("--current");
 			else if (opts.target) args.push(opts.target);
 			args.push("--direction", opts.direction);
-			if (opts.cwd) args.push("--cwd", opts.cwd);
-			for (const [key, value] of Object.entries(opts.env ?? {}))
-				args.push("--env", `${key}=${value}`);
-			args.push(opts.focus ? "--focus" : "--no-focus");
+			pushLaunchTrailer(args, opts);
 
 			const res = await call<Record<string, unknown>>(args);
 			if (!res.ok) return res;
-			return ok(toPaneInfo(asRecord(res.value).pane ?? res.value));
+			return ok(paneFromResult(res.value));
 		},
 
 		paneClose(paneId) {
@@ -263,7 +348,7 @@ function createPaneApi(
 		async paneGet(paneId) {
 			const res = await call<Record<string, unknown>>(["pane", "get", paneId]);
 			if (!res.ok) return res;
-			return ok(toPaneInfo(asRecord(res.value).pane ?? res.value));
+			return ok(paneFromResult(res.value));
 		},
 
 		async paneProcessInfo(paneId) {
@@ -274,24 +359,7 @@ function createPaneApi(
 				paneId,
 			]);
 			if (!res.ok) return res;
-			const info = asRecord(asRecord(res.value).process_info ?? res.value);
-			const procs = Array.isArray(info.foreground_processes)
-				? info.foreground_processes
-				: [];
-			return ok({
-				foregroundProcesses: procs.map((p) => {
-					const pr = asRecord(p);
-					return {
-						argv: Array.isArray(pr.argv) ? pr.argv.map(String) : [],
-						cmdline: str(pr.cmdline) ?? "",
-						pid: typeof pr.pid === "number" ? pr.pid : 0,
-						name: str(pr.name) ?? "",
-						cwd: str(pr.cwd),
-					};
-				}),
-				shellPid:
-					typeof info.shell_pid === "number" ? info.shell_pid : undefined,
-			} satisfies ProcessInfo);
+			return ok(toProcessInfo(res.value));
 		},
 
 		paneReportMetadata(opts) {
@@ -317,11 +385,8 @@ function createTabApi(
 	return {
 		async tabCreate(opts) {
 			const args = ["tab", "create"];
-			if (opts.cwd) args.push("--cwd", opts.cwd);
 			if (opts.label) args.push("--label", opts.label);
-			for (const [key, value] of Object.entries(opts.env ?? {}))
-				args.push("--env", `${key}=${value}`);
-			args.push(opts.focus ? "--focus" : "--no-focus");
+			pushLaunchTrailer(args, opts);
 
 			const res = await call<Record<string, unknown>>(args);
 			if (!res.ok) return res;
@@ -381,17 +446,7 @@ function createAgentApi(
 				timeoutMs: (opts.timeoutMs ?? 45_000) + 15_000,
 			});
 			if (!res.ok) return res;
-
-			const value = asRecord(res.value);
-			const agent = toAgentInfo(value.agent);
-			const sessionPath = agent.agent_session?.value;
-			return ok({
-				name: agent.name ?? opts.name,
-				paneId: agent.pane_id || opts.paneId,
-				argv: Array.isArray(value.argv) ? value.argv.map(String) : [],
-				...(sessionPath ? { sessionPath } : {}),
-				agentStatus: agent.agent_status,
-			} satisfies AgentStartResult);
+			return ok(toAgentStartResult(res.value, opts));
 		},
 
 		async agentPrompt(target, text, opts = {}) {
@@ -403,15 +458,13 @@ function createAgentApi(
 				timeoutMs: (opts.timeoutMs ?? 0) + 20_000,
 			});
 			if (!res.ok) return res;
-			const value = asRecord(res.value);
-			return ok(toAgentInfo(value.agent ?? value));
+			return ok(agentFromResult(res.value));
 		},
 
 		async agentGet(target) {
 			const res = await call<Record<string, unknown>>(["agent", "get", target]);
 			if (!res.ok) return res;
-			const value = asRecord(res.value);
-			return ok(toAgentInfo(value.agent ?? value));
+			return ok(agentFromResult(res.value));
 		},
 
 		async agentList() {

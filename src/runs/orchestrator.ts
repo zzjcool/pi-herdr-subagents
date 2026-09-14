@@ -87,11 +87,76 @@ const defaultSleep = (ms: number) =>
 	new Promise<void>((r) => setTimeout(r, ms));
 
 /**
+ * Await a teardown call whose failure is genuinely ignorable.
+ *
+ * Recycling is best-effort by design: a pane may already be gone, and the
+ * session file survives either way (F12). Spelling that intent once keeps the
+ * call sites free of `await x.catch(...)` chains, which mix two async styles
+ * and hide which failures matter.
+ */
+async function bestEffort(work: Promise<unknown>): Promise<void> {
+	try {
+		await work;
+	} catch {
+		// Intentionally ignored — see the doc comment above.
+	}
+}
+
+/**
  * Random hex token proving we created a pane (guards against killing others').
  * Crypto-safe: this token is the ownership proof persisted in run.json.
  */
 function ownerToken(): string {
 	return randomBytes(8).toString("hex");
+}
+
+/**
+ * Derive the acceptance verdict (design §3.5).
+ *
+ * L2 reads the agent's own machine-readable verdict. An agent asserting success
+ * is exactly the signal that cannot be trusted (F32), so a self-report can only
+ * ever reach `attested` — never `verified`.
+ *
+ * L3 criteria are SEMANTIC (`must: "tests pass"`), so the runtime cannot decide
+ * them. Rather than silently dropping the checklist, it is carried forward for
+ * the caller to confirm; that is also why `verified` is never claimed here.
+ */
+function deriveAcceptance(
+	parsed: ReturnType<typeof parseSessionFile>,
+	execution: Execution,
+	pendingCriteria: ChildRecord["pendingCriteria"],
+): AcceptanceResult {
+	let acceptance: AcceptanceResult = { status: "unknown", level: "none" };
+	const verdict = extractVerdict(parsed.output);
+
+	if (verdict) {
+		acceptance = {
+			status: verdict.ok ? "accepted" : "rejected",
+			level: "attested",
+			...(verdict.reason ? { reason: verdict.reason } : {}),
+		};
+	} else if (execution.status === "success") {
+		acceptance = {
+			status: "unknown",
+			level: "none",
+			reason: "no machine-readable verdict",
+		};
+	} else {
+		acceptance = {
+			status: "rejected",
+			level: "none",
+			reason: execution.reason ?? execution.status,
+		};
+	}
+
+	if (pendingCriteria?.length) {
+		acceptance = {
+			...acceptance,
+			pendingCriteria: pendingCriteria.map((c) => ({ ...c })),
+		};
+	}
+
+	return acceptance;
 }
 
 /**
@@ -506,7 +571,7 @@ export class Orchestrator {
 			};
 		} catch (error) {
 			// Roll back the pane so a failed launch does not leak resources.
-			if (paneId) await this.client.paneClose(paneId).catch(() => undefined);
+			if (paneId) await bestEffort(this.client.paneClose(paneId));
 			throw error;
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
@@ -554,98 +619,18 @@ export class Orchestrator {
 		const timeoutMs = opts.timeoutMs ?? DEFAULTS.turnTimeoutMs;
 		const deadline = this.now() + timeoutMs;
 		const initial = parseSessionFile(child.sessionFile);
-		const before = countAssistantMessages(initial);
 
 		// Fast path: the turn has ALREADY settled (common when the caller polls
 		// status first, re-collects after a crash, or collects a finished child).
-		// Without this the poll below would never observe new growth and would
+		// Without this the wait below would never observe new growth and would
 		// block for the entire timeout.
 		const alreadySettled = isLastTurnComplete(initial);
-
-		// Phase 1: wait for the turn to actually start producing output.
-		// Without this, a collect issued right after launch sees the previous
-		// (empty) state and reports "unknown".
-		//
-		// Bounded by BOTH the deadline and an iteration cap: if an injected clock
-		// does not advance with `sleep`, the deadline alone would spin forever.
-		const maxPolls =
-			Math.max(1, Math.ceil(timeoutMs / this.pollIntervalMs)) + 10;
-		let progressed = alreadySettled;
-		for (let poll = 0; !alreadySettled && poll < maxPolls; poll += 1) {
-			const parsed = parseSessionFile(child.sessionFile);
-			if (countAssistantMessages(parsed) > before) {
-				progressed = true;
-				break;
-			}
-			if (this.now() >= deadline) break;
-			await this.sleep(this.pollIntervalMs);
-		}
-
-		// Phase 2: wait for the turn to settle, then confirm the session is quiet.
-		let timedOut = false;
-		if (progressed && !alreadySettled) {
-			const remaining = Math.max(1_000, deadline - this.now());
-			await this.client.agentWait(name, { timeoutMs: remaining });
-			await this.waitForQuiet(child.sessionFile, deadline);
-		} else if (!alreadySettled) {
-			// We never observed the turn produce anything before the deadline.
-			timedOut = true;
-		}
+		const timedOut =
+			alreadySettled ? false : await this.awaitTurn(child, initial, deadline);
 
 		const parsed = parseSessionFile(child.sessionFile);
-		let execution = deriveOutcome(parsed);
-
-		// Distinguish "we gave up waiting on a live agent" from "the turn was
-		// actually aborted". Both present as "no reply to the last prompt" (F29),
-		// so the discriminator is whether the agent is still alive:
-		//   alive  + no reply -> still running (we timed out)
-		//   gone   + no reply -> aborted (killed mid-turn)
-		if (timedOut && execution.status === "aborted") {
-			const agentState = await this.client.agentGet(name);
-			if (agentState.ok) {
-				execution = {
-					...execution,
-					status: "running",
-					reason: `collect timed out after ${timeoutMs}ms; the agent is still alive`,
-				};
-			}
-		}
-
-		// L2 self-reported verdict (design §3.5).
-		let acceptance: AcceptanceResult = { status: "unknown", level: "none" };
-		const verdict = extractVerdict(parsed.output);
-		if (verdict) {
-			acceptance = {
-				status: verdict.ok ? "accepted" : "rejected",
-				level: "attested",
-				...(verdict.reason ? { reason: verdict.reason } : {}),
-			};
-		} else if (execution.status === "success") {
-			acceptance = {
-				status: "unknown",
-				level: "none",
-				reason: "no machine-readable verdict",
-			};
-		} else {
-			acceptance = {
-				status: "rejected",
-				level: "none",
-				reason: execution.reason ?? execution.status,
-			};
-		}
-
-		// L3 criteria are SEMANTIC (`must: "tests pass"`), so the runtime cannot
-		// decide them. An agent asserting success is exactly the signal F32 shows
-		// cannot be trusted. So the checklist is carried forward for the caller
-		// instead of being silently dropped — and the level stays `attested`, so
-		// `verified` is never claimed without evidence someone actually checked.
-		const criteria = child.pendingCriteria;
-		if (criteria?.length) {
-			acceptance = {
-				...acceptance,
-				pendingCriteria: criteria.map((c) => ({ ...c })),
-			};
-		}
+		const execution = await this.resolveExecution(name, parsed, timedOut, timeoutMs);
+		const acceptance = deriveAcceptance(parsed, execution, child.pendingCriteria);
 
 		child.state = "awaiting";
 		child.execution = execution;
@@ -658,6 +643,76 @@ export class Orchestrator {
 			usage: parsed.usage,
 			model: parsed.model,
 			acceptance,
+		};
+	}
+
+	/**
+	 * Wait for the child's current turn to start and then settle.
+	 *
+	 * Two phases, because they answer different questions: phase 1 asks "did the
+	 * turn produce anything at all?" (a collect issued right after launch would
+	 * otherwise read the previous, empty state and report "unknown"), phase 2
+	 * waits for that turn to stop growing.
+	 *
+	 * Bounded by BOTH the deadline and an iteration cap: if an injected clock does
+	 * not advance with `sleep`, the deadline alone would spin forever.
+	 *
+	 * @returns true when the deadline passed before the turn produced anything.
+	 */
+	private async awaitTurn(
+		child: ChildRecord,
+		initial: ReturnType<typeof parseSessionFile>,
+		deadline: number,
+	): Promise<boolean> {
+		const before = countAssistantMessages(initial);
+		const timeoutMs = deadline - this.now();
+		const maxPolls =
+			Math.max(1, Math.ceil(timeoutMs / this.pollIntervalMs)) + 10;
+
+		let progressed = false;
+		for (let poll = 0; poll < maxPolls; poll += 1) {
+			const parsed = parseSessionFile(child.sessionFile);
+			if (countAssistantMessages(parsed) > before) {
+				progressed = true;
+				break;
+			}
+			if (this.now() >= deadline) break;
+			await this.sleep(this.pollIntervalMs);
+		}
+
+		// Nothing ever appeared: the caller gave up rather than the turn aborting.
+		if (!progressed) return true;
+
+		const remaining = Math.max(1_000, deadline - this.now());
+		await this.client.agentWait(child.name, { timeoutMs: remaining });
+		await this.waitForQuiet(child.sessionFile, deadline);
+		return false;
+	}
+
+	/**
+	 * Derive the outcome, disambiguating a timeout from a real abort.
+	 *
+	 * Both present as "no reply to the last prompt" (F29), so the discriminator
+	 * is whether the agent is still alive:
+	 *   alive + no reply -> still running (we timed out)
+	 *   gone  + no reply -> aborted (killed mid-turn)
+	 */
+	private async resolveExecution(
+		name: string,
+		parsed: ReturnType<typeof parseSessionFile>,
+		timedOut: boolean,
+		timeoutMs: number,
+	): Promise<Execution> {
+		const execution = deriveOutcome(parsed);
+		if (!timedOut || execution.status !== "aborted") return execution;
+
+		const agentState = await this.client.agentGet(name);
+		if (!agentState.ok) return execution;
+
+		return {
+			...execution,
+			status: "running",
+			reason: `collect timed out after ${timeoutMs}ms; the agent is still alive`,
 		};
 	}
 
@@ -722,13 +777,13 @@ export class Orchestrator {
 		if (child.paneId) {
 			const alive = await this.client.agentGet(name);
 			if (alive.ok) {
-				await this.client.agentSendKeys(name, "ctrl+d").catch(() => undefined);
+				await bestEffort(this.client.agentSendKeys(name, "ctrl+d"));
 				await this.sleep(600);
-				await this.client.agentSendKeys(name, "ctrl+d").catch(() => undefined);
+				await bestEffort(this.client.agentSendKeys(name, "ctrl+d"));
 				await this.sleep(1_200);
 			}
 			// F12: closing the pane is safe — the session file survives and resumes.
-			await this.client.paneClose(child.paneId).catch(() => undefined);
+			await bestEffort(this.client.paneClose(child.paneId));
 		}
 
 		child.state = "retired";
@@ -749,7 +804,7 @@ export class Orchestrator {
 			}
 		}
 		if (opts.tabId)
-			await this.client.tabClose(opts.tabId).catch(() => undefined);
+			await bestEffort(this.client.tabClose(opts.tabId));
 		return retired;
 	}
 
@@ -762,13 +817,11 @@ export class Orchestrator {
 		const res = await this.client.paneList();
 		if (!res.ok) return [];
 		const known = new Set(
-			[...this.children.values()]
-				.map((c) => c.paneId)
-				.filter(Boolean) as string[],
+			[...this.children.values()].flatMap((c) => (c.paneId ? [c.paneId] : [])),
 		);
-		return res.value
-			.filter((p) => p.tab_id === tabId && !known.has(p.pane_id))
-			.map((p) => p.pane_id);
+		return res.value.flatMap((p) =>
+			p.tab_id === tabId && !known.has(p.pane_id) ? [p.pane_id] : [],
+		);
 	}
 
 	childrenSnapshot(): ChildRecord[] {

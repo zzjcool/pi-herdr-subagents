@@ -482,8 +482,7 @@ export class RunStore {
 		try {
 			out = fs
 				.readdirSync(dir)
-				.filter((f) => f.endsWith(SESSION_EXT))
-				.map((f) => path.join(dir, f));
+				.flatMap((f) => (f.endsWith(SESSION_EXT) ? [path.join(dir, f)] : []));
 		} catch {
 			out = [];
 		}

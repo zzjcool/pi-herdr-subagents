@@ -184,56 +184,66 @@ export function parseSessionText(text: string): ParsedSession {
 		const line = raw.trim();
 		if (!line) continue;
 
-		let event: Record<string, unknown>;
-		try {
-			const decoded: unknown = JSON.parse(line);
-			// `JSON.parse` succeeds on bare scalars: `null`, `42`, `true`, `"x"`.
-			// Only a plain object can carry a `type`, and `null.type` throws — which
-			// would take down the whole parse. The session file is external input
-			// (a pane can be closed mid-write), so anything that is not an object
-			// is treated as a damaged line instead.
-			if (
-				decoded === null ||
-				typeof decoded !== "object" ||
-				Array.isArray(decoded)
-			) {
-				parsed.tornLines += 1;
-				continue;
-			}
-			event = decoded as Record<string, unknown>;
-		} catch {
+		const event = decodeEvent(line);
+		if (!event) {
 			parsed.tornLines += 1;
 			continue;
 		}
-
-		if (event.type !== "message") continue;
-		const message = event.message as Record<string, unknown> | undefined;
-		if (!message || typeof message !== "object") continue;
-
-		switch (message.role) {
-			case "user":
-				parsed.turns.push({
-					userText: userTextOf(message.content),
-					assistants: [],
-					toolResults: 0,
-					toolErrors: 0,
-				});
-				break;
-			case "assistant":
-				applyAssistant(parsed, message);
-				break;
-			case "toolResult":
-			case "tool":
-				applyToolResult(parsed, message);
-				break;
-			default:
-				break;
-		}
+		applyEvent(parsed, event);
 	}
 
 	const last = parsed.turns.at(-1);
 	parsed.lastTurnMissing = Boolean(last && last.assistants.length === 0);
 	return parsed;
+}
+
+/**
+ * Decode one JSONL line into an event object.
+ *
+ * Returns `null` for anything that is not a plain object, which covers both a
+ * syntax error and a bare scalar: `JSON.parse` happily yields `null`, `42`,
+ * `true` and `"x"`, and reading `.type` off `null` would take down the whole
+ * parse. The session file is external input — a pane can be closed mid-write —
+ * so a damaged line must never be fatal.
+ */
+function decodeEvent(line: string): Record<string, unknown> | null {
+	let decoded: unknown;
+	try {
+		decoded = JSON.parse(line);
+	} catch {
+		return null;
+	}
+	if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
+		return null;
+	}
+	return decoded as Record<string, unknown>;
+}
+
+/** Fold one decoded event into the parsed session. */
+function applyEvent(parsed: ParsedSession, event: Record<string, unknown>): void {
+	if (event.type !== "message") return;
+	const message = event.message as Record<string, unknown> | undefined;
+	if (!message || typeof message !== "object") return;
+
+	switch (message.role) {
+		case "user":
+			parsed.turns.push({
+				userText: userTextOf(message.content),
+				assistants: [],
+				toolResults: 0,
+				toolErrors: 0,
+			});
+			break;
+		case "assistant":
+			applyAssistant(parsed, message);
+			break;
+		case "toolResult":
+		case "tool":
+			applyToolResult(parsed, message);
+			break;
+		default:
+			break;
+	}
 }
 
 function num(v: unknown): number {

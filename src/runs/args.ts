@@ -69,66 +69,99 @@ export function buildPiArgs(input: BuildArgsInput): BuildArgsResult {
 	const args: string[] = [];
 	const tempFiles: string[] = [];
 
-	// ── session (F1/F4): always explicit so the path is known and durable. ──
+	// Ordering follows pi's CLI: session → model → tools → extensions → skills
+	// → system prompt → task. Each helper appends its own flags.
 	args.push("--session", input.sessionFile);
-
-	// ── model ──
-	const modelArg = applyThinkingSuffix(input.model, input.thinking);
-	if (modelArg) args.push("--model", modelArg);
-
-	// ── tools ──
-	const tools = input.agent.tools?.filter(Boolean) ?? [];
-	if (tools.length > 0) args.push("--tools", tools.join(","));
-
-	// ── extensions: only pass through what the agent explicitly lists. ──
-	const extensions = [
-		...(input.agent.extensions ?? []),
-		...(input.agent.subagentOnlyExtensions ?? []),
-	];
-	if (extensions.length > 0) {
-		for (const ext of extensions) args.push("--extension", ext);
-	}
-
-	// ── skills ──
-	if (input.agent.inheritSkills === false) {
-		args.push("--no-skills");
-	} else if (
-		Array.isArray(input.agent.skills) &&
-		input.agent.skills.length > 0
-	) {
-		for (const skill of input.agent.skills) args.push("--skill", skill);
-	}
-	for (const skillPath of input.agent.skillPath ?? [])
-		args.push("--skill", skillPath);
-
-	// ── project context (AGENTS.md etc.) ──
-	if (input.agent.inheritProjectContext === false)
-		args.push("--no-context-files");
-
-	// ── system prompt ──
-	const systemPrompt = input.agent.systemPrompt?.trim();
-	if (systemPrompt) {
-		const file = path.join(input.tempDir, "system-prompt.md");
-		fs.writeFileSync(file, systemPrompt, { mode: 0o600 });
-		tempFiles.push(file);
-		args.push(
-			input.agent.systemPromptMode === "replace"
-				? "--system-prompt"
-				: "--append-system-prompt",
-			file,
-		);
-	}
-
-	// ── task ──
-	const taskText = `Task: ${input.task}`;
-	if (taskText.length > TASK_ARG_LIMIT) {
-		const file = path.join(input.tempDir, "task.md");
-		fs.writeFileSync(file, taskText, { mode: 0o600 });
-		tempFiles.push(file);
-		args.push(`@${file}`);
-	} else {
-		args.push(taskText);
-	}
+	pushModelArgs(args, input);
+	pushToolArgs(args, input.agent);
+	pushSkillArgs(args, input.agent);
+	pushSystemPromptArgs(args, tempFiles, input);
+	pushTaskArg(args, tempFiles, input);
 
 	return { args, tempFiles };
+}
+
+/** `--model provider/id[:thinking]`, omitted when no model resolved. */
+function pushModelArgs(args: string[], input: BuildArgsInput): void {
+	const modelArg = applyThinkingSuffix(input.model, input.thinking);
+	if (modelArg) args.push("--model", modelArg);
+}
+
+/** `--tools a,b`, plus one `--extension` per explicitly listed extension. */
+function pushToolArgs(args: string[], agent: AgentConfig): void {
+	const tools = agent.tools?.filter(Boolean) ?? [];
+	if (tools.length > 0) args.push("--tools", tools.join(","));
+
+	// Only pass through what the agent explicitly lists: a child must not
+	// silently inherit every extension the parent happens to have loaded.
+	const extensions = [
+		...(agent.extensions ?? []),
+		...(agent.subagentOnlyExtensions ?? []),
+	];
+	for (const ext of extensions) args.push("--extension", ext);
+}
+
+/**
+ * Skills and project context.
+ *
+ * `inheritSkills: false` must suppress the parent's skills, which `--no-skills`
+ * does; otherwise the agent's own list plus any explicit paths are added.
+ */
+function pushSkillArgs(args: string[], agent: AgentConfig): void {
+	if (agent.inheritSkills === false) {
+		args.push("--no-skills");
+	} else if (Array.isArray(agent.skills) && agent.skills.length > 0) {
+		for (const skill of agent.skills) args.push("--skill", skill);
+	}
+	for (const skillPath of agent.skillPath ?? []) {
+		args.push("--skill", skillPath);
+	}
+
+	if (agent.inheritProjectContext === false) args.push("--no-context-files");
+}
+
+/**
+ * Write the system prompt to a file and reference it.
+ *
+ * Passed by path rather than inline so a long prompt cannot hit the argv limit,
+ * and so the file's mode (0600) keeps it out of other users' reach.
+ */
+function pushSystemPromptArgs(
+	args: string[],
+	tempFiles: string[],
+	input: BuildArgsInput,
+): void {
+	const systemPrompt = input.agent.systemPrompt?.trim();
+	if (!systemPrompt) return;
+
+	const file = path.join(input.tempDir, "system-prompt.md");
+	fs.writeFileSync(file, systemPrompt, { mode: 0o600 });
+	tempFiles.push(file);
+	args.push(
+		input.agent.systemPromptMode === "replace"
+			? "--system-prompt"
+			: "--append-system-prompt",
+		file,
+	);
+}
+
+/**
+ * The task itself, inline unless it would exceed the argv budget.
+ * An over-long task is written to a file and referenced with `@path`, which pi
+ * expands — the alternative is an E2BIG failure at exec time.
+ */
+function pushTaskArg(
+	args: string[],
+	tempFiles: string[],
+	input: BuildArgsInput,
+): void {
+	const taskText = `Task: ${input.task}`;
+	if (taskText.length <= TASK_ARG_LIMIT) {
+		args.push(taskText);
+		return;
+	}
+	const file = path.join(input.tempDir, "task.md");
+	fs.writeFileSync(file, taskText, { mode: 0o600 });
+	tempFiles.push(file);
+	args.push(`@${file}`);
 }

@@ -18,11 +18,6 @@ export interface ParsedFrontmatter {
 	body: string;
 }
 
-/** Escape a string for safe use inside a RegExp. */
-function escapeRegex(s: string): string {
-	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /**
  * Fold a YAML folded block (`>`): single newlines become spaces, blank lines
  * become newlines, and more-indented lines keep their line breaks.
@@ -95,96 +90,148 @@ export function stripQuotes(raw: string): string {
  * A document without a leading `---` fence yields empty frontmatter.
  */
 export function parseFrontmatter(content: string): ParsedFrontmatter {
-	const frontmatter: Record<string, string> = {};
 	const normalized = content.replace(/\r\n/g, "\n");
+	const block = extractFrontmatterBlock(normalized);
+	if (block === null) return { frontmatter: {}, body: normalized };
 
-	if (!normalized.startsWith("---")) {
-		return { frontmatter, body: normalized };
-	}
-
-	const endIndex = normalized.indexOf("\n---", 3);
-	if (endIndex === -1) {
-		return { frontmatter, body: normalized };
-	}
-
-	const block = normalized.slice(4, endIndex);
-	const body = normalized.slice(endIndex + 4).trim();
-
-	let currentKey: string | null = null;
-	let currentLines: string[] | null = null;
-	let currentIndent: number | null = null;
-	let currentFolded = false;
-
-	const flush = () => {
-		if (currentKey === null || currentLines === null) return;
-		const rawBlock = currentLines.join("\n");
-		const leading = rawBlock.match(/^[ \t]+(?=\S)/m);
-		const prefix = leading?.[0] ?? "";
-		const stripped = prefix
-			? rawBlock
-					.replace(new RegExp(`^${escapeRegex(prefix)}`, "gm"), "")
-					.replace(/^\n/, "")
-			: rawBlock;
-		frontmatter[currentKey] = currentFolded ? foldBlock(stripped) : stripped;
-		currentKey = null;
-		currentLines = null;
-		currentIndent = null;
-		currentFolded = false;
+	return {
+		frontmatter: parseFrontmatterLines(block.value),
+		body: block.rest,
 	};
+}
+
+/** The `---`-delimited block and everything after it, or null when absent. */
+function extractFrontmatterBlock(
+	normalized: string,
+): { value: string; rest: string } | null {
+	if (!normalized.startsWith("---")) return null;
+	const endIndex = normalized.indexOf("\n---", 3);
+	if (endIndex === -1) return null;
+	return {
+		value: normalized.slice(4, endIndex),
+		rest: normalized.slice(endIndex + 4).trim(),
+	};
+}
+
+/** The block scalars that introduce a multi-line value. */
+const BLOCK_SCALARS = new Set(["|", "|-", "|+", ">", ">-", ">+"]);
+
+/**
+ * Parse the frontmatter block into `key -> raw text`.
+ *
+ * Values are kept as strings: nested blocks keep their relative indentation so
+ * a caller (e.g. `parseAcceptance`) can interpret them. Block scalars (`|`, `>`)
+ * are folded; quoted scalars are unquoted.
+ */
+function parseFrontmatterLines(block: string): Record<string, string> {
+	const frontmatter: Record<string, string> = {};
+	const open: OpenValue = { key: null, lines: null, indent: null, folded: false };
 
 	for (const line of block.split("\n")) {
 		const indent = line.search(/\S|$/);
 		const trimmed = line.trim();
 
-		// Continuation of a block value.
+		// A deeper-indented line (or a blank line inside a folded block)
+		// continues the value currently being collected.
 		if (
-			currentKey !== null &&
-			currentLines !== null &&
-			(indent > (currentIndent ?? 0) || (currentFolded && trimmed === ""))
+			open.key !== null &&
+			open.lines !== null &&
+			(indent > (open.indent ?? 0) || (open.folded && trimmed === ""))
 		) {
-			currentLines.push(line);
+			open.lines.push(line);
 			continue;
 		}
 
-		flush();
+		flushOpenValue(frontmatter, open);
 
 		const match = line.match(/^([\w-]+):\s*(.*)$/);
 		if (!match) continue; // comments, blank lines, stray text
 
 		const key = match[1] as string;
 		const rawValue = (match[2] ?? "").trim();
-		const quoted =
-			(rawValue.startsWith('"') && rawValue.endsWith('"')) ||
-			(rawValue.startsWith("'") && rawValue.endsWith("'"));
+		const quoted = isQuoted(rawValue);
 
-		if (
-			!quoted &&
-			(rawValue === "|" ||
-				rawValue === "|-" ||
-				rawValue === "|+" ||
-				rawValue === ">" ||
-				rawValue === ">-" ||
-				rawValue === ">+")
-		) {
-			currentKey = key;
-			currentLines = [];
-			currentIndent = indent;
-			currentFolded = rawValue.startsWith(">");
+		if (!quoted && BLOCK_SCALARS.has(rawValue)) {
+			startOpenValue(open, key, indent, rawValue.startsWith(">"));
 			continue;
 		}
 
 		if (rawValue === "") {
-			// Either a nested block or an empty value; defer until we see indentation.
-			currentKey = key;
-			currentLines = [];
-			currentIndent = indent;
-			currentFolded = false;
+			// Either a nested block or an empty value; the next indented line
+			// decides which. Collected either way, then stripped on flush.
+			startOpenValue(open, key, indent, false);
 			continue;
 		}
 
 		frontmatter[key] = stripQuotes(rawValue);
 	}
 
-	flush();
-	return { frontmatter, body };
+	flushOpenValue(frontmatter, open);
+	return frontmatter;
+}
+
+/** The value currently being collected across several lines. */
+interface OpenValue {
+	key: string | null;
+	lines: string[] | null;
+	indent: number | null;
+	folded: boolean;
+}
+
+function startOpenValue(
+	open: OpenValue,
+	key: string,
+	indent: number,
+	folded: boolean,
+): void {
+	open.key = key;
+	open.lines = [];
+	open.indent = indent;
+	open.folded = folded;
+}
+
+/**
+ * Remove one leading indentation prefix from every line, then a leading blank.
+ * A line without the prefix (shorter, or differently indented) is left alone so
+ * relative indentation inside a nested block survives.
+ */
+function stripIndent(block: string, prefix: string): string {
+	return block
+		.split("\n")
+		.map((line) => (line.startsWith(prefix) ? line.slice(prefix.length) : line))
+		.join("\n")
+		.replace(/^\n/, "");
+}
+
+/**
+ * Store the collected multi-line value and reset the accumulator.
+ *
+ * The common leading indentation is removed so a nested block can be parsed on
+ * its own terms. Stripping is done with a string slice rather than a built
+ * RegExp: `prefix` is always whitespace (it comes from `/^[ \t]+(?=\S)/m`), so
+ * a per-line `slice` is both clearer and immune to pattern injection.
+ */
+function flushOpenValue(
+	frontmatter: Record<string, string>,
+	open: OpenValue,
+): void {
+	if (open.key === null || open.lines === null) return;
+
+	const rawBlock = open.lines.join("\n");
+	const prefix = rawBlock.match(/^[ \t]+(?=\S)/m)?.[0] ?? "";
+	const stripped = prefix ? stripIndent(rawBlock, prefix) : rawBlock;
+
+	frontmatter[open.key] = open.folded ? foldBlock(stripped) : stripped;
+	open.key = null;
+	open.lines = null;
+	open.indent = null;
+	open.folded = false;
+}
+
+/** True when a raw scalar is wrapped in matching quotes. */
+function isQuoted(rawValue: string): boolean {
+	return (
+		(rawValue.startsWith('"') && rawValue.endsWith('"')) ||
+		(rawValue.startsWith("'") && rawValue.endsWith("'"))
+	);
 }

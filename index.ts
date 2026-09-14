@@ -112,15 +112,6 @@ const SubagentParams = Type.Object({
 /** The validated tool parameters, as the model supplies them. */
 type SubagentParams = Static<typeof SubagentParams>;
 
-/** Everything the two execution paths need from the request. */
-interface RunContext {
-	params: SubagentParams;
-	client: HerdrClient;
-	store: RunStore;
-	cwd: string;
-	agents: AgentConfig[];
-}
-
 // ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
@@ -165,7 +156,15 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 				return controlAction({ action, params, client, store, cwd, agents });
 			}
 
-			return launchFamily({ params, ctx, client, store, cwd, agents, settings });
+			return launchFamily({
+				params,
+				ctx,
+				client,
+				store,
+				cwd,
+				agents,
+				settings,
+			});
 		},
 	});
 }
@@ -181,7 +180,10 @@ function loadCatalog(
 	sessionCwd: string,
 	runCwd: string,
 	scope: AgentScope | undefined,
-): { agents: AgentConfig[]; settings: ReturnType<typeof resolveSubagentSettings> } {
+): {
+	agents: AgentConfig[];
+	settings: ReturnType<typeof resolveSubagentSettings>;
+} {
 	const settingsPath = path.join(sessionCwd, ".pi", "settings.json");
 	const settings = resolveSubagentSettings(
 		loadSubagentSettings({ userSettingsPath: settingsPath }),
@@ -214,7 +216,7 @@ async function controlAction(input: {
 	cwd: string;
 	agents: AgentConfig[];
 }): Promise<AgentToolResult<unknown>> {
-	const { action, params, client, store, cwd, agents } = input;
+	const { action, params, store, cwd } = input;
 
 	if (!params.name) {
 		return fail(
@@ -224,111 +226,151 @@ async function controlAction(input: {
 	}
 
 	const found = findChild(store.listRuns(), params.name);
-	if (!found) {
-		// Child records live under `<cwd>/.pi-subagents`, so a control call from a
-		// different directory cannot see them. Say so explicitly — a bare
-		// "unknown child" sends the caller hunting for a typo.
-		const known = store.listRuns().flatMap((r) => r.children.map((c) => c.name));
-		return fail(
-			`unknown child: ${params.name} (no run under ${cwd}/.pi-subagents` +
-				`${known.length ? `; known here: ${known.join(", ")}` : ""}). ` +
-				`Child records are scoped to the \`cwd\` they were launched from — ` +
-				`pass the same \`cwd\` you used for \`launch\`.`,
-			ErrorCodes.NOT_FOUND,
-		);
-	}
+	if (!found) return unknownChild(params.name, store, cwd);
 
 	const orchestrator = new Orchestrator({
-		client,
+		client: input.client,
 		runDir: store.runDir(found.runId),
 		cwd,
 	});
 	orchestrator.restore(found.run);
 
+	const ctx: ChildContext = { ...input, name: params.name, found, orchestrator };
+
 	if (action === "status") return renderChild(found.child, "status");
-
-	if (action === "steer") {
-		if (!params.message)
-			return fail("`message` is required for steer.", ErrorCodes.INVALID_PARAMS);
-		try {
-			await orchestrator.steer(params.name, params.message);
-			return ok(`Steered ${params.name}.`);
-		} catch (error) {
-			return fail(`steer failed: ${String(error)}`, ErrorCodes.NOT_FOUND);
-		}
-	}
-
-	if (action === "collect") {
-		try {
-			// Honour the agent's own `timeoutMs`: the bundled roles declare budgets
-			// (worker 30min, oracle 20min) that were previously parsed and ignored.
-			const agentDef = agents.find((a) => a.name === found.child.agent);
-			const collected = await orchestrator.collect(params.name, {
-				timeoutMs: agentDef?.timeoutMs ?? DEFAULTS.turnTimeoutMs,
-			});
-			await persistChild(store, found.runId, orchestrator, params.name);
-			return ok(renderCollect(params.name, collected));
-		} catch (error) {
-			return fail(`collect failed: ${String(error)}`, ErrorCodes.NOT_FOUND);
-		}
-	}
-
-	if (action === "retire") {
-		// Actually recycle: snapshot the outcome, exit the agent, close the pane.
-		try {
-			const child = await orchestrator.retire(params.name);
-			await persistChild(store, found.runId, orchestrator, params.name);
-			return ok(
-				`Retired ${params.name} (execution=${child.execution?.status ?? "unknown"}). ` +
-					`Pane closed; session kept for resume: ${child.sessionFile}`,
-			);
-		} catch (error) {
-			return fail(`retire failed: ${String(error)}`, ErrorCodes.RETIRE_FAILED);
-		}
-	}
-
-	if (action === "continue" || action === "resume") {
-		if (!params.message) {
-			return fail(
-				`\`message\` is required for ${action}.`,
-				ErrorCodes.INVALID_PARAMS,
-			);
-		}
-		const agentDef = agents.find((a) => a.name === found.child.agent);
-		if (!agentDef) {
-			return fail(
-				`agent "${found.child.agent}" is no longer defined`,
-				ErrorCodes.UNKNOWN_AGENT,
-			);
-		}
-
-		try {
-			// A live agent is prompted in place; an exited one is rebuilt from its
-			// persisted session so context survives.
-			const agentState = await client.agentGet(params.name);
-			if (agentState.ok) {
-				await orchestrator.steer(params.name, params.message);
-				return ok(
-					`${action === "resume" ? "Resumed" : "Continued"} ${params.name} (live agent prompted).`,
-				);
-			}
-
-			const handle = await orchestrator.launch({
-				agent: agentDef,
-				task: params.message,
-				name: params.name,
-				...(found.child.model ? { model: found.child.model } : {}),
-			});
-			return ok(
-				`Resumed ${handle.name} from its session (pane ${handle.paneId}). ` +
-					`Context preserved from ${handle.sessionFile}`,
-			);
-		} catch (error) {
-			return fail(`${action} failed: ${String(error)}`, ErrorCodes.START_FAILED);
-		}
-	}
+	if (action === "steer") return steerChild(ctx);
+	if (action === "collect") return collectChild(ctx);
+	if (action === "retire") return retireChild(ctx);
+	if (action === "continue" || action === "resume") return reviveChild(ctx);
 
 	return fail(`unhandled action: ${action}`, ErrorCodes.INVALID_PARAMS);
+}
+
+/** A resolved child plus the collaborators every control action needs. */
+interface ChildContext {
+	action: string;
+	params: SubagentParams;
+	/** Always set: `controlAction` rejects a request without a name. */
+	name: string;
+	client: HerdrClient;
+	store: RunStore;
+	cwd: string;
+	agents: AgentConfig[];
+	found: NonNullable<ReturnType<typeof findChild>>;
+	orchestrator: Orchestrator;
+}
+
+/**
+ * Explain a lookup miss.
+ *
+ * Child records live under `<cwd>/.pi-subagents`, so a control call from a
+ * different directory cannot see them. Saying so — and listing what IS visible —
+ * saves the caller from hunting for a typo that does not exist.
+ */
+function unknownChild(
+	name: string,
+	store: RunStore,
+	cwd: string,
+): AgentToolResult<unknown> {
+	const known = store.listRuns().flatMap((r) => r.children.map((c) => c.name));
+	return fail(
+		`unknown child: ${name} (no run under ${cwd}/.pi-subagents` +
+			`${known.length ? `; known here: ${known.join(", ")}` : ""}). ` +
+			`Child records are scoped to the \`cwd\` they were launched from — ` +
+			`pass the same \`cwd\` you used for \`launch\`.`,
+		ErrorCodes.NOT_FOUND,
+	);
+}
+
+/** Send a message to a running child without waiting for its reply. */
+async function steerChild(ctx: ChildContext): Promise<AgentToolResult<unknown>> {
+	if (!ctx.params.message) {
+		return fail("`message` is required for steer.", ErrorCodes.INVALID_PARAMS);
+	}
+	try {
+		await ctx.orchestrator.steer(ctx.name, ctx.params.message);
+		return ok(`Steered ${ctx.name}.`);
+	} catch (error) {
+		return fail(`steer failed: ${String(error)}`, ErrorCodes.NOT_FOUND);
+	}
+}
+
+/** Wait for the child's current turn and derive its outcome from the session. */
+async function collectChild(ctx: ChildContext): Promise<AgentToolResult<unknown>> {
+	try {
+		// Honour the agent's own `timeoutMs`: the bundled roles declare budgets
+		// (worker 30min, oracle 20min) that were previously parsed and ignored.
+		const agentDef = ctx.agents.find((a) => a.name === ctx.found.child.agent);
+		const collected = await ctx.orchestrator.collect(ctx.name, {
+			timeoutMs: agentDef?.timeoutMs ?? DEFAULTS.turnTimeoutMs,
+		});
+		await persistChild(ctx.store, ctx.found.runId, ctx.orchestrator, ctx.name);
+		return ok(renderCollect(ctx.name, collected));
+	} catch (error) {
+		return fail(`collect failed: ${String(error)}`, ErrorCodes.NOT_FOUND);
+	}
+}
+
+/** Recycle the child: snapshot the outcome, exit the agent, close the pane. */
+async function retireChild(ctx: ChildContext): Promise<AgentToolResult<unknown>> {
+	try {
+		const child = await ctx.orchestrator.retire(ctx.name);
+		await persistChild(ctx.store, ctx.found.runId, ctx.orchestrator, ctx.name);
+		return ok(
+			`Retired ${ctx.name} (execution=${child.execution?.status ?? "unknown"}). ` +
+				`Pane closed; session kept for resume: ${child.sessionFile}`,
+		);
+	} catch (error) {
+		return fail(`retire failed: ${String(error)}`, ErrorCodes.RETIRE_FAILED);
+	}
+}
+
+/**
+ * Continue or resume a child.
+ *
+ * A live agent is prompted in place; an exited one is relaunched from its
+ * persisted session so its context survives the pane being gone (F12).
+ */
+async function reviveChild(ctx: ChildContext): Promise<AgentToolResult<unknown>> {
+	const { action, params, client, name, found, orchestrator } = ctx;
+
+	if (!params.message) {
+		return fail(
+			`\`message\` is required for ${action}.`,
+			ErrorCodes.INVALID_PARAMS,
+		);
+	}
+
+	const agentDef = ctx.agents.find((a) => a.name === found.child.agent);
+	if (!agentDef) {
+		return fail(
+			`agent "${found.child.agent}" is no longer defined`,
+			ErrorCodes.UNKNOWN_AGENT,
+		);
+	}
+
+	try {
+		const agentState = await client.agentGet(name);
+		if (agentState.ok) {
+			await orchestrator.steer(name, params.message);
+			return ok(
+				`${action === "resume" ? "Resumed" : "Continued"} ${name} (live agent prompted).`,
+			);
+		}
+
+		const handle = await orchestrator.launch({
+			agent: agentDef,
+			task: params.message,
+			name,
+			...(found.child.model ? { model: found.child.model } : {}),
+		});
+		return ok(
+			`Resumed ${handle.name} from its session (pane ${handle.paneId}). ` +
+				`Context preserved from ${handle.sessionFile}`,
+		);
+	} catch (error) {
+		return fail(`${action} failed: ${String(error)}`, ErrorCodes.START_FAILED);
+	}
 }
 
 /**
@@ -345,14 +387,14 @@ async function launchFamily(input: {
 	agents: AgentConfig[];
 	settings: ReturnType<typeof resolveSubagentSettings>;
 }): Promise<AgentToolResult<unknown>> {
-	const { params, ctx, client, store, cwd, agents, settings } = input;
+	const { params, ctx, store, cwd, agents, settings } = input;
 
 	const plan = buildPlan(params);
 	if (!plan.ok) return fail(plan.message, ErrorCodes.INVALID_PARAMS);
 
 	const run = store.createRun({ task: plan.task, cwd });
 	const orchestrator = new Orchestrator({
-		client,
+		client: input.client,
 		runDir: store.runDir(run.runId),
 		cwd,
 		// Enforce the session spawn budget so a runaway fan-out cannot exhaust
@@ -360,112 +402,145 @@ async function launchFamily(input: {
 		maxSpawns: settings.maxSubagentSpawnsPerSession ?? null,
 	});
 
-	const dispatchModel = ctx.model
-		? `${ctx.model.provider}/${ctx.model.id}`
-		: undefined;
+	const session: LaunchSession = {
+		params,
+		store,
+		agents,
+		settings,
+		runId: run.runId,
+		orchestrator,
+		dispatchModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+		results: [],
+		handles: [],
+		timeoutByName: new Map(),
+	};
 
-	const results: string[] = [];
-	const handles: string[] = [];
-	// Per-child collect budget, so each child's own `timeoutMs` is honoured
-	// rather than every child sharing the global default.
-	const timeoutByName = new Map<string, number>();
-
-	for (const step of plan.steps) {
-		const agent = agents.find((a) => a.name === step.agent);
-		if (!agent) {
-			results.push(
-				`✗ unknown agent "${step.agent}". Available: ${agents.map((a) => a.name).join(", ") || "none"}`,
-			);
-			continue;
-		}
-		if (agent.disabled) {
-			results.push(`✗ agent "${step.agent}" is disabled`);
-			continue;
-		}
-
-		const resolved = resolveModel({
-			agent,
-			...((step.model ?? params.model)
-				? { override: step.model ?? params.model }
-				: {}),
-			...(dispatchModel ? { dispatchModel } : {}),
-			...(settings.defaultModel ? { defaultModel: settings.defaultModel } : {}),
-			// Enables `agentOverridesByProvider.<provider>.<agent>` (design §6.2,
-			// level 2). Without this the provider-scoped overrides parsed from
-			// settings would never apply.
-			...(dispatchModel ? { parentProvider: providerOf(dispatchModel) } : {}),
-			settings,
-		});
-
-		const violation = checkModelScope(
-			resolved.model,
-			settings.modelScope,
-			"explicit",
-		);
-		if (violation && violation.severity === "error") {
-			results.push(`✗ ${violation.message}`);
-			continue;
-		}
-
-		try {
-			// Let `launch()` allocate: it consults the GLOBAL herdr name namespace.
-			// Pre-allocating here from local state alone would bypass that check and
-			// collide with another session's agent.
-			const handle = await orchestrator.launch({
-				agent,
-				task: step.task,
-				...(resolved.model ? { model: resolved.model } : {}),
-				...(params.placement
-					? { placement: params.placement as Placement }
-					: {}),
-			});
-			await store.addChild(run.runId, handle.child);
-			handles.push(handle.name);
-			if (agent.timeoutMs !== undefined) {
-				timeoutByName.set(handle.name, agent.timeoutMs);
-			}
-			results.push(`▶ ${handle.name} (${agent.name}) pane=${handle.paneId}`);
-			// Surface frontmatter keys that are accepted but inert, so a user does
-			// not believe an unenforced setting is protecting them.
-			if (agent.unenforcedFields?.length) {
-				results.push(
-					`  ⚠ ${agent.name} sets fields that are not enforced yet: ` +
-						`${agent.unenforcedFields.join(", ")}`,
-				);
-			}
-		} catch (error) {
-			const message =
-				error instanceof SubagentError
-					? `${error.code}: ${error.message}`
-					: String(error);
-			results.push(`✗ ${step.agent}: ${message}`);
-		}
-	}
+	// One child failing must not abort the rest, so each step reports its own line.
+	for (const step of plan.steps) await launchStep(session, step);
 
 	// Collect inline unless the caller asked for async (the default).
 	const isAsync = params.async ?? true;
-	if (!isAsync) {
-		for (const name of handles) {
-			try {
-				const collected = await orchestrator.collect(name, {
-					timeoutMs: timeoutByName.get(name) ?? DEFAULTS.turnTimeoutMs,
-				});
-				results.push(renderCollect(name, collected));
-			} catch (error) {
-				results.push(`✗ ${name}: collect failed: ${String(error)}`);
-			}
-		}
-	}
+	if (!isAsync) await collectInline(session);
 
 	// Persist whatever the run produced (children + their outcomes).
-	for (const name of handles) {
+	for (const name of session.handles) {
 		await persistChild(store, run.runId, orchestrator, name);
 	}
 
 	return {
-		content: [{ type: "text", text: results.join("\n") }],
-		details: { runId: run.runId, handles, async: isAsync },
+		content: [{ type: "text", text: session.results.join("\n") }],
+		details: { runId: run.runId, handles: session.handles, async: isAsync },
 	};
+}
+
+/** Accumulated state for one launch-family request. */
+interface LaunchSession {
+	params: SubagentParams;
+	store: RunStore;
+	agents: AgentConfig[];
+	settings: ReturnType<typeof resolveSubagentSettings>;
+	runId: string;
+	orchestrator: Orchestrator;
+	dispatchModel: string | undefined;
+	results: string[];
+	handles: string[];
+	timeoutByName: Map<string, number>;
+}
+
+/**
+ * Launch one step, recording either a launch line or a refusal.
+ * Never throws: a bad step degrades to a message so the others still run.
+ */
+async function launchStep(
+	session: LaunchSession,
+	step: { agent: string; task: string; model?: string },
+): Promise<void> {
+	const { params, agents, settings, results } = session;
+
+	const agent = agents.find((a) => a.name === step.agent);
+	if (!agent) {
+		const available = agents.map((a) => a.name).join(", ") || "none";
+		results.push(`✗ unknown agent "${step.agent}". Available: ${available}`);
+		return;
+	}
+	if (agent.disabled) {
+		results.push(`✗ agent "${step.agent}" is disabled`);
+		return;
+	}
+
+	const resolved = resolveModel({
+		agent,
+		...((step.model ?? params.model)
+			? { override: step.model ?? params.model }
+			: {}),
+		...(session.dispatchModel ? { dispatchModel: session.dispatchModel } : {}),
+		...(settings.defaultModel ? { defaultModel: settings.defaultModel } : {}),
+		// Enables `agentOverridesByProvider.<provider>.<agent>` (design §6.2,
+		// level 2). Without this the provider-scoped overrides parsed from
+		// settings would never apply.
+		...(session.dispatchModel
+			? { parentProvider: providerOf(session.dispatchModel) }
+			: {}),
+		settings,
+	});
+
+	const violation = checkModelScope(
+		resolved.model,
+		settings.modelScope,
+		"explicit",
+	);
+	if (violation && violation.severity === "error") {
+		results.push(`✗ ${violation.message}`);
+		return;
+	}
+
+	try {
+		// Let `launch()` allocate: it consults the GLOBAL herdr name namespace.
+		// Pre-allocating here from local state alone would bypass that check and
+		// collide with another session's agent.
+		const handle = await session.orchestrator.launch({
+			agent,
+			task: step.task,
+			...(resolved.model ? { model: resolved.model } : {}),
+			...(params.placement
+				? { placement: params.placement as Placement }
+				: {}),
+		});
+		await session.store.addChild(session.runId, handle.child);
+		session.handles.push(handle.name);
+		if (agent.timeoutMs !== undefined) {
+			session.timeoutByName.set(handle.name, agent.timeoutMs);
+		}
+		results.push(`▶ ${handle.name} (${agent.name}) pane=${handle.paneId}`);
+		// Surface frontmatter keys that are accepted but inert, so a user does
+		// not believe an unenforced setting is protecting them.
+		if (agent.unenforcedFields?.length) {
+			results.push(
+				`  ⚠ ${agent.name} sets fields that are not enforced yet: ` +
+					`${agent.unenforcedFields.join(", ")}`,
+			);
+		}
+	} catch (error) {
+		const message =
+			error instanceof SubagentError
+				? `${error.code}: ${error.message}`
+				: String(error);
+		results.push(`✗ ${step.agent}: ${message}`);
+	}
+}
+
+/** Wait for each launched child's turn, appending its outcome. */
+async function collectInline(session: LaunchSession): Promise<void> {
+	for (const name of session.handles) {
+		try {
+			const collected = await session.orchestrator.collect(name, {
+				timeoutMs: session.timeoutByName.get(name) ?? DEFAULTS.turnTimeoutMs,
+			});
+			session.results.push(renderCollect(name, collected));
+		} catch (error) {
+			session.results.push(`✗ ${name}: collect failed: ${String(error)}`);
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -486,12 +561,7 @@ export function buildPlan(params: {
 	tasks?: Array<{ agent: string; task: string; model?: string }>;
 	chain?: Array<{ agent: string; task: string; model?: string }>;
 }): Plan {
-	// `Boolean("   ")` is true, so a whitespace-only task used to pass and launch
-	// a child with a meaningless prompt. Presence is decided on trimmed content.
-	const present = (value: unknown): boolean =>
-		typeof value === "string" && value.trim().length > 0;
-
-	const hasSingle = present(params.agent) && present(params.task);
+	const hasSingle = isPresent(params.agent) && isPresent(params.task);
 	const hasTasks = Boolean(params.tasks?.length);
 	const hasChain = Boolean(params.chain?.length);
 	const count = Number(hasSingle) + Number(hasTasks) + Number(hasChain);
@@ -507,12 +577,6 @@ export function buildPlan(params: {
 			message: "Provide exactly one of: (agent+task), tasks[], or chain[].",
 		};
 
-	const invalid = (step: { agent?: string; task?: string }, i: number) => {
-		if (!present(step?.agent)) return `step ${i + 1} has no \`agent\``;
-		if (!present(step?.task)) return `step ${i + 1} has an empty \`task\``;
-		return null;
-	};
-
 	if (hasSingle) {
 		return {
 			ok: true,
@@ -527,28 +591,17 @@ export function buildPlan(params: {
 	// were allocated). Validate every entry up front instead.
 
 	if (hasTasks) {
-		const tasks = params.tasks as Array<{
-			agent: string;
-			task: string;
-			model?: string;
-		}>;
-		for (let i = 0; i < tasks.length; i += 1) {
-			const problem = invalid(tasks[i] ?? {}, i);
-			if (problem) return { ok: false, message: `tasks[]: ${problem}.` };
-		}
+		const tasks = params.tasks as PlanStep[];
+		const problem = firstInvalidStep(tasks, "tasks[]");
+		if (problem) return { ok: false, message: problem };
 		return { ok: true, task: `${tasks.length} parallel tasks`, steps: tasks };
 	}
 
 	// Chain: substitute {previous} with the prior step's output at runtime.
-	const chain = params.chain as Array<{
-		agent: string;
-		task: string;
-		model?: string;
-	}>;
-	for (let i = 0; i < chain.length; i += 1) {
-		const problem = invalid(chain[i] ?? {}, i);
-		if (problem) return { ok: false, message: `chain[]: ${problem}.` };
-	}
+	const chain = params.chain as PlanStep[];
+	const problem = firstInvalidStep(chain, "chain[]");
+	if (problem) return { ok: false, message: problem };
+
 	const steps = chain.map((step, i) => ({
 		...step,
 		task:
@@ -557,6 +610,37 @@ export function buildPlan(params: {
 				: step.task.replace(/\{previous\}/g, "(previous step output)"),
 	}));
 	return { ok: true, task: `chain of ${chain.length}`, steps };
+}
+
+/** One entry of `tasks[]` or `chain[]`. */
+interface PlanStep {
+	agent: string;
+	task: string;
+	model?: string;
+}
+
+/**
+ * True when a value is a non-blank string.
+ * `Boolean("   ")` is true, so a whitespace-only task would otherwise pass and
+ * launch a child with a meaningless prompt.
+ */
+function isPresent(value: unknown): boolean {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * Report the first entry that would launch a child with nothing to do.
+ * Returns `null` when every entry is usable.
+ */
+function firstInvalidStep(steps: PlanStep[], label: string): string | null {
+	for (let i = 0; i < steps.length; i += 1) {
+		const step = steps[i] ?? ({} as PlanStep);
+		if (!isPresent(step.agent)) return `${label}: step ${i + 1} has no \`agent\`.`;
+		if (!isPresent(step.task)) {
+			return `${label}: step ${i + 1} has an empty \`task\`.`;
+		}
+	}
+	return null;
 }
 
 /**
