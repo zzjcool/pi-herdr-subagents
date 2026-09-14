@@ -248,8 +248,18 @@ function applyBlockLine(
 	out[key] = parseScalar(value);
 }
 
+/**
+ * One scalar value from the frontmatter block parser.
+ *
+ * Deliberately a closed union rather than `unknown`: this parser only ever
+ * produces these four shapes, and naming them lets every caller narrow without
+ * a cast. `parseScalar` used to return `unknown`, which pushed the unsafe part
+ * of parsing onto consumers instead of resolving it here at the boundary.
+ */
+type Scalar = string | number | boolean | string[];
+
 /** Scalar for the block parser: flow list, number, boolean, or string. */
-function parseScalar(raw: string): unknown {
+function parseScalar(raw: string): Scalar {
 	const value = raw.trim();
 	if (!value) return "";
 	if (value.startsWith("[") && value.endsWith("]")) {
@@ -336,7 +346,7 @@ function parseBudget(value: unknown): ToolBudgetConfig | undefined {
 	try {
 		const parsed = JSON.parse(raw) as Record<string, unknown>;
 		const max = int(parsed.maxToolCalls);
-		return max !== undefined ? { maxToolCalls: max } : undefined;
+		return max === undefined ? undefined : { maxToolCalls: max };
 	} catch {
 		return undefined;
 	}
@@ -348,7 +358,7 @@ function parseTurnBudget(value: unknown): TurnBudgetConfig | undefined {
 	try {
 		const parsed = JSON.parse(raw) as Record<string, unknown>;
 		const max = int(parsed.maxTurns);
-		return max !== undefined ? { maxTurns: max } : undefined;
+		return max === undefined ? undefined : { maxTurns: max };
 	} catch {
 		return undefined;
 	}
@@ -396,9 +406,18 @@ export function parseAgentDocument(
 /**
  * Assign `value` when present. Keeps the field appliers below free of the
  * repeated `if (x !== undefined)` shape that made this parser hard to scan.
+ *
+ * Generic over the TARGET so `key` is checked against the object's real keys:
+ * a typo like `setIf(config, "modle", ...)` is a compile error, and no call site
+ * or the helper itself needs a cast. (`object` + a cast, the previous shape,
+ * checked neither.)
  */
-function setIf<T>(target: object, key: string, value: T | undefined): void {
-	if (value !== undefined) (target as Record<string, unknown>)[key] = value;
+function setIf<T extends object, K extends keyof T>(
+	target: T,
+	key: K,
+	value: T[K] | undefined,
+): void {
+	if (value !== undefined) target[key] = value as T[K];
 }
 
 /**
@@ -483,6 +502,11 @@ function applyHerdrFields(config: AgentConfig, fm: AgentFrontmatter): void {
  * nothing is worse than an unknown one: the user believes it is in effect.
  *
  * Keep this list honest — remove a field the moment it starts being enforced.
+ *
+ * Typed against `AgentConfig`'s keys: a renamed or removed field cannot be left
+ * behind here silently (the previous untyped array could name a key that no
+ * longer exists and would simply stop reporting it, which is the exact drift
+ * this list is meant to prevent).
  */
 const UNENFORCED_FIELDS = [
 	"worktree",
@@ -494,14 +518,15 @@ const UNENFORCED_FIELDS = [
 	"allowNestedSubagents",
 	"alias",
 	"toolTimeoutMs",
-] as const;
+] as const satisfies readonly (keyof AgentConfig)[];
 
 /** The subset of `UNENFORCED_FIELDS` this agent actually sets. */
 function unenforcedFieldsIn(config: AgentConfig): string[] {
-	const set = config as unknown as Record<string, unknown>;
+	// No cast needed: every name in `UNENFORCED_FIELDS` is a real key of
+	// `AgentConfig` (typed as such below), so this is an ordinary indexed read.
 	const out: string[] = [];
 	for (const field of UNENFORCED_FIELDS) {
-		if (set[field] !== undefined) out.push(field);
+		if (config[field] !== undefined) out.push(field);
 	}
 	// NOTE: `acceptance.criteria` is NOT listed here. It is surfaced by
 	// `collect()` as an explicit checklist for the caller, which is the only
