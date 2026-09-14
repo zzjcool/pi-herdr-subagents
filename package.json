@@ -39,7 +39,8 @@
     "test": "node --experimental-strip-types --test test/unit/*.test.ts",
     "test:integration": "node --experimental-strip-types --test test/integration/*.test.ts",
     "test:live": "node --experimental-strip-types --test test/live/*.test.ts",
-    "test:all": "npm run typecheck && npm run test && npm run test:integration"
+    "test:all": "npm run typecheck && npm run test && npm run test:integration",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run test:integration"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
