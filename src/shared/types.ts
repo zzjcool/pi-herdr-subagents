@@ -537,10 +537,7 @@ export interface HerdrSettings {
 export interface SubagentsSettings {
 	defaultModel?: string;
 	defaultProvider?: string;
-	agentOverrides?: Record<
-		string,
-		Partial<AgentConfig> & { disabled?: boolean }
-	>;
+	agentOverrides?: Record<string, Partial<AgentConfig> & { disabled?: boolean }>;
 	/**
 	 * Role fields layered by the active parent provider (design §6.2).
 	 * Lets one role definition be configured differently per provider, e.g.

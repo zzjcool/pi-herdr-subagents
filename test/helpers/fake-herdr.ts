@@ -476,8 +476,7 @@ export class FakeHerdr {
 					return fail("agent_name_taken", `agent name ${name} is already used`);
 				}
 				// F1/F7: only pi kinds report a session path.
-				const sessionPath =
-					kind === "pi" ? `/tmp/sessions/${name}.jsonl` : null;
+				const sessionPath = kind === "pi" ? `/tmp/sessions/${name}.jsonl` : null;
 				this.addAgent(name, paneId, kind, sessionPath);
 				const agent = this.agents.get(name)!;
 				pane.agent_status = "idle";

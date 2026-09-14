@@ -257,8 +257,7 @@ export class Orchestrator {
 		this.now = deps.now ?? (() => Date.now());
 		this.sleep = deps.sleep ?? defaultSleep;
 		this.startRetries = deps.startRetries ?? DEFAULTS.startRetries;
-		this.startBackoff =
-			deps.startRetryBackoffMs ?? DEFAULTS.startRetryBackoffMs;
+		this.startBackoff = deps.startRetryBackoffMs ?? DEFAULTS.startRetryBackoffMs;
 		this.startTimeoutMs = deps.startTimeoutMs ?? DEFAULTS.startTimeoutMs;
 		// Inherit lineage from the environment when this process is itself a child,
 		// so nested subagents can be bounded and cycles are impossible.
@@ -561,9 +560,7 @@ export class Orchestrator {
 			used: this.spawned,
 			limit: this.maxSpawns,
 			remaining:
-				this.maxSpawns === null
-					? null
-					: Math.max(0, this.maxSpawns - this.spawned),
+				this.maxSpawns === null ? null : Math.max(0, this.maxSpawns - this.spawned),
 		};
 	}
 
@@ -861,8 +858,7 @@ export class Orchestrator {
 	): Promise<boolean> {
 		const before = countAssistantMessages(initial);
 		const timeoutMs = deadline - this.now();
-		const maxPolls =
-			Math.max(1, Math.ceil(timeoutMs / this.pollIntervalMs)) + 10;
+		const maxPolls = Math.max(1, Math.ceil(timeoutMs / this.pollIntervalMs)) + 10;
 
 		let progressed = false;
 		for (let poll = 0; poll < maxPolls; poll += 1) {

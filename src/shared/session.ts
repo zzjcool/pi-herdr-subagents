@@ -462,8 +462,7 @@ function extractJsonVerdict(
 	// Also try the last balanced {...} span, so prose around the JSON still works.
 	const first = text.indexOf("{");
 	const last = text.lastIndexOf("}");
-	if (first !== -1 && last > first)
-		candidates.push(text.slice(first, last + 1));
+	if (first !== -1 && last > first) candidates.push(text.slice(first, last + 1));
 
 	for (const candidate of candidates) {
 		let parsed: unknown;
@@ -472,8 +471,7 @@ function extractJsonVerdict(
 		} catch {
 			continue;
 		}
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-			continue;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
 		const obj = parsed as Record<string, unknown>;
 		if (typeof obj.ok !== "boolean") continue;
 		const out: { ok: boolean; reason?: string } = { ok: obj.ok };
