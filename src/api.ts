@@ -134,11 +134,13 @@ export {
 export type { CompletionInput, CompletionNotice } from "./extension/notify.ts";
 export {
 	applyStatus,
+	createStatusBoard,
 	formatBusyLabel,
 	formatFooterStatus,
 	formatWidgetLines,
 	STATUS_FOOTER_KEY,
 	STATUS_WIDGET_KEY,
+	STATUS_WIDGET_PLACEMENT,
 } from "./tui/status.ts";
 export {
 	blockMessage,

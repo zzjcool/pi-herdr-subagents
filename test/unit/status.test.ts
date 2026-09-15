@@ -2,20 +2,25 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
 	applyStatus,
+	createStatusBoard,
 	formatBusyLabel,
 	formatElapsed,
 	formatFooterStatus,
 	formatWidgetLines,
 	STATUS_FOOTER_KEY,
 	STATUS_WIDGET_KEY,
+	STATUS_WIDGET_PLACEMENT,
 	type StatusEntry,
 	type StatusUi,
+	type WidgetFactory,
 } from "../../src/tui/status.ts";
 
 const entries: StatusEntry[] = [
 	{ name: "worker-0", agent: "worker", state: "working", startedAt: 1_000 },
 	{ name: "reviewer-1", agent: "reviewer", state: "working", startedAt: 2_000 },
 ];
+
+const theme = { fg: (_color: string, text: string) => text };
 
 test("formatElapsed rounds to seconds", () => {
 	assert.equal(formatElapsed(0), "0s");
@@ -38,21 +43,27 @@ test("formatBusyLabel matches the herdr overlay copy", () => {
 	);
 });
 
-test("formatWidgetLines puts a roster under the input", () => {
+test("formatWidgetLines matches the pi-subagents async roster", () => {
 	assert.deepEqual(formatWidgetLines([], 5_000), []);
+	assert.deepEqual(formatWidgetLines(entries.slice(0, 1), 5_000), [
+		"● worker-0 (worker) · 4s",
+		"  ⎿  working",
+	]);
 	const lines = formatWidgetLines(entries, 5_000);
-	assert.equal(lines[0], "  2 active agents");
-	assert.match(lines[1] ?? "", /● worker-0 \(worker\)  working  4s/);
-	assert.match(lines[2] ?? "", /● reviewer-1 \(reviewer\)  working  3s/);
+	assert.equal(lines[0], "● Async agents · herdr");
+	assert.equal(lines[1], "├─ ● worker-0 (worker) · 4s");
+	assert.equal(lines[2], "│    ⎿  working");
+	assert.equal(lines[3], "└─ ● reviewer-1 (reviewer) · 3s");
+	assert.equal(lines[4], "     ⎿  working");
 });
 
-test("applyStatus paints below the editor and in the footer", () => {
+test("applyStatus paints above the editor and in the footer", () => {
 	const widgets: unknown[] = [];
 	const statuses: unknown[] = [];
 	const ctx: StatusUi = {
 		hasUI: true,
 		ui: {
-			theme: { fg: (_color, text) => text },
+			theme,
 			setStatus(key, text) {
 				statuses.push({ key, text });
 			},
@@ -69,8 +80,9 @@ test("applyStatus paints below the editor and in the footer", () => {
 		options: { placement: string };
 	};
 	assert.equal(widget.key, STATUS_WIDGET_KEY);
-	assert.equal(widget.options.placement, "belowEditor");
-	assert.equal(widget.content.length, 3);
+	assert.equal(widget.options.placement, STATUS_WIDGET_PLACEMENT);
+	assert.equal(widget.options.placement, "aboveEditor");
+	assert.match(widget.content[0] ?? "", /Async agents/);
 	assert.deepEqual(statuses, [
 		{ key: STATUS_FOOTER_KEY, text: "2 agents running" },
 	]);
@@ -87,7 +99,7 @@ test("applyStatus is a no-op without UI", () => {
 		{
 			hasUI: false,
 			ui: {
-				theme: { fg: (_c, t) => t },
+				theme,
 				setStatus() {
 					called += 1;
 				},
@@ -100,4 +112,47 @@ test("applyStatus is a no-op without UI", () => {
 		5_000,
 	);
 	assert.equal(called, 0);
+});
+
+test("status board registers a persistent factory and then requestRender", () => {
+	const widgets: unknown[] = [];
+	const statuses: unknown[] = [];
+	let renders = 0;
+	const tui = { requestRender: () => { renders += 1; } };
+	const ctx: StatusUi = {
+		hasUI: true,
+		ui: {
+			theme,
+			setStatus(key, text) {
+				statuses.push({ key, text });
+			},
+			setWidget(key, content, options) {
+				widgets.push({ key, content, options });
+				if (typeof content === "function") {
+					(content as WidgetFactory)(tui, theme);
+				}
+			},
+		},
+	};
+	const board = createStatusBoard();
+	board.bind(ctx);
+	board.paint(entries, 5_000);
+	assert.equal(widgets.length, 1);
+	const first = widgets[0] as {
+		content: WidgetFactory;
+		options: { placement: string };
+	};
+	assert.equal(typeof first.content, "function");
+	assert.equal(first.options.placement, "aboveEditor");
+	const component = first.content(tui, theme);
+	assert.match(component.render().join("\n"), /worker-0/);
+
+	board.paint(entries, 6_000);
+	assert.equal(widgets.length, 1, "must not remount the widget on every tick");
+	assert.equal(renders, 1);
+
+	board.paint([], 7_000);
+	const cleared = widgets.at(-1) as { content: undefined };
+	assert.equal(cleared.content, undefined);
+	assert.deepEqual(statuses.at(-1), { key: STATUS_FOOTER_KEY, text: undefined });
 });

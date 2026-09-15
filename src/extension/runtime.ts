@@ -16,8 +16,7 @@ import {
 	type SendMessageApi,
 } from "./notify.ts";
 import {
-	applyStatus,
-	clearStatus,
+	createStatusBoard,
 	formatBusyLabel,
 	type StatusEntry,
 	type StatusUi,
@@ -96,6 +95,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 	const now = deps.now ?? Date.now;
 	const refreshMs = deps.refreshMs ?? DEFAULT_REFRESH_MS;
 	const jobs = new Map<string, TrackedJob>();
+	const board = createStatusBoard();
 	let ctx: StatusUi | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let disposed = false;
@@ -129,7 +129,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 
 	const refreshUi = (): void => {
 		if (disposed) return;
-		if (ctx) applyStatus(ctx, entries(), now());
+		board.paint(entries(), now());
 		syncBusy();
 	};
 
@@ -163,6 +163,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 	const runtime: SessionRuntime = {
 		bind(next) {
 			ctx = next;
+			board.bind(next);
 			refreshUi();
 		},
 
@@ -297,13 +298,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 			jobs.clear();
 			if (timer) clearInterval(timer);
 			timer = undefined;
-			if (ctx) {
-				try {
-					clearStatus(ctx);
-				} catch {
-					// Session is already gone.
-				}
-			}
+			board.clear();
 			if (busyRaised) {
 				busyRaised = false;
 				deps.emitBusy?.(false);

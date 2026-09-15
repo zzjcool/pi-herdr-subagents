@@ -233,13 +233,20 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 		return { block: true, reason: blockMessage(reason) };
 	});
 
-	pi.on("session_start", (_event, ctx) => {
+	const bindUi = (_event: unknown, ctx: ExtensionContext): void => {
 		lastModelRegistry = ctx.modelRegistry;
 		runtime.bind(ctx);
-	});
+	};
+
+	pi.on("session_start", bindUi);
+	pi.on("session_info_changed", bindUi);
+	pi.on("turn_start", bindUi);
+	pi.on("turn_end", bindUi);
+	pi.on("agent_start", bindUi);
+	pi.on("agent_end", bindUi);
+	pi.on("input", bindUi);
 	pi.on("tool_result", (_event, ctx) => {
-		lastModelRegistry = ctx.modelRegistry;
-		runtime.bind(ctx);
+		bindUi(_event, ctx);
 		runtime.refreshUi();
 	});
 	pi.on("session_shutdown", () => {
