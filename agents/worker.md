@@ -1,7 +1,6 @@
 ---
 name: worker
 description: 实现者：按冻结计划写代码、跑测试，完成后自报 verdict
-model: cb/glm-5.3-flash
 thinking: medium
 tools: read, edit, write, grep, find, ls, bash
 systemPromptMode: replace

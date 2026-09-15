@@ -1,7 +1,6 @@
 ---
 name: scout
 description: 侦察员：只读探查代码库/环境，产出事实清单，不做方案不做实现
-model: cb/glm-5.3-flash
 thinking: medium
 tools: read, grep, find, ls, bash
 systemPromptMode: replace

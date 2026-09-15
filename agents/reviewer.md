@@ -1,7 +1,6 @@
 ---
 name: reviewer
 description: 审查员：只读对抗式审查代码改动，输出带路径与严重级别的具体发现
-model: cb/claude-sonnet-5
 thinking: high
 tools: read, grep, find, ls
 systemPromptMode: replace

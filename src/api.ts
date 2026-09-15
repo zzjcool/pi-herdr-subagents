@@ -70,10 +70,42 @@ export {
 	resolveSubagentSettings,
 } from "./agents/settings.ts";
 export type { LoadSettingsOptions } from "./agents/settings.ts";
+export { getAgentDir } from "./agents/paths.ts";
+
+// ── model profiles (cheap / medium / strong) ────────────────────────────────
+export {
+	TIER_AGENTS,
+	agentsForRoleTier,
+	buildClassificationContext,
+	buildProfileFile,
+	classifyModel,
+	filterDominatedModels,
+	inferProfileBand,
+	pickTierModels,
+} from "./profiles/classify.ts";
+export type {
+	ProfileKind,
+	RecommendedRoleTier,
+	SubagentProfileFile,
+} from "./profiles/classify.ts";
+export {
+	DEFAULT_PROVIDER_MODELS_MAX_AGE_DAYS,
+	PROFILES_DIR_NAME,
+	applySubagentProfile,
+	checkSubagentProfile,
+	generateProfilesForProvider,
+	listSubagentProfiles,
+	readSubagentProfile,
+	refreshProviderModelCatalog,
+	resolveProfilePaths,
+} from "./profiles/profiles.ts";
+export { registerProfileCommands } from "./extension/slash.ts";
 
 // ── runs ────────────────────────────────────────────────────────────────────
 export { Orchestrator, preCreateSessionFile } from "./runs/orchestrator.ts";
 export type { OrchestratorDeps } from "./runs/orchestrator.ts";
+export { createSessionLayout, typeTabLabel, tileSplit, TILE_COLUMNS } from "./runs/layout.ts";
+export type { SessionLayout } from "./runs/layout.ts";
 export { RunStore, sanitizeNameForFs } from "./runs/store.ts";
 export type { StoreOptions } from "./runs/store.ts";
 export {
@@ -83,6 +115,37 @@ export {
 	THINKING_LEVELS,
 } from "./runs/args.ts";
 export type { BuildArgsInput, BuildArgsResult } from "./runs/args.ts";
+
+// ── parent session: completion notify + input-box status ────────────────────
+export { createSessionRuntime, shouldRecycleAfterCollect } from "./extension/runtime.ts";
+export type {
+	CollectSnapshot,
+	SessionRuntime,
+	SessionRuntimeDeps,
+	TrackedJob,
+	TrackedJobInput,
+} from "./extension/runtime.ts";
+export {
+	deliverCompletion,
+	formatCollectFailure,
+	formatCompletionNotice,
+	SUBAGENT_NOTIFY_TYPE,
+} from "./extension/notify.ts";
+export type { CompletionInput, CompletionNotice } from "./extension/notify.ts";
+export {
+	applyStatus,
+	formatBusyLabel,
+	formatFooterStatus,
+	formatWidgetLines,
+	STATUS_FOOTER_KEY,
+	STATUS_WIDGET_KEY,
+} from "./tui/status.ts";
+export {
+	blockMessage,
+	forbiddenDispatchReason,
+	PARENT_PLAYBOOK,
+	TOOL_DESCRIPTION,
+} from "./extension/playbook.ts";
 
 // ── session parsing / outcome derivation ────────────────────────────────────
 export {

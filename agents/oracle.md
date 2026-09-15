@@ -1,7 +1,6 @@
 ---
 name: oracle
 description: 终审顾问：用更强模型对争议方案/计划做第二意见裁决
-model: cb/claude-opus-5
 thinking: xhigh
 tools: read, grep, find, ls
 systemPromptMode: replace

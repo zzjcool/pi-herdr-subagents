@@ -45,6 +45,12 @@ import {
 	type Usage,
 } from "../shared/types.ts";
 import { buildPiArgs } from "./args.ts";
+import {
+	createSessionLayout,
+	typeTabLabel,
+	type SessionLayout,
+	type TypeTabCreateResult,
+} from "./layout.ts";
 
 export interface OrchestratorDeps {
 	client: HerdrClient;
@@ -75,22 +81,11 @@ export interface OrchestratorDeps {
 	 */
 	maxSpawns?: number | null;
 	/**
-	 * Label for the run's task tab. One launch is one task, so the run owns
-	 * exactly one tab and every child becomes a pane inside it (design §8.1).
-	 * Defaults to `task:<runId>`.
+	 * Session-wide tab/name registry. Same agent type shares one tab (each
+	 * child a pane). The extension passes one instance so parallel tool calls
+	 * cannot each create a tab; tests omit it and get an isolated registry.
 	 */
-	runTabLabel?: string;
-	/**
-	 * The task tab this run already owns, restored from `run.json`.
-	 *
-	 * Each tool call is a fresh process, so a later `launch` (adding one more
-	 * agent to an existing task) builds a new Orchestrator with no in-memory tab.
-	 * Without this it would create a SECOND tab and the task's agents would be
-	 * split across two — the exact fragmentation the one-tab-per-task model exists
-	 * to prevent. The id is validated against herdr before use, because the tab
-	 * may since have been recycled.
-	 */
-	runTabId?: string;
+	layout?: SessionLayout;
 }
 
 /** Environment variable carrying the lineage chain into a child process. */
@@ -230,21 +225,9 @@ export class Orchestrator {
 	private readonly parentPath: NestedPathEntry[];
 	private readonly maxDepth: number;
 	private readonly maxSpawns: number | null;
-	private readonly runTabLabel: string;
-	/** The run's task tab. Every child of this run lives inside it (design §8.1). */
-	private runTabId: string | null;
-	private runTabRootPaneId: string | null = null;
-	/**
-	 * The tab id restored from `run.json` (a prior process), not yet validated.
-	 * A tab that still exists skips creation; one that does not is replaced.
-	 */
-	private readonly restoredTabId: string | undefined;
-	/** Whether the restored tab has been considered (so it is not re-adopted). */
-	private restoredTabAdopted = false;
-	/** In-flight tab creation, so concurrent launches cannot create two tabs. */
-	private runTabPending: Promise<void> | null = null;
-	/** Whether the tab's root pane has been handed to a child already. */
-	private rootPaneUsed = false;
+	private readonly layout: SessionLayout;
+	/** Last type-tab used by a child of this orchestrator. */
+	private lastTypeTabId: string | null = null;
 	private spawned = 0;
 	private readonly children = new Map<string, ChildRecord>();
 	private readonly counter = new Map<string, number>();
@@ -270,9 +253,7 @@ export class Orchestrator {
 		if (!Number.isFinite(this.maxDepth) || this.maxDepth < 1)
 			this.maxDepth = MAX_NESTED_PATH_ENTRIES;
 		this.maxSpawns = deps.maxSpawns ?? null;
-		this.runTabLabel = deps.runTabLabel ?? `task:${path.basename(deps.runDir)}`;
-		this.restoredTabId = deps.runTabId;
-		this.runTabId = deps.runTabId ?? null;
+		this.layout = deps.layout ?? createSessionLayout();
 	}
 
 	/** The lineage path a child of this process would receive. */
@@ -327,137 +308,103 @@ export class Orchestrator {
 		return makeName(agent, seen);
 	}
 
-	/** The task tab this run owns, once it exists (null before the first launch). */
+	/** The type-tab last used by a child of this orchestrator (null before launch). */
 	get tabId(): string | null {
-		return this.runTabId;
+		return this.lastTypeTabId;
 	}
 
 	/**
-	 * The run's task tab, created on first use (design §8.1).
+	 * The tab for this agent type, created or adopted on first use.
 	 *
-	 * One launch = one task = ONE tab; every child of this run becomes a pane
-	 * inside it. Children are added by splitting the tab's ROOT pane by explicit
-	 * id rather than `--current`.
+	 * Same type = one tab, each child a pane. The first occupant takes the
+	 * tab's root pane; later ones split that root by explicit id rather than
+	 * `--current` (which needs HERDR_PANE_ID and fails headless).
 	 *
-	 * That choice is load-bearing: `--current` is resolved from `HERDR_PANE_ID`,
-	 * which is absent in a headless run (script, CI, plain container) and made
-	 * every split fail with "--current requires HERDR_PANE_ID" — the whole reason
-	 * F34 needed a downgrade path. Splitting an explicit id works in BOTH cases
-	 * (measured), so the headless failure mode no longer exists and no fallback
-	 * is required.
+	 * After a reload the in-memory registry is empty; we re-adopt by herdr
+	 * tab label so a second scout still joins the scout tab.
 	 */
-	private async ensureRunTab(
+	private async ensureTypeTab(
+		agentType: string,
 		env?: Record<string, string>,
 	): Promise<{ tabId: string; rootPaneId: string }> {
-		if (this.runTabId && this.runTabRootPaneId) {
-			return { tabId: this.runTabId, rootPaneId: this.runTabRootPaneId };
-		}
-		if (this.runTabPending) {
-			await this.runTabPending;
-			if (this.runTabId && this.runTabRootPaneId) {
-				return { tabId: this.runTabId, rootPaneId: this.runTabRootPaneId };
-			}
-		}
+		const slot = await this.layout.acquireTypeTab(agentType, () =>
+			this.createOrAdoptTypeTab(agentType, env),
+		);
+		this.lastTypeTabId = slot.tabId;
+		return { tabId: slot.tabId, rootPaneId: slot.rootPaneId };
+	}
 
-		// Adopt the tab a PREVIOUS process created for this run, if it is still
-		// alive: a later launcher adds an agent to the existing task instead of
-		// starting a second tab (the model is one task = one tab).
-		const adopted = await this.adoptRestoredTab();
+	private async createOrAdoptTypeTab(
+		agentType: string,
+		env?: Record<string, string>,
+	): Promise<TypeTabCreateResult> {
+		const label = typeTabLabel(agentType);
+		const adopted = await this.adoptTabByLabel(label);
 		if (adopted) return adopted;
 
-		const pending = (async () => {
-			const res = await this.client.tabCreate({
-				cwd: this.cwd,
-				label: this.runTabLabel,
-				// Lineage env must be set on the tab's root pane process too,
-				// otherwise a child launched into it loses its ancestry (F35).
-				...(env ? { env } : {}),
-				focus: false,
-			});
-			if (!res.ok) {
-				throw new SubagentError(
-					`tab create failed: ${res.error.message}`,
-					res.error.code,
-				);
-			}
-			this.runTabId = res.value.tab.tab_id;
-			this.runTabRootPaneId = res.value.rootPaneId;
-		})();
-		this.runTabPending = pending;
-		try {
-			await pending;
-		} finally {
-			this.runTabPending = null;
+		const res = await this.client.tabCreate({
+			cwd: this.cwd,
+			label,
+			...(env ? { env } : {}),
+			focus: false,
+		});
+		if (!res.ok) {
+			throw new SubagentError(
+				`tab create failed: ${res.error.message}`,
+				res.error.code,
+			);
 		}
-
-		if (this.runTabId && this.runTabRootPaneId) {
-			return { tabId: this.runTabId, rootPaneId: this.runTabRootPaneId };
-		}
-		throw new SubagentError("run tab was not created", ErrorCodes.START_FAILED);
+		return {
+			tabId: res.value.tab.tab_id,
+			rootPaneId: res.value.rootPaneId,
+		};
 	}
 
 	/**
-	 * Reuse the run tab recorded by an earlier process, when it still exists.
+	 * Reuse a live herdr tab with this type's label (survives process reload).
 	 *
-	 * Validated against herdr rather than trusted: a tab can since have been
-	 * recycled (`retire` closing its last pane closes the tab too), in which case
-	 * reusing the stale id would make every subsequent split fail. A tab that is
-	 * gone is simply replaced by a fresh one.
-	 *
-	 * Runs at most once — `restoredTabId` is consumed so a later launch in the
-	 * same process cannot re-adopt after the tab was legitimately recycled.
+	 * The root pane is treated as occupied: a later child must split, never
+	 * steal a pane that may already host an agent.
 	 */
-	private async adoptRestoredTab(): Promise<{
-		tabId: string;
-		rootPaneId: string;
-	} | null> {
-		const candidate = this.restoredTabId;
-		if (!candidate || this.restoredTabAdopted) return null;
-		this.restoredTabAdopted = true;
-
+	private async adoptTabByLabel(
+		label: string,
+	): Promise<TypeTabCreateResult | null> {
 		const tabs = await this.client.tabList();
-		if (!tabs.ok || !tabs.value.some((t) => t.tab_id === candidate)) {
-			// Gone (or unlistable): fall through to creating a new tab.
-			this.runTabId = null;
-			return null;
-		}
+		if (!tabs.ok) return null;
+		const hit = tabs.value.find((t) => t.label === label);
+		if (!hit) return null;
 
-		// The tab lives; a child must split from its EXISTING root pane, so find
-		// the pane herdr gave it. Without a root pane there is nothing to split.
 		const panes = await this.client.paneList();
 		if (!panes.ok) return null;
-		const inTab = panes.value.filter((p) => p.tab_id === candidate);
+		const inTab = panes.value.filter((p) => p.tab_id === hit.tab_id);
 		const root = inTab[0];
-		if (!root) {
-			this.runTabId = null;
-			return null;
-		}
-
-		this.runTabId = candidate;
-		this.runTabRootPaneId = root.pane_id;
-		// The restored tab's root pane may already host a live child, so it must
-		// not be handed out again as a fresh child's pane.
-		this.rootPaneUsed = true;
-		return { tabId: candidate, rootPaneId: root.pane_id };
+		if (!root) return null;
+		return {
+			tabId: hit.tab_id,
+			rootPaneId: root.pane_id,
+			rootOccupied: true,
+			panes: inTab.map((p) => p.pane_id),
+		};
 	}
 
 	/**
 	 * Create the pane an agent will occupy.
 	 *
-	 * `new-tab` gives the child a tab of its OWN (design §8.3, long-lived chain
-	 * steps). Everything else lands inside the run's task tab: the first child
-	 * takes the tab's root pane, later ones split it, so N agents of one task
-	 * appear as N panes of one tab.
+	 * `new-tab` gives the child a tab of its OWN. Everything else lands in the
+	 * type tab and is tiled automatically (3-column grid: fill a row of
+	 * three, then wrap down). Agent frontmatter `split-down` is
+	 * ignored here — stacking every child off the root looks like a column
+	 * of thin panes.
 	 */
 	private async createPane(
 		placement: Placement,
-		label: string,
+		agentType: string,
 		env?: Record<string, string>,
 	): Promise<{ paneId: string; tabId?: string }> {
 		if (placement === "new-tab") {
 			const res = await this.client.tabCreate({
 				cwd: this.cwd,
-				label,
+				label: `task:${agentType}`,
 				...(env ? { env } : {}),
 				focus: false,
 			});
@@ -470,26 +417,24 @@ export class Orchestrator {
 			return { paneId: res.value.rootPaneId, tabId: res.value.tab.tab_id };
 		}
 
-		const runTab = await this.ensureRunTab(env);
-		// The first child owns the root pane; there is nothing to split yet.
-		if (this.children.size === 0 && !this.rootPaneUsed) {
-			this.rootPaneUsed = true;
-			return { paneId: runTab.rootPaneId, tabId: runTab.tabId };
-		}
-
-		const res = await this.client.paneSplit({
-			target: runTab.rootPaneId,
-			direction: placement === "split-right" ? "right" : "down",
-			cwd: this.cwd,
-			...(env ? { env } : {}),
-			focus: false,
+		await this.ensureTypeTab(agentType, env);
+		return this.layout.assignPane(agentType, async (plan) => {
+			const res = await this.client.paneSplit({
+				target: plan.target,
+				direction: plan.direction,
+				cwd: this.cwd,
+				...(env ? { env } : {}),
+				focus: false,
+			});
+			if (!res.ok) {
+				this.layout.dropTypeTab(agentType);
+				throw new SubagentError(
+					`pane split failed: ${res.error.message}`,
+					res.error.code,
+				);
+			}
+			return res.value.pane_id;
 		});
-		if (!res.ok)
-			throw new SubagentError(
-				`pane split failed: ${res.error.message}`,
-				res.error.code,
-			);
-		return { paneId: res.value.pane_id, tabId: runTab.tabId };
 	}
 
 	/**
@@ -579,8 +524,14 @@ export class Orchestrator {
 		// Allocate against BOTH our own children and the global herdr namespace.
 		// herdr names are session-global, so an unrelated agent holding
 		// `orchestrator` would otherwise cost us a failed start attempt.
-		const reserved = await this.activeAgentNames();
-		let name = input.name ?? this.allocateName(input.agent.name, reserved);
+		const reserved = await this.layout.liveNames(() => this.activeAgentNames());
+		let name =
+			input.name ??
+			this.layout.claimName(
+				input.agent.name,
+				(n) => this.children.has(n) || reserved.has(n),
+			);
+		if (input.name) this.layout.rememberName(input.name);
 
 		this.assertWithinBudgets();
 
@@ -588,15 +539,13 @@ export class Orchestrator {
 		preCreateSessionFile(sessionFile);
 
 		const tempDir = fs.mkdtempSync(path.join(this.runDir, `tmp-${name}-`));
-		// Default to a pane inside the run's own task tab (design §8.1); the tab is
-		// created on first use. `new-tab` stays available for a dedicated tab.
 		const placement = input.placement ?? input.agent.placement ?? "split-down";
 
 		let paneId: string | null = null;
 		try {
 			const pane = await this.createPane(
 				placement,
-				`task:${name}`,
+				input.agent.name,
 				this.lineageEnv(name),
 			);
 			paneId = pane.paneId;
@@ -623,7 +572,10 @@ export class Orchestrator {
 				// fresh name. The session file follows the rename so the resume
 				// credential stays valid.
 				reallocate: () => {
-					const next = this.allocateName(input.agent.name, reserved);
+					const next = this.layout.claimName(
+						input.agent.name,
+						(n) => this.children.has(n) || reserved.has(n),
+					);
 					sessionFile = this.rehomeSessionFile(sessionFile, next);
 					return next;
 				},
@@ -637,8 +589,10 @@ export class Orchestrator {
 				sessionFile,
 				...(input.model ? { model: input.model } : {}),
 			});
-			// Surface the child in the herdr sidebar (design §8.4).
-			await this.announceChild(child, input.agent.name, input.model);
+			// Sidebar metadata is not on the launch critical path.
+			void this.announceChild(child, input.agent.name, input.model).catch(
+				() => {},
+			);
 
 			return {
 				name,
@@ -651,7 +605,12 @@ export class Orchestrator {
 			};
 		} catch (error) {
 			// Roll back the pane so a failed launch does not leak resources.
-			if (paneId) await bestEffort(this.client.paneClose(paneId));
+			if (paneId) {
+				await bestEffort(this.client.paneClose(paneId));
+				if (placement !== "new-tab") {
+					await this.reapTypeTabIfEmpty(input.agent.name, paneId, undefined);
+				}
+			}
 			throw error;
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
@@ -965,7 +924,9 @@ export class Orchestrator {
 		}
 
 		// 2. Graceful exit first (F11: ctrl+d, never ctrl+c), then force-close.
-		if (child.paneId) {
+		const paneId = child.paneId;
+		const tabId = child.tabId;
+		if (paneId) {
 			const alive = await this.client.agentGet(name);
 			if (alive.ok) {
 				await bestEffort(this.client.agentSendKeys(name, "ctrl+d"));
@@ -974,7 +935,8 @@ export class Orchestrator {
 				await this.sleep(1_200);
 			}
 			// F12: closing the pane is safe — the session file survives and resumes.
-			await bestEffort(this.client.paneClose(child.paneId));
+			await bestEffort(this.client.paneClose(paneId));
+			await this.reapTypeTabIfEmpty(child.agent ?? "", paneId, tabId);
 		}
 
 		child.state = "retired";
@@ -982,6 +944,35 @@ export class Orchestrator {
 		child.paneId = null;
 		this.onChildUpdate(child);
 		return child;
+	}
+
+	/**
+	 * After closing a child's pane, drop the type tab if it is now empty.
+	 *
+	 * Same-type agents share a tab; leaving an empty tab behind is the leftover
+	 * the parent used to have to close by hand.
+	 */
+	private async reapTypeTabIfEmpty(
+		agentType: string,
+		paneId: string,
+		tabId: string | undefined,
+	): Promise<void> {
+		const released = agentType
+			? this.layout.releasePane(agentType, paneId)
+			: { tabId: undefined, empty: true };
+		if (released.empty && released.tabId) {
+			await bestEffort(this.client.tabClose(released.tabId));
+			return;
+		}
+		if (released.empty && tabId && !this.layout.getTypeTab(agentType)) {
+			const panes = await this.client.paneList();
+			if (!panes.ok) {
+				await bestEffort(this.client.tabClose(tabId));
+				return;
+			}
+			const left = panes.value.filter((p) => p.tab_id === tabId);
+			if (left.length === 0) await bestEffort(this.client.tabClose(tabId));
+		}
 	}
 
 	/** Retire every known child; optionally reap the whole tab (F15). */

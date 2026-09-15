@@ -19,18 +19,8 @@ description: 实现+审查闭环：worker 实现，3 个并行 reviewer 审查�
 
 ## 阶段 2 — 并行对抗审查
 
-派 3 个全新会话的 pi reviewer（正确性/测试覆盖/简洁性三个角度），纪律同 `parallel-review.md`：
-
-```bash
-herdr pane split --current --direction down --cwd "$PWD" --no-focus
-herdr agent start reviewer-correctness --kind pi --pane <pane-id>
-herdr agent start reviewer-tests      --kind pi --pane <pane-id>
-herdr agent start reviewer-simplicity --kind pi --pane <pane-id>
-```
-
-先下发三个任务（`herdr agent prompt` 不带 `--wait`），再统一
-`herdr agent wait <name> --timeout 900000` 收割。
-每个 reviewer 任务卡写明：只读、发现格式（`文件:行号` + 严重级别 + 具体修法）、报告落盘路径。
+派 3 个全新会话的 pi reviewer（正确性/测试覆盖/简洁性三个角度），纪律同 `parallel-review.md`。
+用 `subagent({ tasks: [...] })` 一次下发，默认 async，不要自己 split pane。
 
 ## 阶段 3 — 修复与交付
 
@@ -41,5 +31,4 @@ herdr agent start reviewer-simplicity --kind pi --pane <pane-id>
 
 ## 收尾
 
-向用户交付：两份报告路径 + 遗留风险清单。回收所有自建 pane（`herdr agent send-keys <name> ctrl+d`，
-确认回到 shell 后 `herdr pane close <pane-id>`），`herdr agent list` 验证无残留。
+向用户交付：两份报告路径 + 遗留风险清单。子 agent 结束后插件会自动回收 pane，不要再 `retire`。

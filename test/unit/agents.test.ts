@@ -578,6 +578,18 @@ test("the reviewer role is read-only", () => {
 	);
 });
 
+test("bundled roles do not pin a vendor model", () => {
+	// A shipped `cb/...` id fails for anyone who does not have that provider.
+	// Pin models in project settings or on the tool call, not in the package.
+	for (const agent of loadBundledAgents()) {
+		assert.equal(
+			agent.model,
+			undefined,
+			`bundled role ${agent.name} must not pin model=${agent.model}`,
+		);
+	}
+});
+
 test("every bundled role ships a non-empty system prompt", () => {
 	// The prompt body IS the product; a truncated or stub role would otherwise
 	// load clean and ship silently. `scripts/verify-agents.ts` used to flag this

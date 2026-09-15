@@ -184,6 +184,32 @@ launch → working → awaiting ─┬─ continue ─→ working → awaiting .
 **`awaiting` 不保留 pane**（按用户决策）：pane 关掉，session 文件保留。续跑时用 resume
 重建 pane —— 实测上下文完整保留（F12）。
 
+### 3.3.0 完成通道（对齐 pi-subagents，禁止子 agent 回头 prompt 父会话）
+
+子 agent **不得**在任务卡里写 `herdr agent prompt orchestrator ...`。那会把子进程的
+herdr 写权限对准父 pane，打断父会话，也依赖父 agent 名叫 `orchestrator`。
+
+完成通道归 **extension**，与 pi-subagents 的 `notify.ts` 同一模型：
+
+```text
+launch (async) ──→ 子 pane 跑
+       │
+       ├─ TUI：输入框下方 widget + footer `N agents running`
+       │        （pi-subagents fleet-status / setStatus）
+       └─ collect 在后台等 turn 结束
+              │
+              └─ pi.sendMessage({ customType: "subagent-notify" }, { triggerTurn: true })
+                 父会话被唤醒，读结果。成功默认 display:false（不刷屏），失败才显示。
+```
+
+父 agent 的正确用法：`subagent` 工具 launch 之后把控制权交回用户，等 completion
+message，而不是轮询，也不是让孩子来拍自己。
+
+**Launch 路径冻结**（禁止每次现查 CLI）：父会话第一件事就是 `subagent({ agent, task })`。
+extension 拦截 `herdr --help` / 裸 `herdr agent|pane` / `agent start|prompt|wait` /
+`pane split` / `test HERDR_ENV` 这些探路命令，并在 system prompt 里注入同一份 playbook。
+tab → pane → start → watch 只发生在工具内部，不出现在父 agent 的 bash 里。
+
 ### 3.3.1 判定 turn 结束的算法
 
 ```ts
@@ -550,6 +576,25 @@ per-run override
   }
 }
 ```
+
+### 6.4 模型档位 profile（对齐 pi-subagents）
+
+角色不写死供应商模型。按 **cheap / medium / strong** 三档绑定：
+
+| 档 | 角色 |
+| --- | --- |
+| cheap | scout |
+| medium | planner |
+| strong | worker, reviewer, oracle |
+
+流程：`/subagents-refresh-provider-models` 拉供应商目录 →
+`/subagents-generate-profiles` 写出 `<provider>.quota`（偏省）和
+`<provider>.quality`（偏强）→ `/subagents-load-profile` 写入
+`~/.pi/agent/settings.json` 的 `agentOverrides`。
+
+Profile 文件在 `~/.pi/agent/profiles/pi-herdr-subagents/`。加载只替换
+`agentOverrides`（以及 profile 里显式带的 `subagents` 键），`modelScope` /
+`herdr` 等其它设置保留。项目 `.pi/settings.json` 覆盖用户设置。
 
 ---
 

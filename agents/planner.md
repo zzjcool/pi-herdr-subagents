@@ -1,7 +1,6 @@
 ---
 name: planner
 description: 规划员：把任务拆成可并行/可验收的实施计划，冻结接口，指定文件归属
-model: cb/glm-5.3-flash
 thinking: high
 tools: read, grep, find, ls
 systemPromptMode: replace

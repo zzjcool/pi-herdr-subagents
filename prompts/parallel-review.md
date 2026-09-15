@@ -17,21 +17,17 @@ description: 并行对抗式审查：3 个只读 reviewer 从正确性/测试/�
 
 ## 派发方式
 
-三个 reviewer 全部**先下发任务（不带 --wait）再统一等结果**，严禁逐个 `--wait` 串行化：
+用 `subagent` 工具一次下发三个 reviewer（默认 async）。不要逐个 wait，也不要让 reviewer 回头 prompt 父 pane：
 
-```bash
-herdr pane split --current --direction down --cwd "$PWD" --no-focus
-# 从返回 JSON 取 .result.pane.pane_id
-herdr agent start reviewer-correctness --kind pi --pane <pane-id>
-herdr agent start reviewer-tests      --kind pi --pane <pane-id>
-herdr agent start reviewer-simplicity --kind pi --pane <pane-id>
-herdr agent prompt reviewer-correctness "<任务A>" 
-herdr agent prompt reviewer-tests "<任务B>"
-herdr agent prompt reviewer-simplicity "<任务C>"
-herdr agent wait reviewer-correctness --timeout 900000
-herdr agent wait reviewer-tests      --timeout 900000
-herdr agent wait reviewer-simplicity --timeout 900000
+```text
+subagent({ tasks: [
+  { agent: "reviewer", task: "<正确性任务卡>" },
+  { agent: "reviewer", task: "<测试覆盖任务卡>" },
+  { agent: "reviewer", task: "<简洁性任务卡>" },
+] })
 ```
+
+然后把控制权交回。插件会在输入框旁显示运行状态；每个 reviewer 结束后会唤醒本会话并自动回收 pane。
 
 ## 三个角度（缺一不可）
 
@@ -39,14 +35,11 @@ herdr agent wait reviewer-simplicity --timeout 900000
 2. **reviewer-tests（测试覆盖）**：规格用例是否都有对应测试？happy-path-only 一票指认；断言强度是否够。
 3. **reviewer-simplicity（简洁性）**：重复造轮子、过度抽象、死代码、可以删的行数。
 
-每个 reviewer 的任务卡必须包含：只读约束（不给 edit/write）、输出格式（每条发现带 `文件:行号` + 严重级别 + 具体修法）、
-以及收尾指令：完成后执行
-`herdr agent prompt orchestrator "<一句话总结> 报告:<路径>"`。
+每个 reviewer 的任务卡必须包含：只读约束（不给 edit/write）、输出格式（每条发现带 `文件:行号` + 严重级别 + 具体修法）。
+**不要**写「完成后 `herdr agent prompt orchestrator ...`」——插件会在子 agent 结束时把结果注入本会话并唤醒你，输入框旁能看到运行状态。
 
 ## 汇总与回收
 
 - 按严重级别合并去重，critical/major 逐条给出「采纳/不采纳」判断
 - 汇总表格呈现给用户；产出物落盘到 `reports/`
-- 收尾回收：对每个 reviewer `herdr agent send-keys <name> ctrl+d`（不是 ctrl+c），
-  确认回到 shell 后
-  `herdr tab close`/`herdr pane close <pane-id>` 只清自己创建的 pane；`herdr agent list` 验证已不在列表
+- 插件会在每个 reviewer 结束后自动回收 pane；不要用 ctrl+c，也不要自己 retire。

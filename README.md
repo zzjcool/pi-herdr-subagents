@@ -50,11 +50,13 @@ manifest entry alone would be silently ignored.
 
 | Role | Purpose | Default model |
 | --- | --- | --- |
-| `scout` | Read-only reconnaissance: map code, conventions, environment. Facts only. | `cb/glm-5.3-flash` |
-| `planner` | Turn a task into a parallelisable, verifiable plan; freeze interfaces. | `cb/glm-5.3-flash` |
-| `worker` | Implement a frozen plan; run tests; self-report a verdict. | `cb/glm-5.3-flash` |
-| `reviewer` | Read-only adversarial review; findings with path + severity. | `cb/claude-sonnet-5` |
-| `oracle` | Final arbitration on a contested plan, using a stronger model. | `cb/claude-opus-5` |
+| `scout` | Read-only reconnaissance: map code, conventions, environment. Facts only. | parent session (or `subagents.defaultModel`) |
+| `planner` | Turn a task into a parallelisable, verifiable plan; freeze interfaces. | parent session (or `subagents.defaultModel`) |
+| `worker` | Implement a frozen plan; run tests; self-report a verdict. | parent session (or `subagents.defaultModel`) |
+| `reviewer` | Read-only adversarial review; findings with path + severity. | parent session (or `subagents.defaultModel`) |
+| `oracle` | Final arbitration on a contested plan. | parent session (or `subagents.defaultModel`) |
+
+Bundled roles do **not** pin a vendor model. A child uses the parent session's model unless you set `subagents.defaultModel`, `subagents.agentOverrides.<name>.model`, pass `model` on the tool call, or [load a model profile](#model-profiles-cheap--medium--strong).
 
 Precedence, lowest to highest — later layers override earlier ones by name:
 
@@ -70,6 +72,50 @@ directories — for a Nix store, a container, or a read-only mount, where copyin
 into `~/.pi/agent/agents` is not possible.
 - `subagent action=list` shows every role with its provenance tag (`builtin`,
 `user`, or `project`).
+
+## Model profiles (cheap / medium / strong)
+
+Same workflow as pi-subagents: classify a provider's models into three capability
+tiers, then bind roles to those tiers so you do not have to change the parent
+session model every time.
+
+| Tier | Roles |
+| --- | --- |
+| cheap | `scout` |
+| medium | `planner` |
+| strong | `worker`, `reviewer`, `oracle` |
+
+```text
+/subagents-refresh-provider-models <provider>
+/subagents-generate-profiles <provider>
+/subagents-load-profile <provider>.quota
+```
+
+That writes two profiles (`<provider>.quota` leans cheaper, `<provider>.quality`
+leans stronger) under `~/.pi/agent/profiles/pi-herdr-subagents/` and, on load,
+copies `agentOverrides` into `~/.pi/agent/settings.json`. Project
+`.pi/settings.json` still wins on overlapping keys.
+
+Other commands: `/subagents-profiles` lists saved profiles;
+`/subagents-check-profile <name>` re-checks each assigned model against the
+current registry (and a live probe unless you pass `--no-probe`). Refresh and
+generate accept `--force` and `--no-probe`.
+
+You can still hand-write the same mapping:
+
+```json
+{
+  "subagents": {
+    "agentOverrides": {
+      "scout": { "model": "your-provider/fast-model" },
+      "planner": { "model": "your-provider/mid-model" },
+      "worker": { "model": "your-provider/strong-model" },
+      "reviewer": { "model": "your-provider/strong-model" },
+      "oracle": { "model": "your-provider/strong-model" }
+    }
+  }
+}
+```
 
 ## The mental model
 
@@ -91,42 +137,36 @@ Two orthogonal dimensions, never conflate them:
 
 ## Quick start
 
-Delegate one task:
+Use the `subagent` tool. One call is the whole launch path (tab → pane → start
+→ watch). **Do not run herdr CLI or env checks first.** The child runs in a
+Herdr pane, status shows next to the parent input, and this extension wakes
+the parent with a completion message. **Do not tell the child to prompt the
+parent.**
 
-```bash
-# 1. Create a pane (parse IDs from the JSON response, never guess)
-herdr pane split --current --direction down --cwd "$PWD" --no-focus
-# → .result.pane.pane_id
-
-# 2. Start a pi agent in it
-herdr agent start reviewer-1 --kind pi --pane <returned-pane-id>
-
-# 3. Give it the task — include the wakeup instruction
-herdr agent prompt reviewer-1 "Review src/foo.ts for regressions. Write findings to /tmp/review.md. When done run: herdr agent prompt orchestrator \"review done. report: /tmp/review.md\""
-
-# 4. Wait for the turn to end
-herdr agent wait reviewer-1 --timeout 900000
+```text
+subagent({
+  agent: "reviewer",
+  task: "Review src/foo.ts for regressions. Write findings to /tmp/review.md. End with {\"ok\": true|false, \"reason\": \"...\"}."
+})
 ```
 
-Delegate N tasks in parallel — **fire then wait**, never one-by-one `--wait`
-(that serializes the dispatch phase and destroys parallelism):
+Parallel fan-out — one tool call, then return control:
 
-```bash
-# dispatch all first, WITHOUT --wait
-herdr agent prompt w1 "<task A>"
-herdr agent prompt w2 "<task B>"
-herdr agent prompt w3 "<task C>"
-# then harvest
-herdr agent wait w1 --timeout 900000
-herdr agent wait w2 --timeout 900000
-herdr agent wait w3 --timeout 900000
+```text
+subagent({ tasks: [
+  { agent: "worker", task: "<task A>" },
+  { agent: "worker", task: "<task B>" },
+  { agent: "reviewer", task: "<task C>" },
+] })
 ```
 
 Steer a running agent (its current task is abandoned, context kept):
 
-```bash
-herdr agent prompt reviewer-1 "Stop the API review; focus on the migration script instead."
+```text
+subagent({ action: "steer", name: "reviewer-0", message: "Stop the API review; focus on the migration script instead." })
 ```
+
+Pass `async: false` only when this turn must have the result before it ends.
 
 ## Success/failure model
 

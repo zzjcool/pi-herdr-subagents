@@ -134,6 +134,20 @@ visible, steerable, resumable, and with accurate success/failure accounting.
    - `disabled: true` removes the agent from the list.
    - Override fields replace frontmatter fields (deep-copy arrays).
 
+7. **`src/profiles/` + `src/extension/slash.ts`**
+
+   Model-tier profiles matching pi-subagents: classify a provider catalog into
+   cheap / medium / strong, write `<provider>.quota` + `<provider>.quality`, load
+   into `~/.pi/agent/settings.json` as `agentOverrides`.
+
+   - Role map: scout→cheap, planner→medium, worker/reviewer/oracle→strong.
+   - Files: `~/.pi/agent/profiles/pi-herdr-subagents/`.
+   - Slash: `/subagents-profiles`, `/subagents-load-profile`,
+     `/subagents-refresh-provider-models`, `/subagents-generate-profiles`,
+     `/subagents-check-profile`.
+   - Launch reads **user** `~/.pi/agent/settings.json` merged with project
+     `.pi/settings.json` so a loaded profile actually applies.
+
 ### W1 acceptance
 
 - `npm run typecheck` clean; `npm test` green.
@@ -316,5 +330,5 @@ Write `reports/<module>.md`:
 ## Open questions / deviations
 ```
 
-Then message the orchestrator:
-`herdr agent prompt orchestrator "<module> done. report: reports/<module>.md"`
+The parent session is woken by the extension's completion message; do not have
+workers `herdr agent prompt` the parent pane.

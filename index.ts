@@ -3,10 +3,15 @@
  *
  * Design refs: §11 (tool API), §12 (persistence).
  * All heavy lifting lives in src/runs/orchestrator.ts; this file is the adapter.
+ *
+ * Completion follows pi-subagents, not "child prompts parent":
+ *   launch is async by default → this process watches the child →
+ *   `pi.sendMessage({ customType: "subagent-notify" }, { triggerTurn })`
+ *   wakes the parent. Running children are painted next to the input box.
  */
 
 import * as path from "node:path";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -24,7 +29,20 @@ import {
 	loadSubagentSettings,
 	resolveSubagentSettings,
 } from "./src/agents/settings.ts";
+import { createSessionRuntime, type SessionRuntime, shouldRecycleAfterCollect } from "./src/extension/runtime.ts";
+import { registerProfileCommands } from "./src/extension/slash.ts";
+import {
+	blockMessage,
+	forbiddenDispatchReason,
+	PARENT_PLAYBOOK,
+	TOOL_DESCRIPTION,
+} from "./src/extension/playbook.ts";
+import { getAgentDir } from "./src/agents/paths.ts";
 import { Orchestrator } from "./src/runs/orchestrator.ts";
+import {
+	createSessionLayout,
+	type SessionLayout,
+} from "./src/runs/layout.ts";
 import { RunStore } from "./src/runs/store.ts";
 import {
 	type AgentConfig,
@@ -115,15 +133,30 @@ type SubagentParams = Static<typeof SubagentParams>;
 // ---------------------------------------------------------------------------
 
 export default function herdrSubagents(pi: ExtensionAPI) {
+	const layout = createSessionLayout();
+	let lastModelRegistry: ExtensionContext["modelRegistry"] | undefined;
+	const runtime = createSessionRuntime({
+		sendMessage: (message, options) => pi.sendMessage(message, options),
+		emitBusy: (active, label) => {
+			try {
+				pi.events.emit(
+					"herdr:busy",
+					active ? { active: true, label } : { active: false },
+				);
+			} catch {
+				// herdr's busy overlay is optional; the TUI widget is the primary signal.
+			}
+		},
+	});
+
+	registerProfileCommands(pi, {
+		getModelRegistry: () => lastModelRegistry,
+	});
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: [
-			"Delegate work to child Pi agents running in Herdr panes.",
-			"Children are visible, steerable, and resumable; their sessions outlive this process.",
-			"Actions: launch (default), continue, steer, resume, retire, status, collect, list.",
-			"Outcomes are derived from the child session JSONL, not from herdr's agent status.",
-		].join(" "),
+		description: TOOL_DESCRIPTION,
 		parameters: SubagentParams,
 
 		// The parameter list is fixed by Pi's `ExtensionAPI.registerTool`
@@ -136,6 +169,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 			onUpdate,
 			ctx: ExtensionContext,
 		): Promise<AgentToolResult<unknown>> {
+			runtime.bind(ctx);
 			const client = createHerdrClient();
 			if (!(await client.available())) {
 				return fail(
@@ -154,7 +188,16 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 			// Control actions address an EXISTING child; launch-family actions
 			// create new ones. The two share almost nothing, so they are separate.
 			if (action !== "launch") {
-				return controlAction({ action, params, client, store, cwd, agents });
+				return controlAction({
+					action,
+					params,
+					client,
+					store,
+					cwd,
+					agents,
+					runtime,
+					layout,
+				});
 			}
 
 			return launchFamily({
@@ -165,17 +208,52 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 				cwd,
 				agents,
 				settings,
+				runtime,
+				layout,
+				onUpdate,
 			});
 		},
+	});
+
+	pi.on("before_agent_start", (event) => {
+		if (process.env.PI_SUBAGENT_CHILD === "1") return;
+		const tools = event.systemPromptOptions?.selectedTools;
+		if (Array.isArray(tools) && !tools.includes("subagent")) return;
+		return {
+			systemPrompt: `${event.systemPrompt}\n\n${PARENT_PLAYBOOK}`,
+		};
+	});
+
+	pi.on("tool_call", (event) => {
+		if (event.toolName !== "bash") return;
+		const command =
+			typeof event.input.command === "string" ? event.input.command : "";
+		const reason = forbiddenDispatchReason(command);
+		if (!reason) return;
+		return { block: true, reason: blockMessage(reason) };
+	});
+
+	pi.on("session_start", (_event, ctx) => {
+		lastModelRegistry = ctx.modelRegistry;
+		runtime.bind(ctx);
+	});
+	pi.on("tool_result", (_event, ctx) => {
+		lastModelRegistry = ctx.modelRegistry;
+		runtime.bind(ctx);
+		runtime.refreshUi();
+	});
+	pi.on("session_shutdown", () => {
+		runtime.dispose();
 	});
 }
 
 /**
  * Load the effective agent catalog for a request.
  *
- * Settings come from the PROJECT (`.pi/settings.json` under the session cwd),
- * while agent directories are resolved from the run's `cwd`. Bundled roles are
- * included unless `subagents.disableBuiltins` opts out.
+ * User settings (`~/.pi/agent/settings.json`, including a loaded profile) merge
+ * with project `.pi/settings.json`. Agent directories are resolved from the
+ * run's `cwd`. Bundled roles are included unless `subagents.disableBuiltins`
+ * opts out.
  */
 function loadCatalog(
 	sessionCwd: string,
@@ -183,13 +261,12 @@ function loadCatalog(
 	scope: AgentScope | undefined,
 ): {
 	agents: AgentConfig[];
-	settings: ReturnType<typeof resolveSubagentSettings>;
+	settings: ReturnType<typeof loadSubagentSettings>;
 } {
-	const settingsPath = path.join(sessionCwd, ".pi", "settings.json");
-	const settings = resolveSubagentSettings(
-		loadSubagentSettings({ userSettingsPath: settingsPath }),
-		{},
-	);
+	const settings = loadSubagentSettings({
+		userSettingsPath: path.join(getAgentDir(), "settings.json"),
+		projectSettingsPath: path.join(sessionCwd, ".pi", "settings.json"),
+	});
 	const discovery = discoverAgents(runCwd, scope ?? "user", {
 		includeBuiltin: settings.disableBuiltins !== true,
 	});
@@ -205,8 +282,9 @@ function loadCatalog(
 /**
  * Act on an EXISTING child: status, steer, collect, retire, continue, resume.
  *
- * Each tool invocation runs in a fresh process, so the orchestrator is rebuilt
- * from `run.json` rather than from memory. `onChildUpdate` is synchronous while
+ * The extension stays loaded for the session, but a control call may arrive
+ * after a reload — so the orchestrator is rebuilt from `run.json` when we do
+ * not already have a live tracker. `onChildUpdate` is synchronous while
  * RunStore is async, so persistence happens explicitly after each operation.
  */
 async function controlAction(input: {
@@ -216,6 +294,8 @@ async function controlAction(input: {
 	store: RunStore;
 	cwd: string;
 	agents: AgentConfig[];
+	runtime: SessionRuntime;
+	layout: SessionLayout;
 }): Promise<AgentToolResult<unknown>> {
 	const { action, params, store, cwd } = input;
 
@@ -233,9 +313,7 @@ async function controlAction(input: {
 		client: input.client,
 		runDir: store.runDir(found.runId),
 		cwd,
-		// Reuse the task tab this run created in an EARLIER process, so adding an
-		// agent here lands in the same tab instead of fragmenting the task (§8.1).
-		...(found.run.herdr?.tabId ? { runTabId: found.run.herdr.tabId } : {}),
+		layout: input.layout,
 	});
 	orchestrator.restore(found.run);
 
@@ -267,6 +345,7 @@ interface ChildContext {
 	agents: AgentConfig[];
 	found: NonNullable<ReturnType<typeof findChild>>;
 	orchestrator: Orchestrator;
+	runtime: SessionRuntime;
 }
 
 /**
@@ -300,6 +379,7 @@ async function steerChild(
 	}
 	try {
 		await ctx.orchestrator.steer(ctx.name, ctx.params.message);
+		followChild(ctx, { watch: true });
 		return ok(`Steered ${ctx.name}.`);
 	} catch (error) {
 		return fail(`steer failed: ${String(error)}`, ErrorCodes.NOT_FOUND);
@@ -314,10 +394,17 @@ async function collectChild(
 		// Honour the agent's own `timeoutMs`: the bundled roles declare budgets
 		// (worker 30min, oracle 20min) that were previously parsed and ignored.
 		const agentDef = ctx.agents.find((a) => a.name === ctx.found.child.agent);
-		const collected = await ctx.orchestrator.collect(ctx.name, {
-			timeoutMs: agentDef?.timeoutMs ?? DEFAULTS.turnTimeoutMs,
-		});
+		const timeoutMs = agentDef?.timeoutMs ?? DEFAULTS.turnTimeoutMs;
+		const pending = ctx.runtime.consumeCollect(ctx.name);
+		const collected = pending
+			? await pending
+			: await ctx.orchestrator.collect(ctx.name, { timeoutMs });
 		await persistChild(ctx.store, ctx.found.runId, ctx.orchestrator, ctx.name);
+		if (shouldRecycleAfterCollect(collected.execution.status)) {
+			await ctx.orchestrator.retire(ctx.name);
+			await persistChild(ctx.store, ctx.found.runId, ctx.orchestrator, ctx.name);
+		}
+		ctx.runtime.release(ctx.name);
 		return ok(renderCollect(ctx.name, collected));
 	} catch (error) {
 		return fail(`collect failed: ${String(error)}`, ErrorCodes.NOT_FOUND);
@@ -329,6 +416,7 @@ async function retireChild(
 	ctx: ChildContext,
 ): Promise<AgentToolResult<unknown>> {
 	try {
+		ctx.runtime.release(ctx.name);
 		const child = await ctx.orchestrator.retire(ctx.name);
 		await persistChild(ctx.store, ctx.found.runId, ctx.orchestrator, ctx.name);
 		return ok(
@@ -370,6 +458,7 @@ async function reviveChild(
 		const agentState = await client.agentGet(name);
 		if (agentState.ok) {
 			await orchestrator.steer(name, params.message);
+			followChild(ctx, { watch: true });
 			return ok(
 				`${action === "resume" ? "Resumed" : "Continued"} ${name} (live agent prompted).`,
 			);
@@ -381,6 +470,7 @@ async function reviveChild(
 			name,
 			...(found.child.model ? { model: found.child.model } : {}),
 		});
+		followChild(ctx, { watch: true });
 		return ok(
 			`Resumed ${handle.name} from its session (pane ${handle.paneId}). ` +
 				`Context preserved from ${handle.sessionFile}`,
@@ -403,17 +493,32 @@ async function launchFamily(input: {
 	cwd: string;
 	agents: AgentConfig[];
 	settings: ReturnType<typeof resolveSubagentSettings>;
+	runtime: SessionRuntime;
+	layout: SessionLayout;
+	onUpdate?: AgentToolUpdateCallback;
 }): Promise<AgentToolResult<unknown>> {
-	const { params, ctx, store, cwd, agents, settings } = input;
+	const { params, ctx, store, cwd, agents, settings, runtime, layout, onUpdate } =
+		input;
 
 	const plan = buildPlan(params);
 	if (!plan.ok) return fail(plan.message, ErrorCodes.INVALID_PARAMS);
+
+	onUpdate?.({
+		content: [
+			{
+				type: "text",
+				text: `playbook: ${plan.steps.map((s) => s.agent).join(", ")} → type-tab → pane → start → watch`,
+			},
+		],
+		details: {},
+	});
 
 	const run = store.createRun({ task: plan.task, cwd });
 	const orchestrator = new Orchestrator({
 		client: input.client,
 		runDir: store.runDir(run.runId),
 		cwd,
+		layout,
 		// Enforce the session spawn budget so a runaway fan-out cannot exhaust
 		// the machine (ErrorCodes.BUDGET_EXCEEDED).
 		maxSpawns: settings.maxSubagentSpawnsPerSession ?? null,
@@ -426,6 +531,8 @@ async function launchFamily(input: {
 		settings,
 		runId: run.runId,
 		orchestrator,
+		runtime,
+		onUpdate,
 		dispatchModel: ctx.model
 			? `${ctx.model.provider}/${ctx.model.id}`
 			: undefined,
@@ -434,29 +541,57 @@ async function launchFamily(input: {
 		timeoutByName: new Map(),
 	};
 
-	// One child failing must not abort the rest, so each step reports its own line.
-	for (const step of plan.steps) await launchStep(session, step);
+	// Chain steps depend on prior output; everything else launches in parallel
+	// so two scouts do not wait on each other's agentStart.
+	if (params.chain?.length) {
+		for (const step of plan.steps) await launchStep(session, step);
+	} else {
+		await Promise.all(plan.steps.map((step) => launchStep(session, step)));
+	}
 
-	// Collect inline unless the caller asked for async (the default).
-	const isAsync = params.async ?? true;
-	if (!isAsync) await collectInline(session);
-
-	// Persist whatever the run produced (children + their outcomes).
+	// Persist children first so a crash during the wait still leaves a record.
 	for (const name of session.handles) {
 		await persistChild(store, run.runId, orchestrator, name);
 	}
 
-	// Record the task tab this run owns (design §8.1). Written once, after the
-	// launches, because the tab is created lazily by the first child; a later
-	// process reads it back to know where the task's panes belong.
+	// Collect inline unless the caller asked for async (the default).
+	// Async: the session runtime watches each child and wakes the parent
+	// with a completion message — children must not prompt the parent.
+	const isAsync = params.async ?? true;
+	for (const name of session.handles) {
+		followLaunched(session, name, { watch: isAsync });
+	}
+	if (!isAsync) {
+		await collectInline(session);
+		for (const name of session.handles) {
+			const child = orchestrator
+				.childrenSnapshot()
+				.find((c) => c.name === name);
+			if (
+				child?.execution &&
+				shouldRecycleAfterCollect(child.execution.status)
+			) {
+				await orchestrator.retire(name);
+			}
+			await persistChild(store, run.runId, orchestrator, name);
+			runtime.release(name);
+		}
+	}
+
+	// Record the type-tab the children joined so a later process can see it.
 	if (orchestrator.tabId) {
 		await store.updateRun(run.runId, (r) => {
 			r.herdr = {
 				...r.herdr,
 				tabId: orchestrator.tabId ?? undefined,
-				tabLabel: `task:${run.runId}`,
 			};
 		});
+	}
+
+	if (isAsync && session.handles.length > 0) {
+		session.results.push(
+			"↳ async: the parent session wakes with a completion message when each child finishes. Running children show next to the input. Do not tell children to message the parent; do not poll just to wait.",
+		);
 	}
 
 	return {
@@ -473,6 +608,8 @@ interface LaunchSession {
 	settings: ReturnType<typeof resolveSubagentSettings>;
 	runId: string;
 	orchestrator: Orchestrator;
+	runtime: SessionRuntime;
+	onUpdate?: AgentToolUpdateCallback;
 	dispatchModel: string | undefined;
 	results: string[];
 	handles: string[];
@@ -528,6 +665,15 @@ async function launchStep(
 		session.results.push(
 			`▶ ${handle.name} (${agent.name}) pane=${handle.paneId}`,
 		);
+		session.onUpdate?.({
+			content: [
+				{
+					type: "text",
+					text: `playbook: ${handle.name} started in ${handle.paneId}`,
+				},
+			],
+			details: {},
+		});
 		// Surface frontmatter keys that are accepted but inert, so a user does
 		// not believe an unenforced setting is protecting them.
 		if (agent.unenforcedFields?.length) {
@@ -704,6 +850,88 @@ function firstInvalidStep(steps: PlanStep[], label: string): string | null {
 		}
 	}
 	return null;
+}
+
+/**
+ * Keep a live child on the session runtime so the input-box widget can
+ * show it, and so a background collect can wake the parent.
+ *
+ * If a watch is already in flight (steer mid-turn), leave it: that collect
+ * covers the current turn. Starting a second watch would double-notify.
+ */
+function followJob(
+	runtime: SessionRuntime,
+	input: {
+		name: string;
+		runId: string;
+		agent: string;
+		sessionFile: string;
+		timeoutMs: number;
+		orchestrator: Orchestrator;
+		store: RunStore;
+		watch: boolean;
+	},
+): void {
+	const existing = runtime.get(input.name);
+	runtime.track({
+		name: input.name,
+		runId: input.runId,
+		agent: input.agent,
+		sessionFile: input.sessionFile,
+		timeoutMs: input.timeoutMs,
+		collect: () =>
+			input.orchestrator.collect(input.name, { timeoutMs: input.timeoutMs }),
+		persist: async () =>
+			persistChild(input.store, input.runId, input.orchestrator, input.name),
+		retire: async () => {
+			await input.orchestrator.retire(input.name);
+			await persistChild(
+				input.store,
+				input.runId,
+				input.orchestrator,
+				input.name,
+			);
+		},
+	});
+	if (!input.watch) return;
+	if (existing?.watching) return;
+	runtime.watch(input.name);
+}
+
+function followChild(ctx: ChildContext, opts: { watch: boolean }): void {
+	const timeoutMs =
+		ctx.agents.find((a) => a.name === ctx.found.child.agent)?.timeoutMs ??
+		DEFAULTS.turnTimeoutMs;
+	followJob(ctx.runtime, {
+		name: ctx.name,
+		runId: ctx.found.runId,
+		agent: ctx.found.child.agent ?? "subagent",
+		sessionFile: ctx.found.child.sessionFile,
+		timeoutMs,
+		orchestrator: ctx.orchestrator,
+		store: ctx.store,
+		watch: opts.watch,
+	});
+}
+
+function followLaunched(
+	session: LaunchSession,
+	name: string,
+	opts: { watch: boolean },
+): void {
+	const child = session.orchestrator
+		.childrenSnapshot()
+		.find((c) => c.name === name);
+	followJob(session.runtime, {
+		name,
+		runId: session.runId,
+		agent: child?.agent ?? name,
+		sessionFile: child?.sessionFile ?? "",
+		timeoutMs: session.timeoutByName.get(name) ?? DEFAULTS.turnTimeoutMs,
+		orchestrator: session.orchestrator,
+		store: session.store,
+		watch: opts.watch,
+	});
 }
 
 /**

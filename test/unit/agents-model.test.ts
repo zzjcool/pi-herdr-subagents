@@ -342,6 +342,43 @@ test("settings: loadSubagentSettings reports malformed JSON with the path", () =
 	}
 });
 
+test("settings: a project file overlays a user profile's agentOverrides", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "settings-test-"));
+	try {
+		const user = path.join(dir, "user.json");
+		const project = path.join(dir, "project.json");
+		writeFileSync(
+			user,
+			JSON.stringify({
+				subagents: {
+					agentOverrides: {
+						scout: { model: "cb/flash" },
+						oracle: { model: "cb/opus" },
+					},
+				},
+			}),
+		);
+		writeFileSync(
+			project,
+			JSON.stringify({
+				subagents: {
+					defaultModel: "cb/mid",
+					agentOverrides: { oracle: { model: "cb/project-opus" } },
+				},
+			}),
+		);
+		const loaded = loadSubagentSettings({
+			userSettingsPath: user,
+			projectSettingsPath: project,
+		});
+		assert.equal(loaded.agentOverrides?.scout?.model, "cb/flash");
+		assert.equal(loaded.agentOverrides?.oracle?.model, "cb/project-opus");
+		assert.equal(loaded.defaultModel, "cb/mid");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // BUG 14 (security): the glob → RegExp translation produced nested quantifiers
 // (`*a*a*a…b` → `.*a.*a.*a…b`), which backtrack exponentially. The patterns

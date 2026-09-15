@@ -27,6 +27,7 @@ import {
 	parseFrontmatterList,
 	stripQuotes,
 } from "./frontmatter.ts";
+import { getAgentDir } from "./paths.ts";
 
 export const BUILTIN_AGENT_NAMES = [
 	"scout",
@@ -677,7 +678,7 @@ function agentLayers(
 		}
 		layers.push(
 			loadAgentsFromDir(
-				opts.userAgentsDir ?? path.join(homeAgentDir(), "agents"),
+				opts.userAgentsDir ?? path.join(getAgentDir(), "agents"),
 				"user",
 			),
 		);
@@ -688,12 +689,6 @@ function agentLayers(
 	}
 
 	return layers;
-}
-
-/** Resolve `~/.pi/agent` without importing pi internals. */
-function homeAgentDir(): string {
-	const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-	return path.join(home, ".pi", "agent");
 }
 
 /** Render a compact agent list for tool output. */
