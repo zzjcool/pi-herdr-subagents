@@ -84,3 +84,23 @@ test("buildPiArgs allowNested omits the no-nested-agents constraint", () => {
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("buildPiArgs worktreeBranch lands in the task file", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "args-wt-"));
+	try {
+		const built = buildPiArgs({
+			agent: agent(),
+			task: "implement",
+			sessionFile: "/tmp/s.jsonl",
+			tempDir: dir,
+			worktreeBranch: "pi-subagent/worker-0-deadbeef",
+		});
+		const taskArg = built.args.find((a) => a.startsWith("@"));
+		assert.ok(taskArg);
+		const text = readFileSync(taskArg!.slice(1), "utf8");
+		assert.match(text, /pi-subagent\/worker-0-deadbeef/);
+		assert.match(text, /merge request \/ pull request/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

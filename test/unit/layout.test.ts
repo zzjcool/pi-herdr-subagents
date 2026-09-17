@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createSessionLayout, tileSplit } from "../../src/runs/layout.ts";
+import { createSessionLayout, tileSplit, typeTabLabel } from "../../src/runs/layout.ts";
+
+test("typeTabLabel is parent-scoped so two Pis in one Space do not share a tab", () => {
+	assert.equal(typeTabLabel("scout"), "scout");
+	assert.equal(typeTabLabel("scout", "wA:p1"), "scout@wA:p1");
+	assert.equal(typeTabLabel("scout", "  wA:p1  "), "scout@wA:p1");
+	assert.notEqual(
+		typeTabLabel("scout", "wA:p1"),
+		typeTabLabel("scout", "wA:p2"),
+	);
+});
 
 test("tileSplit is a 3-column grid: fill a row, then wrap down", () => {
 	assert.equal(tileSplit([]), undefined);

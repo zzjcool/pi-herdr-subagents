@@ -8,6 +8,8 @@ import {
 	createChildWorktree,
 	isGitRepo,
 	removeChildWorktree,
+	resolveLaunchWorktree,
+	worktreeBranchFor,
 	worktreePathFor,
 } from "../../src/runs/worktree.ts";
 import { ErrorCodes, SubagentError } from "../../src/shared/types.ts";
@@ -46,6 +48,29 @@ test("worktreePathFor nests under the run dir", () => {
 	);
 });
 
+test("resolveLaunchWorktree lets the parent override the role default", () => {
+	assert.equal(resolveLaunchWorktree({ roleDefault: true }), true);
+	assert.equal(resolveLaunchWorktree({ roleDefault: false }), false);
+	assert.equal(resolveLaunchWorktree({}), false);
+	assert.equal(
+		resolveLaunchWorktree({ roleDefault: true, launch: false }),
+		false,
+	);
+	assert.equal(
+		resolveLaunchWorktree({ roleDefault: false, launch: true }),
+		true,
+	);
+	assert.equal(
+		resolveLaunchWorktree({
+			roleDefault: true,
+			launch: false,
+			step: true,
+		}),
+		true,
+		"per-child field wins over the top-level launch flag",
+	);
+});
+
 test("createChildWorktree refuses a non-git cwd", () => {
 	const dir = mkdtempSync(path.join(tmpdir(), "wt-nogit-"));
 	try {
@@ -66,23 +91,39 @@ test("createChildWorktree refuses a non-git cwd", () => {
 	}
 });
 
-test("createChildWorktree adds a detached checkout and remove rolls it back", {
+test("createChildWorktree adds a named branch checkout and remove rolls it back", {
 	skip: !hasGit(),
 }, () => {
 	const repo = initRepo();
 	const runDir = mkdtempSync(path.join(tmpdir(), "wt-run-"));
 	try {
-		const dest = createChildWorktree({
+		const tree = createChildWorktree({
 			repoCwd: repo,
 			runDir,
 			name: "worker-0",
 		});
-		assert.ok(existsSync(path.join(dest, "README")));
-		assert.equal(dest, worktreePathFor(runDir, "worker-0"));
-		removeChildWorktree({ repoCwd: repo, dest });
-		assert.equal(existsSync(dest), false);
+		assert.ok(existsSync(path.join(tree.path, "README")));
+		assert.equal(tree.path, worktreePathFor(runDir, "worker-0"));
+		assert.match(tree.branch, /^pi-subagent\/worker-0-[0-9a-f]{8}$/);
+		const head = execFileSync(
+			"git",
+			["-C", tree.path, "rev-parse", "--abbrev-ref", "HEAD"],
+			{ encoding: "utf8" },
+		).trim();
+		assert.equal(head, tree.branch);
+		assert.notEqual(head, "HEAD", "must not be a detached checkout");
+		removeChildWorktree({ repoCwd: repo, dest: tree.path });
+		assert.equal(existsSync(tree.path), false);
 	} finally {
 		rmSync(repo, { recursive: true, force: true });
 		rmSync(runDir, { recursive: true, force: true });
 	}
+});
+
+test("worktreeBranchFor is unique per nonce", () => {
+	assert.equal(
+		worktreeBranchFor("worker-0", "deadbeef"),
+		"pi-subagent/worker-0-deadbeef",
+	);
+	assert.notEqual(worktreeBranchFor("worker-0"), worktreeBranchFor("worker-0"));
 });

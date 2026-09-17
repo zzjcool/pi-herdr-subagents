@@ -804,6 +804,46 @@ test("acceptance: every bundled role parses its acceptance block", () => {
 	}
 });
 
+test("writer roles default to an isolated worktree", () => {
+	const writer = parseAgentDocument(
+		[
+			"---",
+			"name: coder",
+			"description: writes code",
+			"acceptance:",
+			"  level: attested",
+			"  role: writer",
+			"---",
+			"body",
+		].join("\n"),
+		"/x/coder.md",
+		"user",
+	);
+	assert.equal(writer?.worktree, true);
+	assert.equal(writer?.acceptance?.role, "writer");
+
+	const optedOut = parseAgentDocument(
+		[
+			"---",
+			"name: coder",
+			"description: writes code",
+			"worktree: false",
+			"acceptance:",
+			"  level: attested",
+			"  role: writer",
+			"---",
+			"body",
+		].join("\n"),
+		"/x/coder.md",
+		"user",
+	);
+	assert.equal(optedOut?.worktree, false);
+
+	const bundled = loadBundledAgents().find((a) => a.name === "worker");
+	assert.equal(bundled?.worktree, true);
+	assert.equal(bundled?.acceptance?.role, "writer");
+});
+
 test("findAgent matches canonical name and alias", () => {
 	const reviewer = parseAgentDocument(
 		["---", "name: reviewer", "description: d", "alias: [rev, r]", "---", "b"].join(

@@ -79,6 +79,42 @@ export function sanitizeNameForFs(name: string): string {
 	return cleaned;
 }
 
+/**
+ * Resolve a child handle across runs belonging to one parent Pi.
+ *
+ * Names are reused after recycle (F16), and `.pi-subagents` is per-cwd, so a
+ * naive oldest-first scan can return another parent's `scout-0` or a stale
+ * retired record. Filter by `parentPaneId` when we have one, then prefer a
+ * live child, then the newest run.
+ */
+export function pickChildByName(
+	runs: readonly RunRecord[],
+	name: string,
+	opts?: { parentPaneId?: string },
+): { run: RunRecord; child: ChildRecord } | null {
+	const matches: Array<{ run: RunRecord; child: ChildRecord }> = [];
+	for (const run of runs) {
+		const child = run.children.find((c) => c.name === name);
+		if (child) matches.push({ run, child });
+	}
+	if (matches.length === 0) return null;
+
+	const owner = opts?.parentPaneId?.trim();
+	const pool = owner
+		? matches.filter((m) => m.run.herdr.parentPaneId === owner)
+		: matches;
+	if (pool.length === 0) return null;
+
+	const live = pool.filter(
+		(m) => m.child.state !== "retired" && m.child.state !== "exited",
+	);
+	const pickFrom = live.length > 0 ? live : pool;
+	const ranked = [...pickFrom].sort((a, b) =>
+		b.run.createdAt.localeCompare(a.run.createdAt),
+	);
+	return ranked[0] ?? null;
+}
+
 function isValidIsoDate(v: unknown): v is string {
 	return typeof v === "string" && !Number.isNaN(Date.parse(v));
 }
@@ -389,6 +425,7 @@ export class RunStore {
 	}
 
 	// ── pruning ─────────────────────────────────────────────────────────
+
 
 	/**
 	 * Delete session files older than retentionDays (and enforce

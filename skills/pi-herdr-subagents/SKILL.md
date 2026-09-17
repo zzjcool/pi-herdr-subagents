@@ -9,6 +9,7 @@ The launch path is frozen. Do not invent herdr commands.
 
 ```text
 subagent({ agent: "worker", task: "<task card>" })
+subagent({ agent: "worker", task: "<task card>", worktree: true })
 subagent({ tasks: [
   { agent: "reviewer", task: "<lane A>" },
   { agent: "reviewer", task: "<lane B>" },
@@ -26,6 +27,11 @@ different panes.** A scout and a reviewer get two tabs; two scouts share one.
 `agent start` / `agent prompt` / `agent wait`. Those are the old ritual; the
 plugin will block them. Prefer one `tasks[]` call over two separate launches.
 
+**Isolation is your call.** Pass `worktree: true` when another parent may write
+this repo, or when the child should ship via MR (own branch, do not touch the
+current checkout). Pass `worktree: false` to edit this checkout in place. Omit
+it to use the role default (bundled `worker` isolates).
+
 Then return control. Completions arrive as `Background task completed: **name**`.
 The plugin recycles the child's pane (and the type tab when empty) when the
 turn finishes. Do not `retire` or close panes yourself. `resume` from the
@@ -41,6 +47,7 @@ appends** frozen constraints to every child:
 - do not prompt / wait on / send-keys to any other pane
 - do not read or close panes that are not yours
 - do not spawn nested agents
+- writers: isolated worktree branch; commit there and open an MR, do not write the parent checkout
 - end with `{"ok": true|false, "reason": "..."}` on its own line
 
 Do **not** add a wakeup instruction. Never tell a child to
@@ -81,5 +88,7 @@ verifies they still resolve.
 ## Isolation
 
 Child-guard blocks `herdr agent prompt` and foreign `pane read`, and it blocks
-writes for read-only roles. Herdr is still **one trust domain**: never put
-secrets on screen while children run. Do not treat a pane as a sandbox.
+writes for read-only roles. Writer roles (`worker`) run in an isolated git
+worktree on their own branch and ship via MR — they must not write the parent
+checkout. Herdr is still **one trust domain**: never put secrets on screen
+while children run. Do not treat a pane as a sandbox.

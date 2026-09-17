@@ -87,6 +87,16 @@ test("formatChildTask allowNested changes the nested-agents bullet", () => {
 	assert.match(formatChildTask("do it"), /Do not spawn nested agents/);
 });
 
+test("formatChildTask worktreeBranch tells the child to ship via MR", () => {
+	const text = formatChildTask("implement it", {
+		worktreeBranch: "pi-subagent/worker-0-deadbeef",
+	});
+	assert.match(text, /pi-subagent\/worker-0-deadbeef/);
+	assert.match(text, /isolated git worktree/);
+	assert.match(text, /merge request \/ pull request/);
+	assert.doesNotMatch(formatChildTask("implement it"), /isolated git worktree/);
+});
+
 test("read-only role: writes and herdr prompts are blocked, recon commands pass", () => {
 	assert.equal(isReadOnlyRole("read-only"), true);
 	assert.equal(isReadOnlyRole("writer"), false);

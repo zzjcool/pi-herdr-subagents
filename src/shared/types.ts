@@ -271,8 +271,10 @@ export interface ChildRecord {
 	onBlocked?: OnBlockedPolicy;
 	/** Snapshotted at launch; missing `{"ok":…}` on success becomes rejected. */
 	completionGuard?: boolean;
-	/** Detached git worktree the child's pane used; left on disk after retire. */
+	/** Isolated git worktree the child's pane used; left on disk after retire. */
 	worktreePath?: string;
+	/** Branch created in that worktree; the child ships via MR, not the parent checkout. */
+	worktreeBranch?: string;
 
 	// artifacts
 	artifacts?: Array<{ kind: string; path: string }>;
@@ -293,6 +295,12 @@ export interface RunRecord {
 		workspaceId?: string;
 		tabId?: string;
 		tabLabel?: string;
+		/**
+		 * Parent Pi's herdr pane (`HERDR_PANE_ID`). Scopes type-tab labels and
+		 * control-action lookup so two parent sessions in the same repo/Space
+		 * cannot steer or recycle each other's children.
+		 */
+		parentPaneId?: string;
 	};
 
 	/** Lineage: root → this node. */

@@ -18,15 +18,25 @@ import { shellChunks } from "./playbook.ts";
 export const CHILD_ROLE_ENV = "PI_SUBAGENT_ROLE";
 export const CHILD_ACCEPTANCE_ROLE_ENV = "PI_SUBAGENT_ACCEPTANCE_ROLE";
 
-export function childTaskAppendix(opts?: { allowNested?: boolean }): string {
+export function childTaskAppendix(opts?: {
+	allowNested?: boolean;
+	worktreeBranch?: string;
+}): string {
 	const nested = opts?.allowNested
 		? "- Nested subagents are allowed via the `subagent` tool. Do not use herdr to spawn them."
 		: "- Do not spawn nested agents.";
+	const worktree = opts?.worktreeBranch
+		? [
+				`- You are in an isolated git worktree on branch \`${opts.worktreeBranch}\`. Do not write the parent checkout.`,
+				"- Commit on this branch and open a merge request / pull request into the repository default branch. Do not merge locally. Do not push to main or master. Put the MR/PR URL in your verdict reason.",
+			]
+		: [];
 	return [
 		"## Frozen child constraints (injected by herdr-subagents)",
 		"- Do not message, prompt, wait on, or send keys to any other pane. The parent extension delivers your result.",
 		"- Do not read or close panes that are not yours.",
 		nested,
+		...worktree,
 		"- End with machine-readable JSON on its own: {\"ok\": true|false, \"reason\": \"...\"}.",
 	].join("\n");
 }
@@ -35,7 +45,7 @@ export const CHILD_TASK_APPENDIX = childTaskAppendix();
 
 export function formatChildTask(
 	task: string,
-	opts?: { allowNested?: boolean },
+	opts?: { allowNested?: boolean; worktreeBranch?: string },
 ): string {
 	return `Task: ${task}\n\n${childTaskAppendix(opts)}\n`;
 }

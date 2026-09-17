@@ -79,6 +79,18 @@ test("plan: tasks[] entries are validated", () => {
 	assert.equal(good.steps.length, 2);
 });
 
+test("plan: tasks[] preserves a per-child worktree flag", () => {
+	const plan = buildPlan({
+		tasks: [
+			{ agent: "worker", task: "a", worktree: true },
+			{ agent: "worker", task: "b", worktree: false },
+		],
+	});
+	assert.equal(plan.ok, true);
+	assert.equal(plan.steps[0]?.worktree, true);
+	assert.equal(plan.steps[1]?.worktree, false);
+});
+
 test("plan: chain[] entries are validated", () => {
 	const bad: Array<[string, unknown]> = [
 		["empty task", { chain: [{ agent: "worker", task: "" }] }],

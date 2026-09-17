@@ -7,6 +7,7 @@ import * as path from "node:path";
 import {
 	RunStore,
 	sanitizeNameForFs,
+	pickChildByName,
 } from "../../src/runs/store.ts";
 import { SubagentError, type RunRecord, type ChildRecord } from "../../src/shared/types.ts";
 
@@ -575,4 +576,64 @@ test("sessionFileFor keeps the pre-creation contract", () => {
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+test("pickChildByName does not return another parent's child of the same name", async () => {
+	const store = newStore();
+	const theirs = store.createRun({
+		task: "theirs",
+		cwd: "/p",
+		herdr: { parentPaneId: "w1:pA" },
+	});
+	await store.addChild(
+		theirs.runId,
+		makeChild("scout-0", { state: "working", paneId: "w1:p10" }),
+	);
+	const ours = store.createRun({
+		task: "ours",
+		cwd: "/p",
+		herdr: { parentPaneId: "w1:pB" },
+	});
+	await store.addChild(
+		ours.runId,
+		makeChild("scout-0", { state: "working", paneId: "w1:p20" }),
+	);
+
+	const picked = pickChildByName(store.listRuns(), "scout-0", {
+		parentPaneId: "w1:pB",
+	});
+	assert.equal(picked?.run.runId, ours.runId);
+	assert.equal(picked?.child.paneId, "w1:p20");
+	assert.equal(
+		pickChildByName(store.listRuns(), "scout-0", { parentPaneId: "w1:pC" }),
+		null,
+	);
+});
+
+test("pickChildByName prefers a live child over an older retired one", async () => {
+	const store = newStore();
+	const old = store.createRun({
+		task: "old",
+		cwd: "/p",
+		herdr: { parentPaneId: "w1:pA" },
+	});
+	await store.addChild(
+		old.runId,
+		makeChild("scout-0", { state: "retired", paneId: null }),
+	);
+	const next = store.createRun({
+		task: "next",
+		cwd: "/p",
+		herdr: { parentPaneId: "w1:pA" },
+	});
+	await store.addChild(
+		next.runId,
+		makeChild("scout-0", { state: "working", paneId: "w1:p3" }),
+	);
+
+	const picked = pickChildByName(store.listRuns(), "scout-0", {
+		parentPaneId: "w1:pA",
+	});
+	assert.equal(picked?.run.runId, next.runId);
+	assert.equal(picked?.child.state, "working");
 });

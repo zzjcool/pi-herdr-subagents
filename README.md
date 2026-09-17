@@ -112,7 +112,12 @@ subagent({
 
 The frozen appendix (verdict JSON, no wakeup) is added automatically. You can
 still write a detailed task card; just do not include “when done, `herdr agent
-prompt` the parent.”
+prompt` the parent.” Isolation is the parent’s call:
+
+```text
+subagent({ agent: "worker", task: "<implement>", worktree: true })   // own branch, child opens MR
+subagent({ agent: "worker", task: "<hotfix>", worktree: false })     // edit this checkout
+```
 
 Parallel fan-out — one tool call, then return control:
 
@@ -147,7 +152,9 @@ ends. The default is async: launch, return control, get a completion later.
 | `retire` | Close the pane. After auto-recycle this is a documented no-op |
 
 Useful launch fields: `model`, `cwd`, `placement` (`split-down` / `split-right` /
-`new-tab`), `agentScope` (`user` / `project` / `both`), `async`.
+`new-tab`), `worktree` (`true` = isolated branch + child opens an MR; `false` =
+edit the current checkout; omit = role default), `agentScope` (`user` /
+`project` / `both`), `async`.
 
 Handles look like `reviewer-0`. `subagent({ action: "list" })` is the way to
 see roles; `status` / `collect` take `name`.
@@ -163,7 +170,7 @@ alone would be silently ignored.
 | --- | --- | --- |
 | `scout` | Read-only reconnaissance: map code, conventions, environment. Facts only. | attested, **read-only** bash |
 | `planner` | Turn a task into a parallelisable, verifiable plan; freeze interfaces. | attested |
-| `worker` | Implement a frozen plan; run tests; self-report a verdict. | **verified** via `npm run typecheck && npm test` |
+| `worker` | Implement a frozen plan on an isolated worktree; open an MR; run tests; self-report a verdict. | **verified** via `npm run typecheck && npm test` |
 | `reviewer` | Read-only adversarial review; findings with path + severity. | attested, **read-only** bash |
 | `oracle` | Final arbitration on a contested plan. | attested |
 
@@ -326,8 +333,13 @@ that discipline; the rest is still on you.
   package-manager installs, `sed -i`, redirects onto files
 - `toolBudget.maxToolCalls` / `turnBudget.maxTurns` (further tool calls are
   blocked); `toolTimeoutMs` wraps bash with GNU `timeout`
-- `worktree: true` → detached `git worktree` under the run dir; the pane’s cwd
-  is that tree. Retire leaves it on disk. Requires a git repository.
+- `worktree: true` → `git worktree add -b` under the run dir (named
+  `pi-subagent/<name>-…` branch). The pane’s cwd is that tree. The **parent**
+  decides per launch (`subagent({ worktree: true|false })`); omitting it uses
+  the role default. Writer roles (`acceptance.role: writer`, including bundled
+  `worker`) default this on so concurrent parent Pis do not share a dirty
+  checkout; the child commits on the branch and opens an MR. `worktree: false`
+  opts out. Retire leaves the tree on disk. Requires a git repository.
 - child tabs are pinned to the **parent herdr Space**
   (`HERDR_WORKSPACE_ID` → `tab create --workspace`). A focused Space elsewhere
   cannot steal the child, and adopt will not reuse a same-label tab in another

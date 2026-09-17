@@ -5,7 +5,8 @@
  * calls each created a run, so two scouts landed in two tabs. This registry
  * is process-scoped (the extension holds one) so concurrent launches of the
  * same type join the same tab. After a reload, herdr tabs are re-adopted by
- * label (`scout`, `reviewer`, …).
+ * a parent-scoped label (`scout@wA:p1`) so another Pi in the same Space
+ * cannot join this tab.
  *
  * Panes inside a type tab are tiled automatically as a 3-column grid
  * (fill the first row left-to-right, then wrap down) instead of stacking
@@ -17,8 +18,27 @@
 
 import { makeName } from "../shared/name.ts";
 
-export function typeTabLabel(agentType: string): string {
-	return agentType;
+/**
+ * Tab label for one agent type.
+ *
+ * Same type still shares one tab *inside one parent pane*. A second parent Pi
+ * in the same Space must not adopt that tab — otherwise its recycle can
+ * `tab close` the first parent's live children. `owner` is the parent
+ * `HERDR_PANE_ID` (stable across `/reload` in the same pane).
+ */
+export function typeTabLabel(agentType: string, owner?: string): string {
+	const tag = sanitizeTabOwner(owner);
+	return tag ? `${agentType}@${tag}` : agentType;
+}
+
+/** Keep the owner fragment a single herdr-label-safe token. */
+export function sanitizeTabOwner(owner: string | undefined): string | undefined {
+	const cleaned = (owner ?? "")
+		.trim()
+		.replace(/\s+/g, "")
+		.replace(/[^A-Za-z0-9:_-]/g, "")
+		.slice(0, 32);
+	return cleaned.length > 0 ? cleaned : undefined;
 }
 
 export interface TypeTab {

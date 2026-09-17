@@ -28,12 +28,16 @@ const user = (t: string) => userMsg(t);
 // omitted. Isolate the host pane's Space so those tests keep FakeHerdr's
 // default (`w1`) instead of inheriting the live extension's workspace.
 const savedWorkspaceId = process.env.HERDR_WORKSPACE_ID;
+const savedPaneId = process.env.HERDR_PANE_ID;
 before(() => {
 	delete process.env.HERDR_WORKSPACE_ID;
+	delete process.env.HERDR_PANE_ID;
 });
 after(() => {
 	if (savedWorkspaceId === undefined) delete process.env.HERDR_WORKSPACE_ID;
 	else process.env.HERDR_WORKSPACE_ID = savedWorkspaceId;
+	if (savedPaneId === undefined) delete process.env.HERDR_PANE_ID;
+	else process.env.HERDR_PANE_ID = savedPaneId;
 });
 
 function agent(over: Partial<AgentConfig> = {}): AgentConfig {
@@ -1632,6 +1636,119 @@ test("regression: HERDR_WORKSPACE_ID env pins when workspaceId is omitted", asyn
 		assert.equal(workspaceFlag(created?.args ?? []), "w1");
 	} finally {
 		delete process.env.HERDR_WORKSPACE_ID;
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+function labelFlag(args: string[]): string | undefined {
+	const idx = args.indexOf("--label");
+	return idx >= 0 ? args[idx + 1] : undefined;
+}
+
+// Two parent Pi sessions in the SAME Space used to adopt each other's type
+// tab (label was just "scout"). Recycle then tab-closed the shared tab and
+// killed the other parent's live child. Labels are now parent-pane-scoped.
+test("regression: two parent panes in one Space get separate type tabs", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-parent-tabs-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+		const client = createHerdrClient(createFakeRunner(fake));
+
+		const parentA = new Orchestrator({
+			client,
+			runDir,
+			cwd: "/tmp",
+			workspaceId: "w1",
+			parentPaneId: "w1:pA",
+			sleep: async (ms) => fake.advance(ms),
+		});
+		const parentB = new Orchestrator({
+			client,
+			runDir,
+			cwd: "/tmp",
+			workspaceId: "w1",
+			parentPaneId: "w1:pB",
+			sleep: async (ms) => fake.advance(ms),
+		});
+
+		const a = await parentA.launch({
+			agent: agent({ name: "scout" }),
+			task: "t",
+		});
+		const b = await parentB.launch({
+			agent: agent({ name: "scout" }),
+			task: "t",
+		});
+
+		assert.notEqual(
+			a.child.tabId,
+			b.child.tabId,
+			"each parent Pi must own its own scout tab",
+		);
+		const created = fake.commands.filter(
+			(c) => c.args[0] === "tab" && c.args[1] === "create",
+		);
+		assert.equal(created.length, 2, "must not adopt the other parent's tab");
+		assert.equal(labelFlag(created[0]?.args ?? []), "scout@w1:pA");
+		assert.equal(labelFlag(created[1]?.args ?? []), "scout@w1:pB");
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("regression: retiring one parent does not tab-close another parent's pane", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-parent-reap-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+		const client = createHerdrClient(createFakeRunner(fake));
+
+		// Omit parentPaneId so both still share the "scout" label — pins the
+		// paneList occupancy check even when labels collide (headless / old tabs).
+		const parentA = new Orchestrator({
+			client,
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+		});
+		const a = await parentA.launch({
+			agent: agent({ name: "scout" }),
+			task: "t",
+		});
+
+		const parentB = new Orchestrator({
+			client,
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+		});
+		const b = await parentB.launch({
+			agent: agent({ name: "scout" }),
+			task: "t",
+		});
+
+		assert.equal(
+			a.child.tabId,
+			b.child.tabId,
+			"without a parent pane id they still share the type tab",
+		);
+
+		await parentA.retire(a.name);
+		assert.ok(
+			fake.agents.has(b.name),
+			"B's live agent must survive A's recycle",
+		);
+		assert.equal(
+			fake.tabs.has(a.child.tabId ?? ""),
+			true,
+			"the shared tab must stay while B still occupies a pane",
+		);
+		const closes = fake.commands.filter(
+			(c) => c.args[0] === "tab" && c.args[1] === "close",
+		);
+		assert.equal(closes.length, 0, "must not tab-close while a foreign pane remains");
+	} finally {
 		rmSync(runDir, { recursive: true, force: true });
 	}
 });

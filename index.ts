@@ -54,7 +54,8 @@ import {
 	createSessionLayout,
 	type SessionLayout,
 } from "./src/runs/layout.ts";
-import { RunStore } from "./src/runs/store.ts";
+import { RunStore, pickChildByName } from "./src/runs/store.ts";
+import { resolveLaunchWorktree } from "./src/runs/worktree.ts";
 import {
 	type AgentConfig,
 	type AgentScope,
@@ -80,6 +81,12 @@ const TaskItem = Type.Object({
 	task: Type.String({ description: "Task to delegate" }),
 	cwd: Type.Optional(Type.String()),
 	model: Type.Optional(Type.String()),
+	worktree: Type.Optional(
+		Type.Boolean({
+			description:
+				"Parent decides isolation for this child. true = own git branch, child opens an MR. false = write the current checkout.",
+		}),
+	),
 });
 
 const SubagentParams = Type.Object({
@@ -120,6 +127,12 @@ const SubagentParams = Type.Object({
 	),
 	cwd: Type.Optional(Type.String()),
 	placement: Type.Optional(PlacementSchema),
+	worktree: Type.Optional(
+		Type.Boolean({
+			description:
+				"Parent decides isolation. true = isolated git branch, child opens an MR. false = edit the current checkout. Omit to use the role default (bundled worker: true).",
+		}),
+	),
 	agentScope: Type.Optional(
 		Type.Union(
 			[Type.Literal("user"), Type.Literal("project"), Type.Literal("both")],
@@ -370,6 +383,7 @@ async function controlAction(input: {
 		cwd,
 		layout: input.layout,
 		workspaceId: process.env.HERDR_WORKSPACE_ID,
+		parentPaneId: process.env.HERDR_PANE_ID,
 	});
 	orchestrator.restore(found.run);
 
@@ -416,7 +430,14 @@ function unknownChild(
 	store: RunStore,
 	cwd: string,
 ): AgentToolResult<unknown> {
-	const known = store.listRuns().flatMap((r) => r.children.map((c) => c.name));
+	const known = store
+		.listRuns()
+		.filter((r) => {
+			const owner = process.env.HERDR_PANE_ID?.trim();
+			if (!owner) return true;
+			return r.herdr.parentPaneId === owner;
+		})
+		.flatMap((r) => r.children.map((c) => c.name));
 	return fail(
 		`unknown child: ${name} (no run under ${cwd}/.pi-subagents` +
 			`${known.length ? `; known here: ${known.join(", ")}` : ""}). ` +
@@ -584,7 +605,18 @@ async function launchFamily(input: {
 		details: {},
 	});
 
-	const run = store.createRun({ task: plan.task, cwd });
+	const run = store.createRun({
+		task: plan.task,
+		cwd,
+		herdr: {
+			...(process.env.HERDR_WORKSPACE_ID
+				? { workspaceId: process.env.HERDR_WORKSPACE_ID }
+				: {}),
+			...(process.env.HERDR_PANE_ID
+				? { parentPaneId: process.env.HERDR_PANE_ID }
+				: {}),
+		},
+	});
 	const orchestrator = new Orchestrator({
 		client: input.client,
 		runDir: store.runDir(run.runId),
@@ -594,6 +626,7 @@ async function launchFamily(input: {
 		// the machine (ErrorCodes.BUDGET_EXCEEDED).
 		maxSpawns: settings.maxSubagentSpawnsPerSession ?? null,
 		workspaceId: process.env.HERDR_WORKSPACE_ID,
+		parentPaneId: process.env.HERDR_PANE_ID,
 	});
 
 	const session: LaunchSession = {
@@ -694,7 +727,7 @@ interface LaunchSession {
  */
 async function launchStep(
 	session: LaunchSession,
-	step: { agent: string; task: string; model?: string },
+	step: { agent: string; task: string; model?: string; worktree?: boolean },
 ): Promise<void> {
 	const agent = findAgent(session.agents, step.agent);
 	if (!agent) {
@@ -728,6 +761,11 @@ async function launchStep(
 			task: step.task,
 			...(resolved.model ? { model: resolved.model } : {}),
 			...(model.placement ? { placement: model.placement } : {}),
+			worktree: resolveLaunchWorktree({
+				roleDefault: agent.worktree,
+				launch: session.params.worktree,
+				step: step.worktree,
+			}),
 		});
 		await session.store.addChild(session.runId, handle.child);
 		session.handles.push(handle.name);
@@ -831,15 +869,31 @@ type Plan =
 	| {
 			ok: true;
 			task: string;
-			steps: Array<{ agent: string; task: string; model?: string }>;
+			steps: Array<{
+				agent: string;
+				task: string;
+				model?: string;
+				worktree?: boolean;
+			}>;
 	  }
 	| { ok: false; message: string };
 
 export function buildPlan(params: {
 	agent?: string;
 	task?: string;
-	tasks?: Array<{ agent: string; task: string; model?: string }>;
-	chain?: Array<{ agent: string; task: string; model?: string }>;
+	tasks?: Array<{
+		agent: string;
+		task: string;
+		model?: string;
+		worktree?: boolean;
+	}>;
+	chain?: Array<{
+		agent: string;
+		task: string;
+		model?: string;
+		worktree?: boolean;
+	}>;
+	worktree?: boolean;
 }): Plan {
 	const hasSingle = isPresent(params.agent) && isPresent(params.task);
 	const hasTasks = Boolean(params.tasks?.length);
@@ -897,6 +951,7 @@ interface PlanStep {
 	agent: string;
 	task: string;
 	model?: string;
+	worktree?: boolean;
 }
 
 /**
@@ -1072,11 +1127,11 @@ function findChild(
 	run: ReturnType<RunStore["listRuns"]>[number];
 	child: NonNullable<ReturnType<RunStore["findChild"]>>;
 } | null {
-	for (const run of runs) {
-		const child = run.children.find((c) => c.name === name);
-		if (child) return { runId: run.runId, run, child };
-	}
-	return null;
+	const picked = pickChildByName(runs, name, {
+		parentPaneId: process.env.HERDR_PANE_ID,
+	});
+	if (!picked) return null;
+	return { runId: picked.run.runId, run: picked.run, child: picked.child };
 }
 
 function renderChild(

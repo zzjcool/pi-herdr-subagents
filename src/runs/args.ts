@@ -65,6 +65,8 @@ export interface BuildArgsInput {
 	cwd?: string;
 	/** Whether the child may spawn its own subagents. */
 	allowNestedSubagents?: boolean;
+	/** Isolated worktree branch the child should commit and MR from. */
+	worktreeBranch?: string;
 }
 
 export interface BuildArgsResult {
@@ -189,6 +191,7 @@ function pushTaskArg(
 ): void {
 	const taskText = formatChildTask(input.task, {
 		allowNested: input.allowNestedSubagents === true,
+		...(input.worktreeBranch ? { worktreeBranch: input.worktreeBranch } : {}),
 	});
 	const file = path.join(input.tempDir, "task.md");
 	fs.writeFileSync(file, taskText, { mode: 0o600 });

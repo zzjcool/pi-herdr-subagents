@@ -17,6 +17,7 @@ export const PARENT_PLAYBOOK = [
 	"2. Same agent type shares one tab (each child is a pane). Different types get different tabs. Prefer tasks[] over two separate tool calls.",
 	"3. Then return control. Running children show next to the input. A completion message wakes this session when it is idle; if this session is still working, the notice waits until the current turn finishes. Finished children recycle their pane (and the type tab when it is empty) automatically — do not retire or close panes. Resume from the session file if you need the child again.",
 	"4. Later control is only `subagent({ action: \"steer\"|\"continue\"|\"resume\"|\"collect\"|\"status\"|\"list\", name })`.",
+	"5. Isolation is YOUR call. Pass `worktree: true` when another parent may write this repo, or when the child should ship via MR (own branch, do not touch the current checkout). Pass `worktree: false` to edit the current checkout in place. Omit it to use the role default (bundled worker isolates).",
 	"Forbidden: `herdr --help`, bare `herdr agent|pane|tab`, `herdr pane split`, `herdr agent start|prompt|wait`, `test HERDR_ENV`, telling a child to prompt this pane.",
 ].join("\n");
 

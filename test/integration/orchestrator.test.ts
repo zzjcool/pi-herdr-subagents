@@ -738,7 +738,12 @@ test("launch worktree:true sets pane cwd and retire leaves the tree", {
 			task: "t",
 		});
 		assert.ok(handle.child.worktreePath);
+		assert.ok(handle.child.worktreeBranch);
 		assert.ok(existsSync(path.join(handle.child.worktreePath, "README")));
+		assert.match(
+			handle.child.worktreeBranch,
+			/^pi-subagent\/[a-z0-9._-]+-[0-9a-f]{8}$/,
+		);
 		const pane = fake.panes.get(handle.paneId ?? "");
 		assert.equal(pane?.cwd, handle.child.worktreePath);
 
@@ -764,6 +769,60 @@ test("launch worktree:true sets pane cwd and retire leaves the tree", {
 			existsSync(handle.child.worktreePath),
 			"retire must leave the worktree on disk",
 		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("launch worktree: false opts out of the role default", {
+	skip: !hasGit(),
+}, async () => {
+	const repo = initGitRepo();
+	const runDir = mkdtempSync(path.join(tmpdir(), "orch-wt-off-"));
+	const fake = new FakeHerdr({ paneBusyMs: 0 });
+	fake.addRootPane("w1");
+	const orchestrator = new Orchestrator({
+		client: createHerdrClient(createFakeRunner(fake)),
+		runDir,
+		cwd: repo,
+		sleep: async (ms) => fake.advance(ms),
+	});
+	try {
+		const handle = await orchestrator.launch({
+			agent: agent({ worktree: true }),
+			task: "t",
+			worktree: false,
+		});
+		assert.equal(handle.child.worktreePath, undefined);
+		assert.equal(fake.panes.get(handle.paneId ?? "")?.cwd, repo);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("launch worktree: true isolates even when the role did not default it", {
+	skip: !hasGit(),
+}, async () => {
+	const repo = initGitRepo();
+	const runDir = mkdtempSync(path.join(tmpdir(), "orch-wt-on-"));
+	const fake = new FakeHerdr({ paneBusyMs: 0 });
+	fake.addRootPane("w1");
+	const orchestrator = new Orchestrator({
+		client: createHerdrClient(createFakeRunner(fake)),
+		runDir,
+		cwd: repo,
+		sleep: async (ms) => fake.advance(ms),
+	});
+	try {
+		const handle = await orchestrator.launch({
+			agent: agent({ worktree: false }),
+			task: "t",
+			worktree: true,
+		});
+		assert.ok(handle.child.worktreePath);
+		assert.equal(fake.panes.get(handle.paneId ?? "")?.cwd, handle.child.worktreePath);
 	} finally {
 		rmSync(runDir, { recursive: true, force: true });
 		rmSync(repo, { recursive: true, force: true });

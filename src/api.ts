@@ -115,9 +115,9 @@ export {
 	defaultVerifyRunner,
 } from "./runs/acceptance.ts";
 export type { CommandResult, VerifyRunner } from "./runs/acceptance.ts";
-export { createSessionLayout, typeTabLabel, tileSplit, TILE_COLUMNS } from "./runs/layout.ts";
+export { createSessionLayout, typeTabLabel, sanitizeTabOwner, tileSplit, TILE_COLUMNS } from "./runs/layout.ts";
 export type { SessionLayout } from "./runs/layout.ts";
-export { RunStore, sanitizeNameForFs } from "./runs/store.ts";
+export { RunStore, sanitizeNameForFs, pickChildByName } from "./runs/store.ts";
 export type { StoreOptions } from "./runs/store.ts";
 export {
 	applyThinkingSuffix,
@@ -130,6 +130,8 @@ export {
 	createChildWorktree,
 	isGitRepo,
 	removeChildWorktree,
+	resolveLaunchWorktree,
+	worktreeBranchFor,
 	worktreePathFor,
 } from "./runs/worktree.ts";
 

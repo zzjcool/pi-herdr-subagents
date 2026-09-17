@@ -62,6 +62,7 @@ import { canUseCachedCollect } from "../extension/recycle.ts";
 import {
 	createChildWorktree,
 	removeChildWorktree,
+	resolveLaunchWorktree,
 } from "./worktree.ts";
 import {
 	createSessionLayout,
@@ -111,6 +112,11 @@ export interface OrchestratorDeps {
 	 * and adopt to that Space; without it herdr uses the UI-focused Space.
 	 */
 	workspaceId?: string;
+	/**
+	 * Parent Pi's herdr pane (`HERDR_PANE_ID`). Scopes the type-tab label so
+	 * another parent in the same Space does not adopt this tab.
+	 */
+	parentPaneId?: string;
 }
 
 export interface CollectResult {
@@ -282,6 +288,8 @@ export class Orchestrator {
 	 * places the tab in the UI-focused Space.
 	 */
 	private readonly workspaceId?: string;
+	/** Parent pane id used to uniquify type-tab labels across parent Pis. */
+	private readonly parentPaneId?: string;
 	/** Last type-tab used by a child of this orchestrator. */
 	private lastTypeTabId: string | null = null;
 	private spawned = 0;
@@ -314,6 +322,9 @@ export class Orchestrator {
 		const rawWorkspaceId =
 			deps.workspaceId ?? process.env.HERDR_WORKSPACE_ID;
 		this.workspaceId = rawWorkspaceId?.trim() || undefined;
+		const rawParentPaneId =
+			deps.parentPaneId ?? process.env.HERDR_PANE_ID;
+		this.parentPaneId = rawParentPaneId?.trim() || undefined;
 	}
 
 	/** The lineage path a child of this process would receive. */
@@ -400,7 +411,7 @@ export class Orchestrator {
 		env?: Record<string, string>,
 		cwd: string = this.cwd,
 	): Promise<TypeTabCreateResult> {
-		const label = typeTabLabel(agentType);
+		const label = typeTabLabel(agentType, this.parentPaneId);
 		const adopted = await this.adoptTabByLabel(label);
 		if (adopted) return adopted;
 
@@ -589,6 +600,8 @@ export class Orchestrator {
 		model?: string;
 		thinking?: string | false;
 		placement?: Placement;
+		/** Parent override; when omitted, the role's `worktree` flag is used. */
+		worktree?: boolean;
 	}): Promise<Handle> {
 		// Allocate against BOTH our own children and the global herdr namespace.
 		// herdr names are session-global, so an unrelated agent holding
@@ -609,16 +622,23 @@ export class Orchestrator {
 
 		const tempDir = fs.mkdtempSync(path.join(this.runDir, `tmp-${name}-`));
 		const placement = input.placement ?? input.agent.placement ?? "split-down";
+		const useWorktree = resolveLaunchWorktree({
+			roleDefault: input.agent.worktree,
+			launch: input.worktree,
+		});
 
 		let paneId: string | null = null;
 		let worktreePath: string | undefined;
+		let worktreeBranch: string | undefined;
 		try {
-			if (input.agent.worktree) {
-				worktreePath = createChildWorktree({
+			if (useWorktree) {
+				const tree = createChildWorktree({
 					repoCwd: this.cwd,
 					runDir: this.runDir,
 					name,
 				});
+				worktreePath = tree.path;
+				worktreeBranch = tree.branch;
 			}
 			const childCwd = worktreePath ?? this.cwd;
 			const pane = await this.createPane(
@@ -644,6 +664,7 @@ export class Orchestrator {
 				tempDir,
 				cwd: childCwd,
 				candidates,
+				...(worktreeBranch ? { worktreeBranch } : {}),
 				reallocate: () => {
 					const next = this.layout.claimName(
 						input.agent.name,
@@ -669,6 +690,7 @@ export class Orchestrator {
 				sessionFile,
 				...(snapshotModel ? { model: snapshotModel } : {}),
 				...(worktreePath ? { worktreePath } : {}),
+				...(worktreeBranch ? { worktreeBranch } : {}),
 			});
 			// Sidebar metadata is not on the launch critical path.
 			void this.announceChild(child, input.agent.name, snapshotModel).catch(
@@ -717,6 +739,7 @@ export class Orchestrator {
 		tempDir: string;
 		cwd: string;
 		candidates: Array<string | undefined>;
+		worktreeBranch?: string;
 		reallocate: () => string;
 	}): Promise<{ name: string; sessionFile: string; model?: string }> {
 		let name = input.name;
@@ -733,6 +756,9 @@ export class Orchestrator {
 				tempDir: input.tempDir,
 				cwd: input.cwd,
 				allowNestedSubagents: input.agent.allowNestedSubagents,
+				...(input.worktreeBranch
+					? { worktreeBranch: input.worktreeBranch }
+					: {}),
 			});
 			try {
 				name = await this.startWithRetry({
@@ -842,6 +868,7 @@ export class Orchestrator {
 		sessionFile: string;
 		model?: string;
 		worktreePath?: string;
+		worktreeBranch?: string;
 	}): ChildRecord {
 		const { name, agent, sessionFile } = input;
 		const child: ChildRecord = {
@@ -867,6 +894,7 @@ export class Orchestrator {
 			...(input.tabId ? { tabId: input.tabId } : {}),
 			...(input.model ? { model: input.model } : {}),
 			...(input.worktreePath ? { worktreePath: input.worktreePath } : {}),
+			...(input.worktreeBranch ? { worktreeBranch: input.worktreeBranch } : {}),
 		};
 		this.children.set(name, child);
 		this.spawned += 1;
@@ -1219,19 +1247,21 @@ export class Orchestrator {
 		const released = agentType
 			? this.layout.releasePane(agentType, paneId)
 			: { tabId: undefined, empty: true };
-		if (released.empty && released.tabId) {
-			await bestEffort(this.client.tabClose(released.tabId));
-			return;
-		}
-		if (released.empty && tabId && !this.layout.getTypeTab(agentType)) {
-			const panes = await this.client.paneList();
-			if (!panes.ok) {
-				await bestEffort(this.client.tabClose(tabId));
-				return;
-			}
-			const left = panes.value.filter((p) => p.tab_id === tabId);
-			if (left.length === 0) await bestEffort(this.client.tabClose(tabId));
-		}
+		if (!released.empty) return;
+
+		const candidate = released.tabId ?? tabId;
+		if (!candidate) return;
+
+		// Another parent (or another Orchestrator of the same parent) may have
+		// panes in this tab that our in-memory layout never tracked. Closing on
+		// "our map is empty" would kill those (F15 is atomic). Ask herdr first.
+		const panes = await this.client.paneList();
+		if (!panes.ok) return;
+		const left = panes.value.filter(
+			(p) => p.tab_id === candidate && p.pane_id !== paneId,
+		);
+		if (left.length > 0) return;
+		await bestEffort(this.client.tabClose(candidate));
 	}
 
 	/** Retire every known child; optionally reap the whole tab (F15). */
