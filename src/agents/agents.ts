@@ -326,6 +326,7 @@ function parseCriteria(value: unknown): AcceptanceCriterion[] | undefined {
 
 		const evidence = list(record.evidence);
 		const severity = str(record.severity);
+		const command = str(record.command);
 		return [
 			{
 				id,
@@ -334,6 +335,7 @@ function parseCriteria(value: unknown): AcceptanceCriterion[] | undefined {
 				...(severity === "required" || severity === "optional"
 					? { severity: severity as AcceptanceCriterion["severity"] }
 					: {}),
+				...(command ? { command } : {}),
 			},
 		];
 	});
@@ -503,22 +505,14 @@ function applyHerdrFields(config: AgentConfig, fm: AgentFrontmatter): void {
  * nothing is worse than an unknown one: the user believes it is in effect.
  *
  * Keep this list honest — remove a field the moment it starts being enforced.
+ * Empty means every parsed AgentConfig field the runtime can honour is wired.
  *
  * Typed against `AgentConfig`'s keys: a renamed or removed field cannot be left
  * behind here silently (the previous untyped array could name a key that no
  * longer exists and would simply stop reporting it, which is the exact drift
  * this list is meant to prevent).
  */
-const UNENFORCED_FIELDS = [
-	"worktree",
-	"toolBudget",
-	"turnBudget",
-	"fallbackModels",
-	"completionGuard",
-	"allowNestedSubagents",
-	"alias",
-	"toolTimeoutMs",
-] as const satisfies readonly (keyof AgentConfig)[];
+const UNENFORCED_FIELDS = [] as const satisfies readonly (keyof AgentConfig)[];
 
 /** The subset of `UNENFORCED_FIELDS` this agent actually sets. */
 function unenforcedFieldsIn(config: AgentConfig): string[] {
@@ -688,6 +682,28 @@ function agentLayers(
 	}
 
 	return layers;
+}
+
+/**
+ * Resolve an agent by canonical name or alias.
+ *
+ * Exact `name` wins over an alias collision. Matching is case-insensitive
+ * only after the exact pass, so `Reviewer` still finds `reviewer`.
+ */
+export function findAgent(
+	agents: AgentConfig[],
+	requested: string,
+): AgentConfig | undefined {
+	const exactName = agents.find((a) => a.name === requested);
+	if (exactName) return exactName;
+	const exactAlias = agents.find((a) => (a.alias ?? []).includes(requested));
+	if (exactAlias) return exactAlias;
+	const needle = requested.toLowerCase();
+	return agents.find(
+		(a) =>
+			a.name.toLowerCase() === needle ||
+			(a.alias ?? []).some((alias) => alias.toLowerCase() === needle),
+	);
 }
 
 /** Render a compact agent list for tool output. */

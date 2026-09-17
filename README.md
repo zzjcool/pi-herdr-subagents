@@ -302,13 +302,14 @@ Put it in `~/.pi/agent/agents/researcher.md` (user) or
 `description`. Useful optional fields: `model`, `thinking`, `tools`, `skills`,
 `timeoutMs`, `placement`, `onBlocked` (`forward` / `auto-approve` / `notify`),
 `acceptance.role` (`read-only` / `writer`), `acceptance.criteria` with
-`evidence: [verification-output]` if collect should actually run tests.
+`evidence: [verification-output]` (and optional `command:`) if collect should
+run a check, `worktree`, `toolBudget` / `turnBudget` / `toolTimeoutMs`,
+`fallbackModels`, `alias`, `completionGuard`, `allowNestedSubagents`.
 
-`subagent({ action: "list" })` prints `⚠ not enforced yet: …` for keys that
-are parsed but not acted on (`worktree`, `toolBudget`, `turnBudget`,
-`fallbackModels`, `allowNestedSubagents`, …). A listed key that does nothing
-is worse than an unknown key — if you see that warning, the field is
-decoration.
+If `subagent({ action: "list" })` prints `⚠ not enforced yet: …`, that key is
+parsed but inert. A listed key that does nothing is worse than an unknown key
+— if you see that warning, the field is decoration. The shipped roles currently
+report none.
 
 ## Isolation
 
@@ -323,6 +324,14 @@ that discipline; the rest is still on you.
 - `herdr pane read|close` of a pane that is not this child’s
 - for `acceptance.role: read-only`: filesystem writes, `git` mutations,
   package-manager installs, `sed -i`, redirects onto files
+- `toolBudget.maxToolCalls` / `turnBudget.maxTurns` (further tool calls are
+  blocked); `toolTimeoutMs` wraps bash with GNU `timeout`
+- `worktree: true` → detached `git worktree` under the run dir; the pane’s cwd
+  is that tree. Retire leaves it on disk. Requires a git repository.
+- child tabs are pinned to the **parent herdr Space**
+  (`HERDR_WORKSPACE_ID` → `tab create --workspace`). A focused Space elsewhere
+  cannot steal the child, and adopt will not reuse a same-label tab in another
+  Space.
 
 **Still not a sandbox**
 
@@ -367,7 +376,9 @@ On top of that:
   a clean turn 2 is overall success. `toolErrors` is diagnostic only.
 - **Self-report is attested, not verified.** `{"ok": true}` is the agent
   marking its own homework. Worker’s `verification-output` criterion is the
-  exception: the plugin runs the test command itself.
+  exception: the plugin runs `criterion.command` (or
+  `npm run typecheck && npm test`) itself, with a timeout. `completionGuard:
+  true` rejects a successful turn that forgot the `{"ok":…}` verdict.
 - **Recycle destroys live evidence** (`agent get` → `agent_not_found`). The
   plugin collects and snapshots `execution` into `.pi-subagents/run.json`
   **before** closing the pane. Resume uses the session file, not the pane.
@@ -421,6 +432,12 @@ bash test/docker/verify-3-readonly.sh
 bash test/docker/verify-4-acceptance.sh
 bash test/docker/verify-5-blocked.sh
 bash test/docker/verify-6-cache.sh
+bash test/docker/verify-7-budget.sh
+bash test/docker/verify-8-verify-command.sh
+bash test/docker/verify-9-worktree.sh
+bash test/docker/verify-10-fallback.sh
+bash test/docker/verify-11-nested-alias.sh
+bash test/docker/verify-12-workspace.sh
 ```
 
 They expect image `pi-herdr-sandbox:latest` and copy `~/.pi/agent/{settings,models,auth}.json`
@@ -442,8 +459,10 @@ the runtime table above — trust this README and `action=list`’s
   resume depends on each CLI.
 - **`blocked` is screen-heuristic**: false positives exist; the confirm is
   paired with the collect timeout as a backstop.
-- **Verification command is frozen** to `npm run typecheck && npm test` for
-  `verification-output` criteria. Other evidence types stay a checklist.
+- **Verification** runs `criterion.command` when a required criterion asks
+  for `verification-output`, else `npm run typecheck && npm test`. Semantic
+  `must` strings are never NLP-parsed (F32 / F44). Other evidence types stay
+  a checklist.
 - **Panes are scarce**: cap fan-out (`maxSubagentSpawnsPerSession` /
   `herdr.maxConcurrentAgents`). Warm-pane pooling is not worth it (~0.9s).
 

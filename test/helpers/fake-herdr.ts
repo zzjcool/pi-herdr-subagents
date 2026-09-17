@@ -24,6 +24,13 @@ export interface FakeHerdrOptions {
 	paneBusyMs?: number;
 	/** Simulated clock start; defaults to Date.now(). */
 	now?: number;
+	/**
+	 * Space that receives `tab create` when argv omits `--workspace`.
+	 * Models real herdr: an unscoped create lands in the UI-focused Space,
+	 * not necessarily the parent agent's Space. Default `"w1"` keeps
+	 * existing tests that never pass `--workspace` green.
+	 */
+	focusedWorkspaceId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -118,10 +125,19 @@ export class FakeHerdr {
 
 	/** F19 configurable race window (ms). */
 	paneBusyMs: number;
+	/**
+	 * Space used by `tab create` when `--workspace` is absent.
+	 * Default `"w1"` — same as the previous hardcoded create target.
+	 */
+	focusedWorkspaceId: string;
 	/** Keys injected via `agent send-keys` (F11: ctrl+d exits, ctrl+c does not). */
 	readonly sentKeys: Array<{ target: string; keys: string[]; at: number }> = [];
 	/** Prompts accepted while an agent was working (F10). */
 	readonly steeredPrompts: SteeredPrompt[] = [];
+	/** `--model` ids that `agent start` should reject (fallback tests). */
+	readonly failStartOnModel = new Set<string>();
+	/** Models that successfully started, in order. */
+	readonly startedModels: Array<string | undefined> = [];
 
 	private clock: number;
 	private nextPane = 1;
@@ -130,6 +146,7 @@ export class FakeHerdr {
 	constructor(opts: FakeHerdrOptions = {}) {
 		this.paneBusyMs = opts.paneBusyMs ?? 0;
 		this.clock = opts.now ?? Date.now();
+		this.focusedWorkspaceId = opts.focusedWorkspaceId ?? "w1";
 	}
 
 	// -- time ----------------------------------------------------------------
@@ -328,7 +345,6 @@ export class FakeHerdr {
 			if (sub === "split") {
 				const cwdIdx = sargs.indexOf("--cwd");
 				const cwd = cwdIdx >= 0 ? (sargs[cwdIdx + 1] ?? null) : null;
-				const workspaceId = "w1";
 				// The tab is decided by the split TARGET: real herdr splits that pane,
 				// so the new pane inherits its tab. `--current` resolves to the ambient
 				// pane (w1:t1 in the fake). A bare positional is only a pane id when it
@@ -342,7 +358,9 @@ export class FakeHerdr {
 				if (explicitTarget && !targetPane) {
 					return fail("target_pane_not_found", `no pane ${explicitTarget}`);
 				}
-				const tabId = targetPane?.tab_id ?? "w1:t1";
+				const tabId = targetPane?.tab_id ?? `${this.focusedWorkspaceId}:t1`;
+				const workspaceId =
+					targetPane?.workspace_id ?? this.focusedWorkspaceId;
 				const paneId = `${workspaceId}:p${this.nextPane++}`;
 				this.panes.set(paneId, {
 					pane_id: paneId,
@@ -407,7 +425,11 @@ export class FakeHerdr {
 		if (head === "tab") {
 			const [sub, ...sargs] = rest;
 			if (sub === "create") {
-				const workspaceId = "w1";
+				const wsIdx = sargs.indexOf("--workspace");
+				const workspaceId =
+					wsIdx >= 0
+						? (sargs[wsIdx + 1] ?? this.focusedWorkspaceId)
+						: this.focusedWorkspaceId;
 				// `addRootPane` pre-registers `w1:t1` without consuming the counter, so
 				// skip any id already taken — otherwise a created tab would overwrite it.
 				let tabId = `${workspaceId}:t${this.nextTab++}`;
@@ -416,6 +438,8 @@ export class FakeHerdr {
 				}
 				const labelIdx = sargs.indexOf("--label");
 				const label = labelIdx >= 0 ? (sargs[labelIdx + 1] ?? null) : null;
+				const cwdIdx = sargs.indexOf("--cwd");
+				const cwd = cwdIdx >= 0 ? (sargs[cwdIdx + 1] ?? null) : null;
 				const paneId = `${workspaceId}:p${this.nextPane++}`;
 				this.tabs.set(tabId, {
 					tab_id: tabId,
@@ -427,7 +451,7 @@ export class FakeHerdr {
 					pane_id: paneId,
 					tab_id: tabId,
 					workspace_id: workspaceId,
-					cwd: null,
+					cwd,
 					agent_status: undefined,
 					busyUntil: this.clock + this.paneBusyMs,
 					screen: [],
@@ -459,8 +483,14 @@ export class FakeHerdr {
 				return okOut({ tab: this.tabJson(tab.tab_id) });
 			}
 			if (sub === "list") {
+				const wsIdx = sargs.indexOf("--workspace");
+				const filter =
+					wsIdx >= 0 ? sargs[wsIdx + 1] : undefined;
+				const tabs = [...this.tabs.values()].filter(
+					(t) => !filter || t.workspace_id === filter,
+				);
 				return okOut({
-					tabs: [...this.tabs.values()].map((t) => this.tabJson(t.tab_id)),
+					tabs: tabs.map((t) => this.tabJson(t.tab_id)),
 				});
 			}
 			return fail("unknown_command", `unknown tab subcommand ${String(sub)}`);
@@ -484,9 +514,18 @@ export class FakeHerdr {
 				if (this.agents.has(name)) {
 					return fail("agent_name_taken", `agent name ${name} is already used`);
 				}
+				const dash = sargs.indexOf("--");
+				const childArgs = dash >= 0 ? sargs.slice(dash + 1) : [];
+				const modelIdx = childArgs.indexOf("--model");
+				const model =
+					modelIdx >= 0 ? (childArgs[modelIdx + 1] ?? undefined) : undefined;
+				if (model && this.failStartOnModel.has(model)) {
+					return fail("start_failed", `model ${model} unavailable`);
+				}
 				// F1/F7: only pi kinds report a session path.
 				const sessionPath = kind === "pi" ? `/tmp/sessions/${name}.jsonl` : null;
 				this.addAgent(name, paneId, kind, sessionPath);
+				this.startedModels.push(model);
 				const agent = this.agents.get(name)!;
 				pane.agent_status = "idle";
 				pane.processes.push({

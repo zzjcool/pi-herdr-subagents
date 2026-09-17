@@ -15,6 +15,7 @@ acceptance:
     - id: typecheck-test-pass
       must: npm run typecheck 与 npm test 全绿，输出原样粘贴在报告里
       evidence: [verification-output]
+      command: npm run typecheck && npm test
       severity: required
 kind: pi
 placement: split-down

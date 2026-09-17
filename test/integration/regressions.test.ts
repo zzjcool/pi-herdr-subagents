@@ -4,7 +4,7 @@
  * Each test names the bug it pins down, so a reintroduction fails loudly.
  */
 
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +23,18 @@ import { RunStore } from "../../src/runs/store.ts";
 import type { AgentConfig } from "../../src/shared/types.ts";
 
 const user = (t: string) => userMsg(t);
+
+// Orchestrator falls back to HERDR_WORKSPACE_ID when deps.workspaceId is
+// omitted. Isolate the host pane's Space so those tests keep FakeHerdr's
+// default (`w1`) instead of inheriting the live extension's workspace.
+const savedWorkspaceId = process.env.HERDR_WORKSPACE_ID;
+before(() => {
+	delete process.env.HERDR_WORKSPACE_ID;
+});
+after(() => {
+	if (savedWorkspaceId === undefined) delete process.env.HERDR_WORKSPACE_ID;
+	else process.env.HERDR_WORKSPACE_ID = savedWorkspaceId;
+});
 
 function agent(over: Partial<AgentConfig> = {}): AgentConfig {
 	return {
@@ -1439,6 +1451,187 @@ test("regression: a LATER turn's rejection must override an earlier acceptance (
 		);
 		assert.match(String(collected.acceptance.reason), /turn 2 rejected/);
 	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUG (measured): `herdr tab create` without `--workspace` lands in the
+// UI-focused Space, not the parent agent's Space (`HERDR_WORKSPACE_ID`).
+// Caller wA + focused w7 → new tab in w7. `tab create --workspace wA` pins.
+// adoptTabByLabel lists ALL tabs, so a same-named tab in another Space is stolen.
+//
+// Most tests pass `workspaceId` explicitly. One also pins via
+// HERDR_WORKSPACE_ID when the dep is omitted (the extension path).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function workspaceFlag(args: string[]): string | undefined {
+	const idx = args.indexOf("--workspace");
+	return idx >= 0 ? args[idx + 1] : undefined;
+}
+
+test("regression: child tab lands in parent Space, not the focused Space", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-workspace-focus-"));
+	try {
+		const fake = new FakeHerdr({ focusedWorkspaceId: "w2" });
+		fake.addRootPane("w1"); // group Space exists
+		const client = createHerdrClient(createFakeRunner(fake));
+		const orchestrator = new Orchestrator({
+			client,
+			runDir,
+			cwd: "/tmp",
+			workspaceId: "w1",
+			sleep: async (ms) => fake.advance(ms),
+		});
+
+		const handle = await orchestrator.launch({
+			agent: agent({ name: "scout" }),
+			task: "t",
+		});
+
+		assert.ok(handle.paneId, "a pane must be assigned");
+		const pane = fake.panes.get(handle.paneId);
+		assert.ok(pane, "child pane must exist");
+		assert.equal(
+			pane.workspace_id,
+			"w1",
+			"child must land in the parent Space, not the focused one",
+		);
+
+		const created = fake.commands.find(
+			(c) => c.args[0] === "tab" && c.args[1] === "create",
+		);
+		assert.ok(created, "a tab must have been created");
+		assert.equal(
+			workspaceFlag(created.args),
+			"w1",
+			`tab create must pin --workspace w1, got: ${created.args.join(" ")}`,
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("regression: new-tab placement pins to parent workspaceId under a focused Space", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-workspace-newtab-"));
+	try {
+		const fake = new FakeHerdr({ focusedWorkspaceId: "w2" });
+		fake.addRootPane("w1");
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			workspaceId: "w1",
+			sleep: async (ms) => fake.advance(ms),
+		});
+
+		const handle = await orchestrator.launch({
+			agent: agent({ name: "scout", placement: "new-tab" }),
+			task: "t",
+		});
+
+		assert.ok(handle.paneId, "a pane must be assigned");
+		const pane = fake.panes.get(handle.paneId);
+		assert.ok(pane, "child pane must exist");
+		assert.equal(
+			pane.workspace_id,
+			"w1",
+			"new-tab must pin to workspaceId w1 under focused w2",
+		);
+
+		const created = fake.commands.find(
+			(c) => c.args[0] === "tab" && c.args[1] === "create",
+		);
+		assert.ok(created, "new-tab must create a tab");
+		assert.equal(
+			workspaceFlag(created.args),
+			"w1",
+			`tab create must pin --workspace w1, got: ${created.args.join(" ")}`,
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("regression: adopt does not steal a same-label tab from another Space", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-workspace-adopt-"));
+	try {
+		const fake = new FakeHerdr({ focusedWorkspaceId: "w2" });
+		fake.addRootPane("w1");
+		// A scout tab already lives in the focused Space — must not be reused.
+		const foreign = fake.exec(["tab", "create", "--label", "scout"]);
+		assert.equal(foreign.code, 0, foreign.stderr);
+		const foreignTab = JSON.parse(foreign.stdout) as {
+			result: { tab: { tab_id: string; workspace_id: string } };
+		};
+		assert.equal(foreignTab.result.tab.workspace_id, "w2");
+		const foreignTabId = foreignTab.result.tab.tab_id;
+
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			workspaceId: "w1",
+			sleep: async (ms) => fake.advance(ms),
+		});
+
+		const handle = await orchestrator.launch({
+			agent: agent({ name: "scout" }),
+			task: "t",
+		});
+
+		assert.ok(handle.paneId, "a pane must be assigned");
+		const pane = fake.panes.get(handle.paneId);
+		assert.ok(pane, "child pane must exist");
+		assert.equal(
+			pane.workspace_id,
+			"w1",
+			"child must land in the parent Space, not the focused one",
+		);
+		assert.notEqual(
+			pane.tab_id,
+			foreignTabId,
+			"must not reuse the same-label scout tab from the other Space",
+		);
+
+		const created = fake.commands.filter(
+			(c) => c.args[0] === "tab" && c.args[1] === "create",
+		);
+		const pinned = created.find((c) => workspaceFlag(c.args) === "w1");
+		assert.ok(
+			pinned,
+			`a tab create for parent Space w1 is required, got: ${created.map((c) => c.args.join(" ")).join(" | ")}`,
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("regression: HERDR_WORKSPACE_ID env pins when workspaceId is omitted", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-workspace-env-"));
+	process.env.HERDR_WORKSPACE_ID = "w1";
+	try {
+		const fake = new FakeHerdr({ focusedWorkspaceId: "w2" });
+		fake.addRootPane("w1");
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(fake)),
+			runDir,
+			cwd: "/tmp",
+			sleep: async (ms) => fake.advance(ms),
+		});
+
+		const handle = await orchestrator.launch({
+			agent: agent({ name: "scout" }),
+			task: "t",
+		});
+		const pane = fake.panes.get(handle.paneId ?? "");
+		assert.equal(pane?.workspace_id, "w1");
+		const created = fake.commands.find(
+			(c) => c.args[0] === "tab" && c.args[1] === "create",
+		);
+		assert.equal(workspaceFlag(created?.args ?? []), "w1");
+	} finally {
+		delete process.env.HERDR_WORKSPACE_ID;
 		rmSync(runDir, { recursive: true, force: true });
 	}
 });

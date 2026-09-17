@@ -26,6 +26,13 @@ import {
 } from "../shared/nested-path.ts";
 import { CHILD_ACCEPTANCE_ROLE_ENV, CHILD_ROLE_ENV } from "../extension/child-guard.ts";
 import {
+	ALLOW_NESTED_ENV,
+	MAX_TOOL_CALLS_ENV,
+	MAX_TURNS_ENV,
+	TOOL_TIMEOUT_MS_ENV,
+} from "../extension/budget.ts";
+import { modelCandidates } from "../agents/model-resolution.ts";
+import {
 	countAssistantMessages,
 	deriveOutcome,
 	isLastTurnComplete,
@@ -52,6 +59,10 @@ import {
 import { applyVerification, type VerifyRunner } from "./acceptance.ts";
 import { buildPiArgs } from "./args.ts";
 import { canUseCachedCollect } from "../extension/recycle.ts";
+import {
+	createChildWorktree,
+	removeChildWorktree,
+} from "./worktree.ts";
 import {
 	createSessionLayout,
 	typeTabLabel,
@@ -95,6 +106,11 @@ export interface OrchestratorDeps {
 	layout?: SessionLayout;
 	/** Injected so tests do not actually run `npm test`. */
 	verifyRunner?: VerifyRunner;
+	/**
+	 * Parent agent's herdr Space (`HERDR_WORKSPACE_ID`). Pins `tab create`
+	 * and adopt to that Space; without it herdr uses the UI-focused Space.
+	 */
+	workspaceId?: string;
 }
 
 export interface CollectResult {
@@ -128,8 +144,17 @@ async function bestEffort(work: Promise<unknown>): Promise<void> {
 	try {
 		await work;
 	} catch {
-		// Intentionally ignored — see the doc comment above.
+		/* teardown is best-effort */
 	}
+}
+
+function canFallbackStart(error: unknown): boolean {
+	if (!(error instanceof SubagentError)) return false;
+	return (
+		error.code !== ErrorCodes.NOT_FOUND &&
+		error.code !== ErrorCodes.BUDGET_EXCEEDED &&
+		error.code !== ErrorCodes.NAME_TAKEN
+	);
 }
 
 /**
@@ -155,6 +180,7 @@ function deriveAcceptance(
 	parsed: ReturnType<typeof parseSessionFile>,
 	execution: Execution,
 	pendingCriteria: ChildRecord["pendingCriteria"],
+	opts: { completionGuard?: boolean } = {},
 ): AcceptanceResult {
 	let acceptance: AcceptanceResult = { status: "unknown", level: "none" };
 	// MUST read `lastTurnOutput`, not `output`: `output` is the last non-empty text
@@ -170,11 +196,17 @@ function deriveAcceptance(
 			...(verdict.reason ? { reason: verdict.reason } : {}),
 		};
 	} else if (execution.status === "success") {
-		acceptance = {
-			status: "unknown",
-			level: "none",
-			reason: "no machine-readable verdict",
-		};
+		acceptance = opts.completionGuard
+			? {
+					status: "rejected",
+					level: "none",
+					reason: 'completionGuard: missing {"ok": true|false} verdict',
+				}
+			: {
+					status: "unknown",
+					level: "none",
+					reason: "no machine-readable verdict",
+				};
 	} else {
 		acceptance = {
 			status: "rejected",
@@ -245,6 +277,11 @@ export class Orchestrator {
 	private readonly maxSpawns: number | null;
 	private readonly layout: SessionLayout;
 	private readonly verifyRunner?: VerifyRunner;
+	/**
+	 * Parent Space id for `tab create` / adopt. Empty or unset means herdr
+	 * places the tab in the UI-focused Space.
+	 */
+	private readonly workspaceId?: string;
 	/** Last type-tab used by a child of this orchestrator. */
 	private lastTypeTabId: string | null = null;
 	private spawned = 0;
@@ -274,6 +311,9 @@ export class Orchestrator {
 		this.maxSpawns = deps.maxSpawns ?? null;
 		this.layout = deps.layout ?? createSessionLayout();
 		this.verifyRunner = deps.verifyRunner;
+		const rawWorkspaceId =
+			deps.workspaceId ?? process.env.HERDR_WORKSPACE_ID;
+		this.workspaceId = rawWorkspaceId?.trim() || undefined;
 	}
 
 	/** The lineage path a child of this process would receive. */
@@ -346,9 +386,10 @@ export class Orchestrator {
 	private async ensureTypeTab(
 		agentType: string,
 		env?: Record<string, string>,
+		cwd: string = this.cwd,
 	): Promise<{ tabId: string; rootPaneId: string }> {
 		const slot = await this.layout.acquireTypeTab(agentType, () =>
-			this.createOrAdoptTypeTab(agentType, env),
+			this.createOrAdoptTypeTab(agentType, env, cwd),
 		);
 		this.lastTypeTabId = slot.tabId;
 		return { tabId: slot.tabId, rootPaneId: slot.rootPaneId };
@@ -357,16 +398,18 @@ export class Orchestrator {
 	private async createOrAdoptTypeTab(
 		agentType: string,
 		env?: Record<string, string>,
+		cwd: string = this.cwd,
 	): Promise<TypeTabCreateResult> {
 		const label = typeTabLabel(agentType);
 		const adopted = await this.adoptTabByLabel(label);
 		if (adopted) return adopted;
 
 		const res = await this.client.tabCreate({
-			cwd: this.cwd,
+			cwd,
 			label,
 			...(env ? { env } : {}),
 			focus: false,
+			...(this.workspaceId ? { workspaceId: this.workspaceId } : {}),
 		});
 		if (!res.ok) {
 			throw new SubagentError(
@@ -389,9 +432,13 @@ export class Orchestrator {
 	private async adoptTabByLabel(
 		label: string,
 	): Promise<TypeTabCreateResult | null> {
-		const tabs = await this.client.tabList();
+		const tabs = await this.client.tabList(this.workspaceId);
 		if (!tabs.ok) return null;
-		const hit = tabs.value.find((t) => t.label === label);
+		const hit = tabs.value.find(
+			(t) =>
+				t.label === label &&
+				(!this.workspaceId || t.workspace_id === this.workspaceId),
+		);
 		if (!hit) return null;
 
 		const panes = await this.client.paneList();
@@ -420,13 +467,15 @@ export class Orchestrator {
 		placement: Placement,
 		agentType: string,
 		env?: Record<string, string>,
+		cwd: string = this.cwd,
 	): Promise<{ paneId: string; tabId?: string }> {
 		if (placement === "new-tab") {
 			const res = await this.client.tabCreate({
-				cwd: this.cwd,
+				cwd,
 				label: `task:${agentType}`,
 				...(env ? { env } : {}),
 				focus: false,
+				...(this.workspaceId ? { workspaceId: this.workspaceId } : {}),
 			});
 			if (!res.ok) {
 				throw new SubagentError(
@@ -437,12 +486,12 @@ export class Orchestrator {
 			return { paneId: res.value.rootPaneId, tabId: res.value.tab.tab_id };
 		}
 
-		await this.ensureTypeTab(agentType, env);
+		await this.ensureTypeTab(agentType, env, cwd);
 		return this.layout.assignPane(agentType, async (plan) => {
 			const res = await this.client.paneSplit({
 				target: plan.target,
 				direction: plan.direction,
-				cwd: this.cwd,
+				cwd,
 				...(env ? { env } : {}),
 				focus: false,
 			});
@@ -562,35 +611,39 @@ export class Orchestrator {
 		const placement = input.placement ?? input.agent.placement ?? "split-down";
 
 		let paneId: string | null = null;
+		let worktreePath: string | undefined;
 		try {
+			if (input.agent.worktree) {
+				worktreePath = createChildWorktree({
+					repoCwd: this.cwd,
+					runDir: this.runDir,
+					name,
+				});
+			}
+			const childCwd = worktreePath ?? this.cwd;
 			const pane = await this.createPane(
 				placement,
 				input.agent.name,
 				this.lineageEnv(name, input.agent),
+				childCwd,
 			);
 			paneId = pane.paneId;
 
-			const built = buildPiArgs({
-				agent: input.agent,
-				task: input.task,
-				sessionFile,
-				// Fall back to the agent's own configured model so a caller that
-				// omits `model` does not silently lose the frontmatter setting
-				// (the child would otherwise use its own default).
-				model: input.model ?? input.agent.model,
-				thinking: input.thinking ?? input.agent.thinking,
-				tempDir,
-				cwd: this.cwd,
-			});
-
-			name = await this.startWithRetry({
+			const candidates = modelCandidates(
+				input.model ?? input.agent.model,
+				input.agent.fallbackModels,
+			);
+			const started = await this.startWithModelFallback({
 				name,
 				kind: input.agent.kind,
 				paneId,
-				args: built.args,
-				// A true race (name claimed between our check and the start) gets a
-				// fresh name. The session file follows the rename so the resume
-				// credential stays valid.
+				agent: input.agent,
+				task: input.task,
+				sessionFile,
+				thinking: input.thinking ?? input.agent.thinking,
+				tempDir,
+				cwd: childCwd,
+				candidates,
 				reallocate: () => {
 					const next = this.layout.claimName(
 						input.agent.name,
@@ -600,6 +653,13 @@ export class Orchestrator {
 					return next;
 				},
 			});
+			name = started.name;
+			sessionFile = started.sessionFile;
+			const usedModel = started.model;
+			const snapshotModel =
+				input.model || (usedModel && usedModel !== input.agent.model)
+					? usedModel
+					: undefined;
 
 			const child = this.recordChild({
 				name,
@@ -607,10 +667,11 @@ export class Orchestrator {
 				paneId: pane.paneId,
 				tabId: pane.tabId,
 				sessionFile,
-				...(input.model ? { model: input.model } : {}),
+				...(snapshotModel ? { model: snapshotModel } : {}),
+				...(worktreePath ? { worktreePath } : {}),
 			});
 			// Sidebar metadata is not on the launch critical path.
-			void this.announceChild(child, input.agent.name, input.model).catch(
+			void this.announceChild(child, input.agent.name, snapshotModel).catch(
 				() => {},
 			);
 
@@ -631,10 +692,75 @@ export class Orchestrator {
 					await this.reapTypeTabIfEmpty(input.agent.name, paneId, undefined);
 				}
 			}
+			if (worktreePath) {
+				removeChildWorktree({ repoCwd: this.cwd, dest: worktreePath });
+			}
 			throw error;
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
+	}
+
+	/**
+	 * Try each model candidate on the same pane. A start that fails for a
+	 * reason other than "name taken" / "not found" falls through to the next
+	 * id; NAME_TAKEN is already reallocated inside `startWithRetry`.
+	 */
+	private async startWithModelFallback(input: {
+		name: string;
+		kind: AgentConfig["kind"];
+		paneId: string;
+		agent: AgentConfig;
+		task: string;
+		sessionFile: string;
+		thinking?: string | false;
+		tempDir: string;
+		cwd: string;
+		candidates: Array<string | undefined>;
+		reallocate: () => string;
+	}): Promise<{ name: string; sessionFile: string; model?: string }> {
+		let name = input.name;
+		let sessionFile = input.sessionFile;
+		let lastError: unknown;
+		for (let i = 0; i < input.candidates.length; i += 1) {
+			const model = input.candidates[i];
+			const built = buildPiArgs({
+				agent: input.agent,
+				task: input.task,
+				sessionFile,
+				model,
+				thinking: input.thinking,
+				tempDir: input.tempDir,
+				cwd: input.cwd,
+				allowNestedSubagents: input.agent.allowNestedSubagents,
+			});
+			try {
+				name = await this.startWithRetry({
+					name,
+					kind: input.kind,
+					paneId: input.paneId,
+					args: built.args,
+					reallocate: () => {
+						const next = input.reallocate();
+						sessionFile = this.sessionFileFor(next);
+						return next;
+					},
+				});
+				return {
+					name,
+					sessionFile,
+					...(model ? { model } : {}),
+				};
+			} catch (error) {
+				lastError = error;
+				if (!canFallbackStart(error) || i === input.candidates.length - 1) {
+					throw error;
+				}
+			}
+		}
+		throw lastError instanceof Error
+			? lastError
+			: new SubagentError("agent start failed", ErrorCodes.START_FAILED);
 	}
 
 	/**
@@ -667,17 +793,30 @@ export class Orchestrator {
 	 */
 	private lineageEnv(
 		name: string,
-		agent?: { name: string; acceptance?: { role?: string } },
+		agent?: AgentConfig,
 	): Record<string, string> {
-		return {
+		const env: Record<string, string> = {
 			[LINEAGE_ENV]: encodeNestedPath(this.childPath(name)),
 			[MAX_DEPTH_ENV]: String(this.maxDepth),
 			[CHILD_ENV]: "1",
 			[CHILD_ROLE_ENV]: agent?.name ?? "",
-			...(agent?.acceptance?.role
-				? { [CHILD_ACCEPTANCE_ROLE_ENV]: agent.acceptance.role }
-				: {}),
 		};
+		if (agent?.acceptance?.role) {
+			env[CHILD_ACCEPTANCE_ROLE_ENV] = agent.acceptance.role;
+		}
+		if (agent?.toolBudget?.maxToolCalls !== undefined) {
+			env[MAX_TOOL_CALLS_ENV] = String(agent.toolBudget.maxToolCalls);
+		}
+		if (agent?.turnBudget?.maxTurns !== undefined) {
+			env[MAX_TURNS_ENV] = String(agent.turnBudget.maxTurns);
+		}
+		if (agent?.toolTimeoutMs !== undefined) {
+			env[TOOL_TIMEOUT_MS_ENV] = String(agent.toolTimeoutMs);
+		}
+		if (agent?.allowNestedSubagents) {
+			env[ALLOW_NESTED_ENV] = "1";
+		}
+		return env;
 	}
 
 	/**
@@ -702,6 +841,7 @@ export class Orchestrator {
 		tabId: string | undefined;
 		sessionFile: string;
 		model?: string;
+		worktreePath?: string;
 	}): ChildRecord {
 		const { name, agent, sessionFile } = input;
 		const child: ChildRecord = {
@@ -723,8 +863,10 @@ export class Orchestrator {
 					}
 				: {}),
 			...(agent.onBlocked ? { onBlocked: agent.onBlocked } : {}),
+			...(agent.completionGuard ? { completionGuard: true } : {}),
 			...(input.tabId ? { tabId: input.tabId } : {}),
 			...(input.model ? { model: input.model } : {}),
+			...(input.worktreePath ? { worktreePath: input.worktreePath } : {}),
 		};
 		this.children.set(name, child);
 		this.spawned += 1;
@@ -808,11 +950,14 @@ export class Orchestrator {
 			timeoutMs,
 		);
 		const acceptance = await applyVerification(
-			deriveAcceptance(parsed, execution, child.pendingCriteria),
+			deriveAcceptance(parsed, execution, child.pendingCriteria, {
+				...(child.completionGuard ? { completionGuard: true } : {}),
+			}),
 			{
-				cwd: this.cwd,
+				cwd: child.worktreePath ?? this.cwd,
 				criteria: child.pendingCriteria,
 				run: this.verifyRunner,
+				timeoutMs: Math.max(5_000, deadline - this.now()),
 			},
 		);
 
@@ -927,6 +1072,9 @@ export class Orchestrator {
 			parsed,
 			execution,
 			child.pendingCriteria,
+			{
+				...(child.completionGuard ? { completionGuard: true } : {}),
+			},
 		);
 		child.state = "blocked";
 		child.execution = execution;

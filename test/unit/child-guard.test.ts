@@ -5,7 +5,13 @@ import {
 	forbiddenChildReason,
 	formatChildTask,
 	isReadOnlyRole,
+	registerChildGuard,
 } from "../../src/extension/child-guard.ts";
+import {
+	MAX_TOOL_CALLS_ENV,
+	MAX_TURNS_ENV,
+	TOOL_TIMEOUT_MS_ENV,
+} from "../../src/extension/budget.ts";
 
 test("child: herdr agent prompt/wait/send-keys/start are blocked", () => {
 	const blocked = [
@@ -74,6 +80,13 @@ test("formatChildTask appends the frozen constraints", () => {
 	assert.ok(text.includes(CHILD_TASK_APPENDIX));
 });
 
+test("formatChildTask allowNested changes the nested-agents bullet", () => {
+	const nested = formatChildTask("do it", { allowNested: true });
+	assert.match(nested, /Nested subagents are allowed/);
+	assert.doesNotMatch(nested, /Do not spawn nested agents/);
+	assert.match(formatChildTask("do it"), /Do not spawn nested agents/);
+});
+
 test("read-only role: writes and herdr prompts are blocked, recon commands pass", () => {
 	assert.equal(isReadOnlyRole("read-only"), true);
 	assert.equal(isReadOnlyRole("writer"), false);
@@ -96,4 +109,80 @@ test("writer role may run npm test", () => {
 		}),
 		undefined,
 	);
+});
+
+function guardPi() {
+	const events = new Map<string, unknown>();
+	return {
+		events,
+		on(name: string, handler: unknown) {
+			events.set(name, handler);
+		},
+		registerTool() {},
+		registerCommand() {},
+		sendMessage() {},
+		eventsBus: { emit() {} },
+	};
+}
+
+test("child-guard counts every tool call against toolBudget", () => {
+	const previous = process.env[MAX_TOOL_CALLS_ENV];
+	process.env[MAX_TOOL_CALLS_ENV] = "1";
+	try {
+		const pi = guardPi();
+		registerChildGuard(pi as never);
+		const handler = pi.events.get("tool_call") as (event: {
+			toolName: string;
+			input: Record<string, unknown>;
+		}) => { block?: boolean; reason?: string } | undefined;
+		assert.equal(
+			handler({ toolName: "read", input: { path: "a" } }),
+			undefined,
+		);
+		const blocked = handler({ toolName: "read", input: { path: "b" } });
+		assert.equal(blocked?.block, true);
+		assert.match(blocked?.reason ?? "", /tool budget exceeded \(1/);
+	} finally {
+		if (previous === undefined) delete process.env[MAX_TOOL_CALLS_ENV];
+		else process.env[MAX_TOOL_CALLS_ENV] = previous;
+	}
+});
+
+test("child-guard wraps bash with timeout after classifying", () => {
+	const previous = process.env[TOOL_TIMEOUT_MS_ENV];
+	process.env[TOOL_TIMEOUT_MS_ENV] = "1500";
+	try {
+		const pi = guardPi();
+		registerChildGuard(pi as never);
+		const handler = pi.events.get("tool_call") as (event: {
+			toolName: string;
+			input: { command: string };
+		}) => unknown;
+		const event = { toolName: "bash" as const, input: { command: "ls -la" } };
+		assert.equal(handler(event), undefined);
+		assert.match(event.input.command, /^timeout --kill-after=2s 2s /);
+	} finally {
+		if (previous === undefined) delete process.env[TOOL_TIMEOUT_MS_ENV];
+		else process.env[TOOL_TIMEOUT_MS_ENV] = previous;
+	}
+});
+
+test("child-guard turn budget blocks tools after too many turns", () => {
+	const previous = process.env[MAX_TURNS_ENV];
+	process.env[MAX_TURNS_ENV] = "0";
+	try {
+		const pi = guardPi();
+		registerChildGuard(pi as never);
+		const turn = pi.events.get("turn_start") as () => void;
+		const handler = pi.events.get("tool_call") as (event: {
+			toolName: string;
+			input: Record<string, unknown>;
+		}) => { block?: boolean } | undefined;
+		turn();
+		const blocked = handler({ toolName: "read", input: {} });
+		assert.equal(blocked?.block, true);
+	} finally {
+		if (previous === undefined) delete process.env[MAX_TURNS_ENV];
+		else process.env[MAX_TURNS_ENV] = previous;
+	}
 });

@@ -12,6 +12,7 @@ import {
 	loadAgentsFromDir,
 	findNearestProjectAgentsDir,
 	discoverAgents,
+	findAgent,
 	BUILTIN_AGENT_NAMES,
 	BUILTIN_AGENTS_DIR,
 } from "../../src/agents/agents.ts";
@@ -463,7 +464,7 @@ test("discovery: extra agent dirs load below the user dir in precedence", () => 
 // on are recorded on the agent so tool output can warn about them.
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("unenforced fields are reported, not silently dropped", () => {
+test("formerly unenforced fields are now honoured", () => {
 	const doc = [
 		"---",
 		"name: probe",
@@ -471,19 +472,29 @@ test("unenforced fields are reported, not silently dropped", () => {
 		"worktree: true",
 		"fallbackModels: [a/b, c/d]",
 		"toolBudget: '{\"maxToolCalls\": 5}'",
+		"turnBudget: '{\"maxTurns\": 3}'",
+		"toolTimeoutMs: 60000",
+		"alias: [p]",
+		"completionGuard: true",
+		"allowNestedSubagents: true",
 		"---",
 		"body",
 	].join("\n");
 	const agent = parseAgentDocument(doc, "/x/probe.md", "user");
 	assert.ok(agent);
 	assert.deepEqual(
-		(agent.unenforcedFields ?? []).sort(),
-		["fallbackModels", "toolBudget", "worktree"],
-		"every inert field the agent sets must be reported",
+		agent.unenforcedFields ?? [],
+		[],
+		"every previously inert field is now wired",
 	);
-	// The values are still parsed and kept — they are not discarded.
 	assert.equal(agent.worktree, true);
 	assert.deepEqual(agent.fallbackModels, ["a/b", "c/d"]);
+	assert.equal(agent.toolBudget?.maxToolCalls, 5);
+	assert.equal(agent.turnBudget?.maxTurns, 3);
+	assert.equal(agent.toolTimeoutMs, 60_000);
+	assert.deepEqual(agent.alias, ["p"]);
+	assert.equal(agent.completionGuard, true);
+	assert.equal(agent.allowNestedSubagents, true);
 });
 
 test("enforced fields are NOT reported as unenforced", () => {
@@ -644,7 +655,7 @@ test("timeoutMs is parsed and is NOT reported as unenforced", () => {
 	);
 });
 
-test("toolTimeoutMs is still reported as unenforced", () => {
+test("toolTimeoutMs is parsed and is NOT reported as unenforced", () => {
 	const agent = parseAgentDocument(
 		[
 			"---",
@@ -658,9 +669,10 @@ test("toolTimeoutMs is still reported as unenforced", () => {
 		"user",
 	);
 	assert.ok(agent);
+	assert.equal(agent.toolTimeoutMs, 60_000);
 	assert.ok(
-		(agent.unenforcedFields ?? []).includes("toolTimeoutMs"),
-		"a per-tool timeout is not applied by the runtime yet",
+		!(agent.unenforcedFields ?? []).includes("toolTimeoutMs"),
+		"toolTimeoutMs is applied by the child-guard, so it must not be listed as inert",
 	);
 });
 
@@ -702,6 +714,7 @@ test("acceptance: a nested YAML block is parsed, not just a JSON string", () => 
 		"      must: tests pass",
 		"      evidence: [a, b]",
 		"      severity: required",
+		"      command: npm test",
 		"---",
 		"body",
 	].join("\n");
@@ -716,6 +729,7 @@ test("acceptance: a nested YAML block is parsed, not just a JSON string", () => 
 		must: "tests pass",
 		evidence: ["a", "b"],
 		severity: "required",
+		command: "npm test",
 	});
 });
 
@@ -788,4 +802,27 @@ test("acceptance: every bundled role parses its acceptance block", () => {
 			`bundled role ${name} declares criteria that must parse`,
 		);
 	}
+});
+
+test("findAgent matches canonical name and alias", () => {
+	const reviewer = parseAgentDocument(
+		["---", "name: reviewer", "description: d", "alias: [rev, r]", "---", "b"].join(
+			"\n",
+		),
+		"/x/reviewer.md",
+		"user",
+	);
+	const worker = parseAgentDocument(
+		["---", "name: worker", "description: d", "---", "b"].join("\n"),
+		"/x/worker.md",
+		"user",
+	);
+	assert.ok(reviewer);
+	assert.ok(worker);
+	const agents = [reviewer, worker];
+	assert.equal(findAgent(agents, "reviewer")?.name, "reviewer");
+	assert.equal(findAgent(agents, "rev")?.name, "reviewer");
+	assert.equal(findAgent(agents, "R")?.name, "reviewer");
+	assert.equal(findAgent(agents, "worker")?.name, "worker");
+	assert.equal(findAgent(agents, "nobody"), undefined);
 });

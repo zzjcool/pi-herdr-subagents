@@ -8,21 +8,36 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	budgetExceededReason,
+	childBudgetFromEnv,
+	wrapBashWithTimeout,
+} from "./budget.ts";
 import { shellChunks } from "./playbook.ts";
 
 export const CHILD_ROLE_ENV = "PI_SUBAGENT_ROLE";
 export const CHILD_ACCEPTANCE_ROLE_ENV = "PI_SUBAGENT_ACCEPTANCE_ROLE";
 
-export const CHILD_TASK_APPENDIX = [
-	"## Frozen child constraints (injected by herdr-subagents)",
-	"- Do not message, prompt, wait on, or send keys to any other pane. The parent extension delivers your result.",
-	"- Do not read or close panes that are not yours.",
-	"- Do not spawn nested agents.",
-	"- End with machine-readable JSON on its own: {\"ok\": true|false, \"reason\": \"...\"}.",
-].join("\n");
+export function childTaskAppendix(opts?: { allowNested?: boolean }): string {
+	const nested = opts?.allowNested
+		? "- Nested subagents are allowed via the `subagent` tool. Do not use herdr to spawn them."
+		: "- Do not spawn nested agents.";
+	return [
+		"## Frozen child constraints (injected by herdr-subagents)",
+		"- Do not message, prompt, wait on, or send keys to any other pane. The parent extension delivers your result.",
+		"- Do not read or close panes that are not yours.",
+		nested,
+		"- End with machine-readable JSON on its own: {\"ok\": true|false, \"reason\": \"...\"}.",
+	].join("\n");
+}
 
-export function formatChildTask(task: string): string {
-	return `Task: ${task}\n\n${CHILD_TASK_APPENDIX}\n`;
+export const CHILD_TASK_APPENDIX = childTaskAppendix();
+
+export function formatChildTask(
+	task: string,
+	opts?: { allowNested?: boolean },
+): string {
+	return `Task: ${task}\n\n${childTaskAppendix(opts)}\n`;
 }
 
 /** Refusal shown inside the child — never the parent launch playbook. */
@@ -197,14 +212,51 @@ export function childGuardEnvFromProcess(
 	};
 }
 
-/** Child-only extension: intercept bash, do not register the subagent tool. */
+/** Child-only extension: intercept tools, do not register the subagent tool. */
 export function registerChildGuard(pi: ExtensionAPI): void {
+	const budget = childBudgetFromEnv();
+	let toolCalls = 0;
+	let turns = 0;
+
+	pi.on("turn_start", () => {
+		turns += 1;
+	});
+
 	pi.on("tool_call", (event) => {
+		toolCalls += 1;
+		if (
+			budget.maxToolCalls !== undefined &&
+			toolCalls > budget.maxToolCalls
+		) {
+			return {
+				block: true,
+				reason: blockChildMessage(
+					budgetExceededReason("tool", budget.maxToolCalls),
+				),
+			};
+		}
+		if (budget.maxTurns !== undefined && turns > budget.maxTurns) {
+			return {
+				block: true,
+				reason: blockChildMessage(
+					budgetExceededReason("turn", budget.maxTurns),
+				),
+			};
+		}
+
 		if (event.toolName !== "bash") return;
 		const command =
 			typeof event.input.command === "string" ? event.input.command : "";
 		const reason = forbiddenChildReason(command, childGuardEnvFromProcess());
-		if (!reason) return;
-		return { block: true, reason: blockChildMessage(reason) };
+		if (reason) {
+			return { block: true, reason: blockChildMessage(reason) };
+		}
+		if (budget.toolTimeoutMs && budget.toolTimeoutMs > 0) {
+			event.input.command = wrapBashWithTimeout(
+				command,
+				budget.toolTimeoutMs,
+			);
+		}
+		return undefined;
 	});
 }

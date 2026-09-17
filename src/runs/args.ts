@@ -187,7 +187,9 @@ function pushTaskArg(
 	tempFiles: string[],
 	input: BuildArgsInput,
 ): void {
-	const taskText = formatChildTask(input.task);
+	const taskText = formatChildTask(input.task, {
+		allowNested: input.allowNestedSubagents === true,
+	});
 	const file = path.join(input.tempDir, "task.md");
 	fs.writeFileSync(file, taskText, { mode: 0o600 });
 	tempFiles.push(file);

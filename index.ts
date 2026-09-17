@@ -19,7 +19,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { createHerdrClient } from "./src/herdr/client.ts";
-import { discoverAgents } from "./src/agents/agents.ts";
+import { discoverAgents, findAgent } from "./src/agents/agents.ts";
 import {
 	applyAgentOverrides,
 	applyDefaultModel,
@@ -32,6 +32,7 @@ import {
 } from "./src/agents/settings.ts";
 import { createSessionRuntime, type SessionRuntime, shouldRecycleAfterCollect } from "./src/extension/runtime.ts";
 import { registerChildGuard } from "./src/extension/child-guard.ts";
+import { ALLOW_NESTED_ENV } from "./src/extension/budget.ts";
 import {
 	applyOnBlockedPolicy,
 	followUpFor,
@@ -151,9 +152,11 @@ const blockedUi = new WeakMap<
 // ---------------------------------------------------------------------------
 
 export default function herdrSubagents(pi: ExtensionAPI) {
-	if (process.env.PI_SUBAGENT_CHILD === "1") {
+	const isChild = process.env.PI_SUBAGENT_CHILD === "1";
+	const allowNested = process.env[ALLOW_NESTED_ENV] === "1";
+	if (isChild) {
 		registerChildGuard(pi);
-		return;
+		if (!allowNested) return;
 	}
 
 	const layout = createSessionLayout();
@@ -257,7 +260,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", (event) => {
-		if (process.env.PI_SUBAGENT_CHILD === "1") return;
+		if (isChild && !allowNested) return;
 		const tools = event.systemPromptOptions?.selectedTools;
 		if (Array.isArray(tools) && !tools.includes("subagent")) return;
 		return {
@@ -366,6 +369,7 @@ async function controlAction(input: {
 		runDir: store.runDir(found.runId),
 		cwd,
 		layout: input.layout,
+		workspaceId: process.env.HERDR_WORKSPACE_ID,
 	});
 	orchestrator.restore(found.run);
 
@@ -589,6 +593,7 @@ async function launchFamily(input: {
 		// Enforce the session spawn budget so a runaway fan-out cannot exhaust
 		// the machine (ErrorCodes.BUDGET_EXCEEDED).
 		maxSpawns: settings.maxSubagentSpawnsPerSession ?? null,
+		workspaceId: process.env.HERDR_WORKSPACE_ID,
 	});
 
 	const session: LaunchSession = {
@@ -691,7 +696,7 @@ async function launchStep(
 	session: LaunchSession,
 	step: { agent: string; task: string; model?: string },
 ): Promise<void> {
-	const agent = session.agents.find((a) => a.name === step.agent);
+	const agent = findAgent(session.agents, step.agent);
 	if (!agent) {
 		session.results.push(unknownAgentLine(session.agents, step.agent));
 		return;

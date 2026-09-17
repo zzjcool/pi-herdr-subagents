@@ -128,3 +128,25 @@ export function providerOf(model: string | undefined): string | undefined {
 	const slash = base.indexOf("/");
 	return slash === -1 ? undefined : base.slice(0, slash);
 }
+
+/**
+ * Unique model ids to try at start, primary first.
+ *
+ * Empty primary with no fallbacks yields `[undefined]` so the caller still
+ * makes one start attempt without `--model`.
+ */
+export function modelCandidates(
+	primary?: string,
+	fallbacks?: string[],
+): Array<string | undefined> {
+	const out: Array<string | undefined> = [];
+	const seen = new Set<string>();
+	for (const raw of [primary, ...(fallbacks ?? [])]) {
+		const value = raw?.trim() ? raw.trim() : undefined;
+		const key = value ?? "";
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(value);
+	}
+	return out.length > 0 ? out : [undefined];
+}

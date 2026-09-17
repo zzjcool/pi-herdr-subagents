@@ -34,6 +34,7 @@ export {
 	BUILTIN_AGENTS_DIR,
 	EXTRA_AGENT_DIRS_ENV,
 	discoverAgents,
+	findAgent,
 	findNearestProjectAgentsDir,
 	formatAgentList,
 	loadAgentsFromDir,
@@ -53,6 +54,7 @@ export type { ParsedFrontmatter } from "./agents/frontmatter.ts";
 export {
 	providerOf,
 	resolveModel,
+	modelCandidates,
 } from "./agents/model-resolution.ts";
 export type {
 	ResolvedModel,
@@ -106,8 +108,11 @@ export { Orchestrator, preCreateSessionFile } from "./runs/orchestrator.ts";
 export type { CollectResult, OrchestratorDeps } from "./runs/orchestrator.ts";
 export {
 	VERIFY_COMMAND,
+	DEFAULT_VERIFY_TIMEOUT_MS,
 	applyVerification,
 	needsVerification,
+	verifyCommandOf,
+	defaultVerifyRunner,
 } from "./runs/acceptance.ts";
 export type { CommandResult, VerifyRunner } from "./runs/acceptance.ts";
 export { createSessionLayout, typeTabLabel, tileSplit, TILE_COLUMNS } from "./runs/layout.ts";
@@ -121,6 +126,12 @@ export {
 	THINKING_LEVELS,
 } from "./runs/args.ts";
 export type { BuildArgsInput, BuildArgsResult } from "./runs/args.ts";
+export {
+	createChildWorktree,
+	isGitRepo,
+	removeChildWorktree,
+	worktreePathFor,
+} from "./runs/worktree.ts";
 
 // ── parent session: completion notify + input-box status ────────────────────
 export { createSessionRuntime, shouldRecycleAfterCollect } from "./extension/runtime.ts";
@@ -168,10 +179,20 @@ export {
 	CHILD_ROLE_ENV,
 	CHILD_TASK_APPENDIX,
 	blockChildMessage,
+	childTaskAppendix,
 	forbiddenChildReason,
 	formatChildTask,
 	registerChildGuard,
 } from "./extension/child-guard.ts";
+export {
+	ALLOW_NESTED_ENV,
+	MAX_TOOL_CALLS_ENV,
+	MAX_TURNS_ENV,
+	TOOL_TIMEOUT_MS_ENV,
+	budgetExceededReason,
+	parseBudgetInt,
+	wrapBashWithTimeout,
+} from "./extension/budget.ts";
 
 // ── session parsing / outcome derivation ────────────────────────────────────
 export {

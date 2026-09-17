@@ -23,6 +23,7 @@ import {
 	writeFileSync,
 	statSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { FakeHerdr, createFakeRunner } from "../helpers/fake-herdr.ts";
@@ -648,6 +649,191 @@ test("approveBlocked sends y and lets collect run again", async () => {
 			h.fake.sentKeys.some((entry) => entry.keys.includes("y")),
 			"approval must reach herdr as send-keys y",
 		);
+	} finally {
+		h.cleanup();
+	}
+});
+
+function hasGit(): boolean {
+	try {
+		execFileSync("git", ["--version"], { stdio: "ignore" });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function initGitRepo(): string {
+	const dir = mkdtempSync(path.join(tmpdir(), "orch-git-"));
+	execFileSync("git", ["-C", dir, "init"], { stdio: "ignore" });
+	writeFileSync(path.join(dir, "README"), "hi\n");
+	execFileSync("git", ["-C", dir, "add", "README"], { stdio: "ignore" });
+	execFileSync("git", ["-C", dir, "commit", "-m", "init"], {
+		stdio: "ignore",
+		env: {
+			...process.env,
+			GIT_AUTHOR_NAME: "t",
+			GIT_AUTHOR_EMAIL: "t@t",
+			GIT_COMMITTER_NAME: "t",
+			GIT_COMMITTER_EMAIL: "t@t",
+		},
+	});
+	return dir;
+}
+
+test("launch worktree:true is refused outside a git repo", async () => {
+	const h = harness();
+	try {
+		await assert.rejects(
+			() =>
+				h.orchestrator.launch({
+					agent: agent({ worktree: true }),
+					task: "t",
+				}),
+			/git repository/,
+		);
+		assert.equal(h.startAttempts(), 0);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("launch worktree:true sets pane cwd and retire leaves the tree", {
+	skip: !hasGit(),
+}, async () => {
+	const repo = initGitRepo();
+	const runDir = mkdtempSync(path.join(tmpdir(), "orch-wt-"));
+	const fake = new FakeHerdr({ paneBusyMs: 0 });
+	fake.addRootPane("w1");
+	const client = createHerdrClient(createFakeRunner(fake));
+	const verifyCwds: string[] = [];
+	const orchestrator = new Orchestrator({
+		client,
+		runDir,
+		cwd: repo,
+		sleep: async (ms) => {
+			fake.advance(ms);
+		},
+		verifyRunner: async (_command, cwd) => {
+			verifyCwds.push(cwd);
+			return { code: 0, stdout: "ok\n", stderr: "" };
+		},
+	});
+	try {
+		const handle = await orchestrator.launch({
+			agent: agent({
+				worktree: true,
+				acceptance: {
+					level: "attested",
+					criteria: [
+						{
+							id: "typecheck-test-pass",
+							must: "tests",
+							evidence: ["verification-output"],
+							severity: "required",
+						},
+					],
+				},
+			}),
+			task: "t",
+		});
+		assert.ok(handle.child.worktreePath);
+		assert.ok(existsSync(path.join(handle.child.worktreePath, "README")));
+		const pane = fake.panes.get(handle.paneId ?? "");
+		assert.equal(pane?.cwd, handle.child.worktreePath);
+
+		writeFileSync(
+			handle.sessionFile,
+			transcript([
+				{ role: "user", text: "t" },
+				{
+					role: "assistant",
+					stopReason: "stop",
+					text: '{"ok": true, "reason": "done"}',
+				},
+			]),
+		);
+		const collected = await orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+		assert.equal(collected.acceptance.level, "verified");
+		assert.deepEqual(verifyCwds, [handle.child.worktreePath]);
+
+		await orchestrator.retire(handle.name);
+		assert.ok(
+			existsSync(handle.child.worktreePath),
+			"retire must leave the worktree on disk",
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("launch retries fallbackModels after a start failure", async () => {
+	const h = harness();
+	try {
+		h.fake.failStartOnModel.add("bad/model");
+		const handle = await h.orchestrator.launch({
+			agent: agent({ fallbackModels: ["good/model"] }),
+			task: "t",
+			model: "bad/model",
+		});
+		assert.equal(handle.child.model, "good/model");
+		assert.deepEqual(h.fake.startedModels, ["good/model"]);
+		assert.ok(h.startAttempts() >= 2);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("completionGuard rejects a successful turn with no verdict JSON", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({ completionGuard: true }),
+			task: "t",
+		});
+		assert.equal(handle.child.completionGuard, true);
+		writeFileSync(
+			handle.sessionFile,
+			transcript([
+				{ role: "user", text: "t" },
+				{ role: "assistant", stopReason: "stop", text: "all done, trust me" },
+			]),
+		);
+		const collected = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+		assert.equal(collected.execution.status, "success");
+		assert.equal(collected.acceptance.status, "rejected");
+		assert.match(collected.acceptance.reason ?? "", /completionGuard/);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("launch injects budget and nested-allow env into the pane", async () => {
+	const h = harness();
+	try {
+		await h.orchestrator.launch({
+			agent: agent({
+				toolBudget: { maxToolCalls: 4 },
+				turnBudget: { maxTurns: 2 },
+				toolTimeoutMs: 9_000,
+				allowNestedSubagents: true,
+			}),
+			task: "t",
+		});
+		const tab = h.fake.commands.find(
+			(c) => c.args[0] === "tab" && c.args[1] === "create",
+		);
+		assert.ok(tab);
+		const argv = tab.args.join(" ");
+		assert.match(argv, /PI_SUBAGENT_MAX_TOOL_CALLS=4/);
+		assert.match(argv, /PI_SUBAGENT_MAX_TURNS=2/);
+		assert.match(argv, /PI_SUBAGENT_TOOL_TIMEOUT_MS=9000/);
+		assert.match(argv, /PI_SUBAGENT_ALLOW_NESTED=1/);
 	} finally {
 		h.cleanup();
 	}

@@ -49,6 +49,12 @@ bash test/docker/verify-3-readonly.sh         # read-only bash denylist
 bash test/docker/verify-4-acceptance.sh       # collect → verified
 bash test/docker/verify-5-blocked.sh          # onBlocked forward
 bash test/docker/verify-6-cache.sh            # collect cache / retire no-op
+bash test/docker/verify-7-budget.sh           # tool/turn budget + bash timeout
+bash test/docker/verify-8-verify-command.sh   # criterion.command + timeout
+bash test/docker/verify-9-worktree.sh         # git worktree cwd
+bash test/docker/verify-10-fallback.sh        # fallbackModels
+bash test/docker/verify-11-nested-alias.sh    # nested + alias + completionGuard
+bash test/docker/verify-12-workspace.sh       # pi install + child pinned to parent Space
 ```
 
 Or all at once:
@@ -70,6 +76,8 @@ them by hand.
 | `index.ts` | Pi extension entry: parent tool + child-guard branch |
 | `src/runs/orchestrator.ts` | launch / collect / retire |
 | `src/extension/child-guard.ts` | child process interceptor + task appendix |
+| `src/extension/budget.ts` | tool/turn/timeout env + bash wrap |
+| `src/runs/worktree.ts` | `git worktree` isolation for `worktree: true` |
 | `src/extension/runtime.ts` | status widget, watch, auto-recycle |
 | `src/extension/blocked.ts` | `onBlocked` confirm / auto-approve / notify |
 | `src/runs/acceptance.ts` | `verification-output` command |

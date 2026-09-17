@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
 	VERIFY_COMMAND,
 	applyVerification,
+	defaultVerifyRunner,
 	needsVerification,
+	verifyCommandOf,
 } from "../../src/runs/acceptance.ts";
 import type { AcceptanceResult } from "../../src/shared/types.ts";
 
@@ -93,4 +95,51 @@ test("applyVerification does not run on an already-rejected turn", async () => {
 	);
 	assert.equal(runs.length, 0);
 	assert.equal(out.status, "rejected");
+});
+
+test("verifyCommandOf prefers a criterion command over the default", () => {
+	assert.equal(verifyCommandOf(undefined), VERIFY_COMMAND);
+	assert.equal(verifyCommandOf(criteria), VERIFY_COMMAND);
+	assert.equal(
+		verifyCommandOf([
+			{
+				id: "custom",
+				must: "pytest",
+				evidence: ["verification-output"],
+				severity: "required",
+				command: "pytest -q",
+			},
+		]),
+		"pytest -q",
+	);
+});
+
+test("applyVerification runs the criterion command", async () => {
+	const out = await applyVerification(attested, {
+		cwd: "/work",
+		criteria: [
+			{
+				id: "custom",
+				must: "pytest",
+				evidence: ["verification-output"],
+				severity: "required",
+				command: "pytest -q",
+			},
+		],
+		run: async (command, cwd) => {
+			assert.equal(command, "pytest -q");
+			assert.equal(cwd, "/work");
+			return { code: 0, stdout: "ok\n", stderr: "" };
+		},
+	});
+	assert.equal(out.level, "verified");
+	assert.match(out.reason ?? "", /pytest -q/);
+});
+
+test("defaultVerifyRunner times out a hung command", async () => {
+	const started = Date.now();
+	const result = await defaultVerifyRunner("sleep 30", process.cwd(), 80);
+	assert.equal(result.code, 1);
+	assert.match(result.stderr, /timed out/);
+	assert.ok(Date.now() - started < 5_000);
 });

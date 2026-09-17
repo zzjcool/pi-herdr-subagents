@@ -117,9 +117,14 @@ test("sanitizeNestedPath drops junk entries, keeps good ones", async () => {
 
 // ── Client against the fake herdr ─────────────────────────────────────────────
 
-function clientWith(opts: { paneBusyMs?: number } = {}) {
+function clientWith(opts: ConstructorParameters<typeof FakeHerdr>[0] = {}) {
 	const fake = new FakeHerdr(opts);
 	return { fake, client: createHerdrClient(createFakeRunner(fake)) };
+}
+
+function tabCreateArgv(fake: FakeHerdr): string[] | undefined {
+	return fake.commands.find((c) => c.args[0] === "tab" && c.args[1] === "create")
+		?.args;
 }
 
 test("agentStart returns the session path for pi kind (F1)", async () => {
@@ -300,4 +305,100 @@ test("createCommandRunner: resolveHerdrBin honours HERDR_BIN env", () => {
 	// A runner can be constructed without spawning anything.
 	const runner = createCommandRunner({ bin: "/fake/herdr" });
 	assert.equal(typeof runner, "function");
+});
+
+// ── Workspace pinning (`herdr tab create --workspace`) ───────────────────────
+
+test("tabCreate with workspaceId records --workspace then that Space id in argv", async () => {
+	const { fake, client } = clientWith();
+	const res = await client.tabCreate({
+		workspaceId: "w7",
+		label: "scout",
+		cwd: "/tmp",
+	});
+	assert.ok(res.ok, res.ok ? "" : res.error.message);
+	const argv = tabCreateArgv(fake);
+	assert.ok(argv, "tab create must have been invoked");
+	const idx = argv.indexOf("--workspace");
+	assert.ok(idx >= 0, `tab create must pass --workspace, got: ${argv.join(" ")}`);
+	assert.equal(argv[idx + 1], "w7");
+});
+
+test("tabCreate without workspaceId does not add --workspace", async () => {
+	const { fake, client } = clientWith();
+	const res = await client.tabCreate({ label: "scout", cwd: "/tmp" });
+	assert.ok(res.ok, res.ok ? "" : res.error.message);
+	const argv = tabCreateArgv(fake);
+	assert.ok(argv, "tab create must have been invoked");
+	assert.equal(
+		argv.includes("--workspace"),
+		false,
+		"omitting workspaceId must keep current headless argv (no --workspace)",
+	);
+});
+
+test("tabCreate with workspaceId yields tab and root pane in that workspace", async () => {
+	const { fake, client } = clientWith();
+	const res = await client.tabCreate({
+		workspaceId: "w3",
+		label: "scout",
+		cwd: "/tmp",
+	});
+	assert.ok(res.ok, res.ok ? "" : res.error.message);
+	if (!res.ok) return;
+	assert.equal(res.value.tab.workspace_id, "w3");
+	const pane = fake.panes.get(res.value.rootPaneId);
+	assert.ok(pane, "root pane must exist");
+	assert.equal(pane.workspace_id, "w3");
+});
+
+test("fake tab create without --workspace uses focusedWorkspaceId", () => {
+	const fake = new FakeHerdr({ focusedWorkspaceId: "w2" });
+	const out = fake.exec(["tab", "create", "--label", "x"]);
+	assert.equal(out.code, 0, out.stderr);
+	const payload = JSON.parse(out.stdout) as {
+		result: { tab: { workspace_id: string }; root_pane: { workspace_id: string } };
+	};
+	assert.equal(payload.result.tab.workspace_id, "w2");
+	assert.equal(payload.result.root_pane.workspace_id, "w2");
+});
+
+test("fake tab create --workspace pins the tab to that Space not the focused one", () => {
+	const fake = new FakeHerdr({ focusedWorkspaceId: "w2" });
+	const out = fake.exec(["tab", "create", "--workspace", "w1", "--label", "x"]);
+	assert.equal(out.code, 0, out.stderr);
+	const payload = JSON.parse(out.stdout) as {
+		result: { tab: { workspace_id: string }; root_pane: { workspace_id: string } };
+	};
+	assert.equal(payload.result.tab.workspace_id, "w1");
+	assert.equal(payload.result.root_pane.workspace_id, "w1");
+});
+
+test("tabList(workspaceId) does not return a tab from another Space", async () => {
+	const { fake, client } = clientWith({ focusedWorkspaceId: "w2" });
+	const w2 = await client.tabCreate({ label: "in-w2", cwd: "/tmp" });
+	assert.ok(w2.ok);
+	const pinned = fake.exec(["tab", "create", "--workspace", "w1", "--label", "in-w1"]);
+	assert.equal(pinned.code, 0, pinned.stderr);
+
+	const listed = await client.tabList("w1");
+	assert.ok(listed.ok);
+	if (!listed.ok) return;
+	assert.ok(
+		listed.value.every((t) => t.workspace_id === "w1"),
+		`tabList("w1") must not return the focused w2 tab, got ${JSON.stringify(listed.value)}`,
+	);
+	assert.equal(
+		listed.value.some((t) => t.label === "in-w2"),
+		false,
+		"the w2 tab must be filtered out",
+	);
+
+	const all = await client.tabList();
+	assert.ok(all.ok);
+	if (!all.ok) return;
+	assert.ok(
+		all.value.some((t) => t.workspace_id === "w2"),
+		"unfiltered tabList still returns every Space",
+	);
 });

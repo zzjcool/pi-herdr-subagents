@@ -63,3 +63,20 @@ test("child bash interceptor blocks herdr agent prompt", () => {
 		delete process.env.HERDR_PANE_ID;
 	}
 });
+
+test("nested-allowed child still registers the subagent tool", () => {
+	const previousChild = process.env.PI_SUBAGENT_CHILD;
+	const previousNested = process.env.PI_SUBAGENT_ALLOW_NESTED;
+	process.env.PI_SUBAGENT_CHILD = "1";
+	process.env.PI_SUBAGENT_ALLOW_NESTED = "1";
+	try {
+		const pi = fakePi();
+		herdrSubagents(pi as never);
+		assert.equal(pi.tools.length, 1);
+	} finally {
+		if (previousChild === undefined) delete process.env.PI_SUBAGENT_CHILD;
+		else process.env.PI_SUBAGENT_CHILD = previousChild;
+		if (previousNested === undefined) delete process.env.PI_SUBAGENT_ALLOW_NESTED;
+		else process.env.PI_SUBAGENT_ALLOW_NESTED = previousNested;
+	}
+});

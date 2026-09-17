@@ -42,7 +42,7 @@
     "test:integration": "node --experimental-strip-types --test test/integration/*.test.ts",
     "test:live": "node --experimental-strip-types --test test/live/*.test.ts",
     "test:all": "npm run typecheck && npm run test && npm run test:integration",
-    "test:docker": "bash test/docker/verify-1-child-guard.sh && bash test/docker/verify-2-task-appendix.sh && bash test/docker/verify-3-readonly.sh && bash test/docker/verify-4-acceptance.sh && bash test/docker/verify-5-blocked.sh && bash test/docker/verify-6-cache.sh",
+    "test:docker": "bash test/docker/verify-1-child-guard.sh && bash test/docker/verify-2-task-appendix.sh && bash test/docker/verify-3-readonly.sh && bash test/docker/verify-4-acceptance.sh && bash test/docker/verify-5-blocked.sh && bash test/docker/verify-6-cache.sh && bash test/docker/verify-7-budget.sh && bash test/docker/verify-8-verify-command.sh && bash test/docker/verify-9-worktree.sh && bash test/docker/verify-10-fallback.sh && bash test/docker/verify-11-nested-alias.sh && bash test/docker/verify-12-workspace.sh",
     "prepublishOnly": "npm run typecheck && npm run test && npm run test:integration"
   },
   "peerDependencies": {

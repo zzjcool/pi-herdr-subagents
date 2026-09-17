@@ -24,12 +24,17 @@
 
 - 子进程强制加载 child-guard：拦 `herdr agent prompt|wait|send-keys|start`、外 pane read、只读角色写操作
 - 任务卡自动附录（禁止 wakeup、必须 `{"ok":…}`）
-- worker 的 `verification-output` 在 collect 后由插件跑 `npm run typecheck && npm test`，从 `attested` 升到 `verified` 或拒绝
+- worker 的 `verification-output` 在 collect 后由插件跑 `criterion.command`（缺省 `npm run typecheck && npm test`），从 `attested` 升到 `verified` 或拒绝
 - `onBlocked: forward` 弹父会话 confirm（无 TUI 则 notify）
 - 自动 recycle；已 watch 的 `collect` 返回缓存；已回收的 `retire` 是 no-op
 - 完成通知 `deliverAs: followUp`；状态栏在输入框上方
+- `toolBudget` / `turnBudget` / `toolTimeoutMs`：子进程计数并拦截 / 给 bash 套 `timeout`
+- `worktree: true`：在 run 目录下 `git worktree add --detach`，pane cwd 指向该树；retire 保留目录
+- `fallbackModels`：`agent start` 失败后换下一个模型，不新开 pane
+- `alias`、`completionGuard`、`allowNestedSubagents`（仍受 `maxSubagentDepth` 限制）
+- 验收 `criteria[].command` 可配置；验证有超时
 
-仍未强制（`action=list` 会标 `⚠ not enforced yet`）：`worktree` / `toolBudget` / `turnBudget` / `fallbackModels` / `allowNestedSubagents`（真正的嵌套上限是 `maxSubagentDepth`）。
+`action=list` 不再标 `⚠ not enforced yet`（`UNENFORCED_FIELDS` 为空）。
 F23 的结论仍然成立：pane 不是沙箱，child-guard 只覆盖 bash/herdr 这一层。
 
 ---
@@ -544,7 +549,7 @@ disabled: false
 # ── herdr 专有 ──
 kind: pi                    # pi | cursor | claude | codex | gemini | ...
 placement: split-down       # split-down | split-right | new-tab
-worktree: false             # true = 用 herdr worktree create 做写隔离
+worktree: false             # true = git worktree add --detach（herdr 尚无 worktree 客户端）
 steer: true                 # 允许父 agent 中途插话
 onBlocked: forward          # forward | auto-approve | notify
 # 注：无 cleanup 字段 —— 回收是无条件的（第 5.1 节）

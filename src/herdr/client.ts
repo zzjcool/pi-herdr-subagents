@@ -422,6 +422,7 @@ function createTabApi(
 	return {
 		async tabCreate(opts) {
 			const args = ["tab", "create"];
+			if (opts.workspaceId) args.push("--workspace", opts.workspaceId);
 			if (opts.label) args.push("--label", opts.label);
 			pushLaunchTrailer(args, opts);
 

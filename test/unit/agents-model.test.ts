@@ -7,7 +7,7 @@ import {
 	splitThinkingSuffix,
 	parseModelScopeConfig,
 } from "../../src/agents/model-scope.ts";
-import { resolveModel, providerOf } from "../../src/agents/model-resolution.ts";
+import { resolveModel, providerOf, modelCandidates } from "../../src/agents/model-resolution.ts";
 import {
 	applyAgentOverrides,
 	applyDefaultModel,
@@ -466,4 +466,11 @@ test("agentOverrides: valid object values are accepted", () => {
 		worker: { model: "cb/glm-5.3" },
 		reviewer: { disabled: true },
 	});
+});
+
+test("modelCandidates is unique and keeps an empty primary as one attempt", () => {
+	assert.deepEqual(modelCandidates("a/b", ["a/b", "c/d"]), ["a/b", "c/d"]);
+	assert.deepEqual(modelCandidates(undefined, ["c/d"]), [undefined, "c/d"]);
+	assert.deepEqual(modelCandidates(undefined, undefined), [undefined]);
+	assert.deepEqual(modelCandidates("  ", [" x "]), [undefined, "x"]);
 });

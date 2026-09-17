@@ -43,6 +43,8 @@ export interface AcceptanceCriterion {
 	must: string;
 	evidence?: string[];
 	severity?: "required" | "optional";
+	/** Exact shell command to run for `evidence: [verification-output]`. */
+	command?: string;
 }
 
 export interface AcceptanceConfig {
@@ -267,6 +269,10 @@ export interface ChildRecord {
 	pendingCriteria?: AcceptanceCriterion[];
 	/** Snapshotted at launch so a later collect can honour design §5.3. */
 	onBlocked?: OnBlockedPolicy;
+	/** Snapshotted at launch; missing `{"ok":…}` on success becomes rejected. */
+	completionGuard?: boolean;
+	/** Detached git worktree the child's pane used; left on disk after retire. */
+	worktreePath?: string;
 
 	// artifacts
 	artifacts?: Array<{ kind: string; path: string }>;
@@ -404,6 +410,8 @@ export interface HerdrClient {
 		focus?: boolean;
 		/** Environment for the tab's root pane process (lineage propagation). */
 		env?: Record<string, string>;
+		/** Pin the new tab to this Space (`herdr tab create --workspace`). */
+		workspaceId?: string;
 	}): Promise<HerdrResult<{ tab: TabInfo; rootPaneId: string }>>;
 	tabClose(tabId: string): Promise<HerdrResult<void>>;
 	tabRename(tabId: string, label: string): Promise<HerdrResult<void>>;
