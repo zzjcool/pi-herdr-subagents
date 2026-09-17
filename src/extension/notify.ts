@@ -7,6 +7,11 @@
  *
  * `display` is false on success (the LLM still sees it; the transcript stays
  * quiet) and true on failure/stop, matching pi-subagents' notify.ts.
+ *
+ * Delivery is `followUp`, not the default `steer`. Steer would hijack the
+ * parent's next LLM call while it is still in a tool loop. Follow-up waits
+ * until that turn is idle; if the parent is already idle, `triggerTurn`
+ * still starts a new turn immediately.
  */
 
 export const SUBAGENT_NOTIFY_TYPE = "subagent-notify";
@@ -85,6 +90,11 @@ export function formatCollectFailure(name: string, error: unknown): CompletionNo
 	});
 }
 
+export interface SendMessageOptions {
+	triggerTurn?: boolean;
+	deliverAs?: "steer" | "followUp" | "nextTurn";
+}
+
 export interface SendMessageApi {
 	sendMessage(
 		message: {
@@ -92,8 +102,21 @@ export interface SendMessageApi {
 			content: string;
 			display: boolean;
 		},
-		options?: { triggerTurn?: boolean },
+		options?: SendMessageOptions,
 	): void;
+}
+
+/**
+ * How a completion notice should enter the parent session.
+ *
+ * `triggerTurn: false` only records the message. `true` wakes the parent, but
+ * via `followUp` so an in-flight parent turn is not steered mid-work.
+ */
+export function completionDeliveryOptions(
+	triggerTurn: boolean,
+): SendMessageOptions {
+	if (!triggerTurn) return { triggerTurn: false };
+	return { triggerTurn: true, deliverAs: "followUp" };
 }
 
 /**
@@ -114,7 +137,7 @@ export function deliverCompletion(
 				content: notice.content,
 				display: notice.display,
 			},
-			{ triggerTurn },
+			completionDeliveryOptions(triggerTurn),
 		);
 		return true;
 	} catch {

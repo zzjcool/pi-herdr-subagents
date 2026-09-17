@@ -330,5 +330,6 @@ Write `reports/<module>.md`:
 ## Open questions / deviations
 ```
 
-The parent session is woken by the extension's completion message; do not have
-workers `herdr agent prompt` the parent pane.
+The parent session is woken by the extension's completion message (`followUp`,
+so an in-flight parent turn is not steered); do not have workers
+`herdr agent prompt` the parent pane.

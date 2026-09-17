@@ -103,7 +103,13 @@ export { registerProfileCommands } from "./extension/slash.ts";
 
 // ── runs ────────────────────────────────────────────────────────────────────
 export { Orchestrator, preCreateSessionFile } from "./runs/orchestrator.ts";
-export type { OrchestratorDeps } from "./runs/orchestrator.ts";
+export type { CollectResult, OrchestratorDeps } from "./runs/orchestrator.ts";
+export {
+	VERIFY_COMMAND,
+	applyVerification,
+	needsVerification,
+} from "./runs/acceptance.ts";
+export type { CommandResult, VerifyRunner } from "./runs/acceptance.ts";
 export { createSessionLayout, typeTabLabel, tileSplit, TILE_COLUMNS } from "./runs/layout.ts";
 export type { SessionLayout } from "./runs/layout.ts";
 export { RunStore, sanitizeNameForFs } from "./runs/store.ts";
@@ -126,12 +132,27 @@ export type {
 	TrackedJobInput,
 } from "./extension/runtime.ts";
 export {
+	completionDeliveryOptions,
 	deliverCompletion,
 	formatCollectFailure,
 	formatCompletionNotice,
 	SUBAGENT_NOTIFY_TYPE,
 } from "./extension/notify.ts";
-export type { CompletionInput, CompletionNotice } from "./extension/notify.ts";
+export type {
+	CompletionInput,
+	CompletionNotice,
+	SendMessageOptions,
+} from "./extension/notify.ts";
+export {
+	applyOnBlockedPolicy,
+	followUpFor,
+	formatBlockedPrompt,
+} from "./extension/blocked.ts";
+export type { BlockedDecision, BlockedFollowUp } from "./extension/blocked.ts";
+export {
+	canUseCachedCollect,
+	formatAlreadyRecycled,
+} from "./extension/recycle.ts";
 export {
 	applyStatus,
 	createStatusBoard,
@@ -143,11 +164,14 @@ export {
 	STATUS_WIDGET_PLACEMENT,
 } from "./tui/status.ts";
 export {
-	blockMessage,
-	forbiddenDispatchReason,
-	PARENT_PLAYBOOK,
-	TOOL_DESCRIPTION,
-} from "./extension/playbook.ts";
+	CHILD_ACCEPTANCE_ROLE_ENV,
+	CHILD_ROLE_ENV,
+	CHILD_TASK_APPENDIX,
+	blockChildMessage,
+	forbiddenChildReason,
+	formatChildTask,
+	registerChildGuard,
+} from "./extension/child-guard.ts";
 
 // ── session parsing / outcome derivation ────────────────────────────────────
 export {

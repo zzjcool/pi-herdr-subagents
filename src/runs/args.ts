@@ -7,11 +7,13 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	type AgentConfig,
 	THINKING_LEVELS,
 	isThinkingLevel,
 } from "../shared/types.ts";
+import { formatChildTask } from "../extension/child-guard.ts";
 
 /** Re-exported for callers that only need the level list. */
 export { THINKING_LEVELS };
@@ -41,6 +43,14 @@ export function applyThinkingSuffix(
  * NOTE: length is NOT the only reason to use a file — see `pushTaskArg`.
  */
 export const TASK_ARG_LIMIT = 8_000;
+
+/** Absolute path to this package's extension entry (injected into every child). */
+export function childGuardExtensionPath(): string {
+	return path.resolve(
+		path.dirname(fileURLToPath(import.meta.url)),
+		"../../index.ts",
+	);
+}
 
 export interface BuildArgsInput {
 	agent: AgentConfig;
@@ -101,8 +111,15 @@ function pushToolArgs(args: string[], agent: AgentConfig): void {
 	const extensions = [
 		...(agent.extensions ?? []),
 		...(agent.subagentOnlyExtensions ?? []),
+		childGuardExtensionPath(),
 	];
-	for (const ext of extensions) args.push("--extension", ext);
+	const seen = new Set<string>();
+	for (const ext of extensions) {
+		const resolved = path.resolve(ext);
+		if (seen.has(resolved)) continue;
+		seen.add(resolved);
+		args.push("--extension", ext);
+	}
 }
 
 /**
@@ -170,7 +187,7 @@ function pushTaskArg(
 	tempFiles: string[],
 	input: BuildArgsInput,
 ): void {
-	const taskText = `Task: ${input.task}`;
+	const taskText = formatChildTask(input.task);
 	const file = path.join(input.tempDir, "task.md");
 	fs.writeFileSync(file, taskText, { mode: 0o600 });
 	tempFiles.push(file);

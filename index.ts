@@ -6,8 +6,9 @@
  *
  * Completion follows pi-subagents, not "child prompts parent":
  *   launch is async by default → this process watches the child →
- *   `pi.sendMessage({ customType: "subagent-notify" }, { triggerTurn })`
- *   wakes the parent. Running children are painted next to the input box.
+ *   `pi.sendMessage({ customType: "subagent-notify" }, { triggerTurn, deliverAs: "followUp" })`
+ *   wakes the parent when idle, or waits out the current turn if the parent
+ *   is still working. Running children are painted next to the input box.
  */
 
 import * as path from "node:path";
@@ -30,6 +31,15 @@ import {
 	resolveSubagentSettings,
 } from "./src/agents/settings.ts";
 import { createSessionRuntime, type SessionRuntime, shouldRecycleAfterCollect } from "./src/extension/runtime.ts";
+import { registerChildGuard } from "./src/extension/child-guard.ts";
+import {
+	applyOnBlockedPolicy,
+	followUpFor,
+} from "./src/extension/blocked.ts";
+import { formatAlreadyRecycled } from "./src/extension/recycle.ts";
+import {
+	SUBAGENT_NOTIFY_TYPE,
+} from "./src/extension/notify.ts";
 import { registerProfileCommands } from "./src/extension/slash.ts";
 import {
 	blockMessage,
@@ -128,13 +138,27 @@ const SubagentParams = Type.Object({
 /** The validated tool parameters, as the model supplies them. */
 type SubagentParams = Static<typeof SubagentParams>;
 
+const blockedUi = new WeakMap<
+	SessionRuntime,
+	{
+		getConfirm: () => ((message: string) => Promise<boolean>) | undefined;
+		notifyBlocked: (message: string) => void;
+	}
+>();
+
 // ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
 export default function herdrSubagents(pi: ExtensionAPI) {
+	if (process.env.PI_SUBAGENT_CHILD === "1") {
+		registerChildGuard(pi);
+		return;
+	}
+
 	const layout = createSessionLayout();
 	let lastModelRegistry: ExtensionContext["modelRegistry"] | undefined;
+	let lastConfirm: ((message: string) => Promise<boolean>) | undefined;
 	const runtime = createSessionRuntime({
 		sendMessage: (message, options) => pi.sendMessage(message, options),
 		emitBusy: (active, label) => {
@@ -145,6 +169,23 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 				);
 			} catch {
 				// herdr's busy overlay is optional; the TUI widget is the primary signal.
+			}
+		},
+	});
+	blockedUi.set(runtime, {
+		getConfirm: () => lastConfirm,
+		notifyBlocked: (message) => {
+			try {
+				pi.sendMessage(
+					{
+						customType: SUBAGENT_NOTIFY_TYPE,
+						content: message,
+						display: true,
+					},
+					{ triggerTurn: true, deliverAs: "followUp" },
+				);
+			} catch {
+				// Parent session is gone; the child pane stays open for a later steer.
 			}
 		},
 	});
@@ -236,6 +277,10 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	const bindUi = (_event: unknown, ctx: ExtensionContext): void => {
 		lastModelRegistry = ctx.modelRegistry;
 		runtime.bind(ctx);
+		lastConfirm =
+			ctx.hasUI && typeof ctx.ui?.confirm === "function"
+				? (message) => ctx.ui.confirm("", message)
+				: undefined;
 	};
 
 	pi.on("session_start", bindUi);
@@ -398,16 +443,24 @@ async function collectChild(
 	ctx: ChildContext,
 ): Promise<AgentToolResult<unknown>> {
 	try {
-		// Honour the agent's own `timeoutMs`: the bundled roles declare budgets
-		// (worker 30min, oracle 20min) that were previously parsed and ignored.
+		const pending = ctx.runtime.consumeCollect(ctx.name);
+		if (pending) {
+			const collected = await pending;
+			await persistChild(ctx.store, ctx.found.runId, ctx.orchestrator, ctx.name);
+			return ok(renderCollect(ctx.name, collected));
+		}
+
+		const cached = ctx.orchestrator.cachedCollect(ctx.name);
+		if (cached) return ok(renderCollect(ctx.name, cached));
+
 		const agentDef = ctx.agents.find((a) => a.name === ctx.found.child.agent);
 		const timeoutMs = agentDef?.timeoutMs ?? DEFAULTS.turnTimeoutMs;
-		const pending = ctx.runtime.consumeCollect(ctx.name);
-		const collected = pending
-			? await pending
-			: await ctx.orchestrator.collect(ctx.name, { timeoutMs });
+		const collected = await ctx.orchestrator.collect(ctx.name, { timeoutMs });
 		await persistChild(ctx.store, ctx.found.runId, ctx.orchestrator, ctx.name);
-		if (shouldRecycleAfterCollect(collected.execution.status)) {
+		if (
+			shouldRecycleAfterCollect(collected.execution.status) &&
+			!collected.blocked
+		) {
 			await ctx.orchestrator.retire(ctx.name);
 			await persistChild(ctx.store, ctx.found.runId, ctx.orchestrator, ctx.name);
 		}
@@ -423,6 +476,13 @@ async function retireChild(
 	ctx: ChildContext,
 ): Promise<AgentToolResult<unknown>> {
 	try {
+		const live = ctx.orchestrator
+			.childrenSnapshot()
+			.find((child) => child.name === ctx.name);
+		if (live?.state === "retired") {
+			ctx.runtime.release(ctx.name);
+			return ok(formatAlreadyRecycled(ctx.name, live.sessionFile));
+		}
 		ctx.runtime.release(ctx.name);
 		const child = await ctx.orchestrator.retire(ctx.name);
 		await persistChild(ctx.store, ctx.found.runId, ctx.orchestrator, ctx.name);
@@ -597,7 +657,7 @@ async function launchFamily(input: {
 
 	if (isAsync && session.handles.length > 0) {
 		session.results.push(
-			"↳ async: the parent session wakes with a completion message when each child finishes. Running children show next to the input. Do not tell children to message the parent; do not poll just to wait.",
+			"↳ async: a completion message is queued when each child finishes. If this session is idle it wakes immediately; if it is still working the notice waits until the current turn ends. Running children show next to the input. Do not tell children to message the parent; do not poll just to wait.",
 		);
 	}
 
@@ -899,6 +959,24 @@ function followJob(
 				input.name,
 			);
 		},
+		handleBlocked: async (snapshot) => {
+			const child = input.orchestrator
+				.childrenSnapshot()
+				.find((entry) => entry.name === input.name);
+			const ui = blockedUi.get(runtime);
+			const decision = await applyOnBlockedPolicy({
+				policy: child?.onBlocked ?? "forward",
+				name: input.name,
+				reason: snapshot.execution.reason,
+				confirm: ui?.getConfirm(),
+				approve: () => input.orchestrator.approveBlocked(input.name),
+				reject: () => input.orchestrator.rejectBlocked(input.name),
+				notify: (message) => {
+					ui?.notifyBlocked(message);
+				},
+			});
+			return followUpFor(decision);
+		},
 	});
 	if (!input.watch) return;
 	if (existing?.watching) return;
@@ -1038,6 +1116,7 @@ function renderCollect(
 				severity?: string;
 			}>;
 		};
+		blocked?: boolean;
 	},
 ): string {
 	const lines = [
@@ -1045,6 +1124,11 @@ function renderCollect(
 		`execution: ${collected.execution.status}${collected.execution.reason ? ` (${collected.execution.reason})` : ""}`,
 		`acceptance: ${collected.acceptance.status}${collected.acceptance.level ? ` (${collected.acceptance.level})` : ""}`,
 	];
+	if (collected.blocked) {
+		lines.push(
+			"blocked: waiting for a tool approval — the pane is still open. Approve in the parent confirm, or steer the child.",
+		);
+	}
 
 	// L3: semantic criteria the runtime cannot decide. An agent claiming success
 	// is exactly the signal that cannot be trusted (F32), so these are handed to

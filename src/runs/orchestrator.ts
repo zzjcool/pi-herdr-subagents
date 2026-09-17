@@ -20,12 +20,17 @@ import { randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { readPaneDiagnostic } from "../herdr/client.ts";
 import { makeName } from "../shared/name.ts";
-import { encodeNestedPath, parseNestedPathEnv } from "../shared/nested-path.ts";
+import {
+	encodeNestedPath,
+	parseNestedPathEnv,
+} from "../shared/nested-path.ts";
+import { CHILD_ACCEPTANCE_ROLE_ENV, CHILD_ROLE_ENV } from "../extension/child-guard.ts";
 import {
 	countAssistantMessages,
 	deriveOutcome,
 	isLastTurnComplete,
 	parseSessionFile,
+	emptyParsedSession,
 	extractVerdict,
 } from "../shared/session.ts";
 import {
@@ -44,7 +49,9 @@ import {
 	SubagentError,
 	type Usage,
 } from "../shared/types.ts";
+import { applyVerification, type VerifyRunner } from "./acceptance.ts";
 import { buildPiArgs } from "./args.ts";
+import { canUseCachedCollect } from "../extension/recycle.ts";
 import {
 	createSessionLayout,
 	typeTabLabel,
@@ -86,6 +93,17 @@ export interface OrchestratorDeps {
 	 * cannot each create a tab; tests omit it and get an isolated registry.
 	 */
 	layout?: SessionLayout;
+	/** Injected so tests do not actually run `npm test`. */
+	verifyRunner?: VerifyRunner;
+}
+
+export interface CollectResult {
+	execution: Execution;
+	output: string;
+	usage: Usage | null;
+	model: string | null;
+	acceptance: AcceptanceResult;
+	blocked?: boolean;
 }
 
 /** Environment variable carrying the lineage chain into a child process. */
@@ -226,6 +244,7 @@ export class Orchestrator {
 	private readonly maxDepth: number;
 	private readonly maxSpawns: number | null;
 	private readonly layout: SessionLayout;
+	private readonly verifyRunner?: VerifyRunner;
 	/** Last type-tab used by a child of this orchestrator. */
 	private lastTypeTabId: string | null = null;
 	private spawned = 0;
@@ -254,6 +273,7 @@ export class Orchestrator {
 			this.maxDepth = MAX_NESTED_PATH_ENTRIES;
 		this.maxSpawns = deps.maxSpawns ?? null;
 		this.layout = deps.layout ?? createSessionLayout();
+		this.verifyRunner = deps.verifyRunner;
 	}
 
 	/** The lineage path a child of this process would receive. */
@@ -546,7 +566,7 @@ export class Orchestrator {
 			const pane = await this.createPane(
 				placement,
 				input.agent.name,
-				this.lineageEnv(name),
+				this.lineageEnv(name, input.agent),
 			);
 			paneId = pane.paneId;
 
@@ -645,11 +665,18 @@ export class Orchestrator {
 	 * Lineage env for a child pane (design §4.2): a grandchild learns its full
 	 * ancestry and is bounded by the same ceiling.
 	 */
-	private lineageEnv(name: string): Record<string, string> {
+	private lineageEnv(
+		name: string,
+		agent?: { name: string; acceptance?: { role?: string } },
+	): Record<string, string> {
 		return {
 			[LINEAGE_ENV]: encodeNestedPath(this.childPath(name)),
 			[MAX_DEPTH_ENV]: String(this.maxDepth),
 			[CHILD_ENV]: "1",
+			[CHILD_ROLE_ENV]: agent?.name ?? "",
+			...(agent?.acceptance?.role
+				? { [CHILD_ACCEPTANCE_ROLE_ENV]: agent.acceptance.role }
+				: {}),
 		};
 	}
 
@@ -695,6 +722,7 @@ export class Orchestrator {
 						})),
 					}
 				: {}),
+			...(agent.onBlocked ? { onBlocked: agent.onBlocked } : {}),
 			...(input.tabId ? { tabId: input.tabId } : {}),
 			...(input.model ? { model: input.model } : {}),
 		};
@@ -750,16 +778,12 @@ export class Orchestrator {
 	async collect(
 		name: string,
 		opts: { timeoutMs?: number } = {},
-	): Promise<{
-		execution: Execution;
-		output: string;
-		usage: Usage | null;
-		model: string | null;
-		acceptance: AcceptanceResult;
-	}> {
+	): Promise<CollectResult> {
 		const child = this.children.get(name);
 		if (!child)
 			throw new SubagentError(`unknown child: ${name}`, ErrorCodes.NOT_FOUND);
+
+		if (await this.isAgentBlocked(name)) return this.blockedResult(child);
 
 		const timeoutMs = opts.timeoutMs ?? DEFAULTS.turnTimeoutMs;
 		const deadline = this.now() + timeoutMs;
@@ -770,9 +794,11 @@ export class Orchestrator {
 		// Without this the wait below would never observe new growth and would
 		// block for the entire timeout.
 		const alreadySettled = isLastTurnComplete(initial);
-		const timedOut = alreadySettled
-			? false
+		const wait = alreadySettled
+			? "settled"
 			: await this.awaitTurn(child, initial, deadline);
+		if (wait === "blocked") return this.blockedResult(child);
+		const timedOut = wait === "timeout";
 
 		const parsed = parseSessionFile(child.sessionFile);
 		const execution = await this.resolveExecution(
@@ -781,7 +807,14 @@ export class Orchestrator {
 			timedOut,
 			timeoutMs,
 		);
-		const acceptance = deriveAcceptance(parsed, execution, child.pendingCriteria);
+		const acceptance = await applyVerification(
+			deriveAcceptance(parsed, execution, child.pendingCriteria),
+			{
+				cwd: this.cwd,
+				criteria: child.pendingCriteria,
+				run: this.verifyRunner,
+			},
+		);
 
 		child.state = "awaiting";
 		child.execution = execution;
@@ -798,6 +831,42 @@ export class Orchestrator {
 	}
 
 	/**
+	 * Return a previously collected snapshot without waiting on the child.
+	 *
+	 * Used when the parent model calls `collect` after auto-watch already
+	 * derived the outcome (and possibly recycled the pane).
+	 */
+	cachedCollect(name: string): CollectResult | undefined {
+		const child = this.children.get(name);
+		if (!child?.execution) return undefined;
+		if (!canUseCachedCollect(child.state)) return undefined;
+		const parsed = fs.existsSync(child.sessionFile)
+			? parseSessionFile(child.sessionFile)
+			: emptyParsedSession();
+		return {
+			execution: child.execution,
+			output: parsed.output,
+			usage: parsed.usage ?? child.execution.usage ?? null,
+			model: parsed.model ?? child.execution.model ?? null,
+			acceptance:
+				child.acceptance ?? { status: "unknown", level: "none" },
+			...(child.state === "blocked" ? { blocked: true } : {}),
+		};
+	}
+
+	/** Unblock a child after the parent approved the pending tool. */
+	async approveBlocked(name: string): Promise<void> {
+		this.clearBlocked(name);
+		await bestEffort(this.client.agentSendKeys(name, "y"));
+	}
+
+	/** Unblock a child after the parent denied the pending tool. */
+	async rejectBlocked(name: string): Promise<void> {
+		this.clearBlocked(name);
+		await bestEffort(this.client.agentSendKeys(name, "n"));
+	}
+
+	/**
 	 * Wait for the child's current turn to start and then settle.
 	 *
 	 * Two phases, because they answer different questions: phase 1 asks "did the
@@ -808,19 +877,21 @@ export class Orchestrator {
 	 * Bounded by BOTH the deadline and an iteration cap: if an injected clock does
 	 * not advance with `sleep`, the deadline alone would spin forever.
 	 *
-	 * @returns true when the deadline passed before the turn produced anything.
+	 * @returns whether the turn settled, timed out, or hit a tool approval.
 	 */
 	private async awaitTurn(
 		child: ChildRecord,
 		initial: ReturnType<typeof parseSessionFile>,
 		deadline: number,
-	): Promise<boolean> {
+	): Promise<"settled" | "timeout" | "blocked"> {
+		if (await this.isAgentBlocked(child.name)) return "blocked";
 		const before = countAssistantMessages(initial);
 		const timeoutMs = deadline - this.now();
 		const maxPolls = Math.max(1, Math.ceil(timeoutMs / this.pollIntervalMs)) + 10;
 
 		let progressed = false;
 		for (let poll = 0; poll < maxPolls; poll += 1) {
+			if (await this.isAgentBlocked(child.name)) return "blocked";
 			const parsed = parseSessionFile(child.sessionFile);
 			if (countAssistantMessages(parsed) > before) {
 				progressed = true;
@@ -831,12 +902,52 @@ export class Orchestrator {
 		}
 
 		// Nothing ever appeared: the caller gave up rather than the turn aborting.
-		if (!progressed) return true;
+		if (!progressed) return "timeout";
 
 		const remaining = Math.max(1_000, deadline - this.now());
 		await this.client.agentWait(child.name, { timeoutMs: remaining });
 		await this.waitForQuiet(child.sessionFile, deadline);
-		return false;
+		if (await this.isAgentBlocked(child.name)) return "blocked";
+		return "settled";
+	}
+
+	private async isAgentBlocked(name: string): Promise<boolean> {
+		const agentState = await this.client.agentGet(name);
+		if (!agentState.ok) return false;
+		return agentState.value.agent_status === "blocked";
+	}
+
+	private blockedResult(child: ChildRecord): CollectResult {
+		const parsed = parseSessionFile(child.sessionFile);
+		const execution: Execution = {
+			status: "running",
+			reason: "blocked: waiting for approval",
+		};
+		const acceptance = deriveAcceptance(
+			parsed,
+			execution,
+			child.pendingCriteria,
+		);
+		child.state = "blocked";
+		child.execution = execution;
+		child.acceptance = acceptance;
+		this.onChildUpdate(child);
+		return {
+			execution,
+			output: parsed.output,
+			usage: parsed.usage,
+			model: parsed.model,
+			acceptance,
+			blocked: true,
+		};
+	}
+
+	private clearBlocked(name: string): void {
+		const child = this.children.get(name);
+		if (!child) return;
+		child.state = "working";
+		child.execution = undefined;
+		this.onChildUpdate(child);
 	}
 
 	/**

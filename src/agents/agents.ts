@@ -511,7 +511,6 @@ function applyHerdrFields(config: AgentConfig, fm: AgentFrontmatter): void {
  */
 const UNENFORCED_FIELDS = [
 	"worktree",
-	"onBlocked",
 	"toolBudget",
 	"turnBudget",
 	"fallbackModels",

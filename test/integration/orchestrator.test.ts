@@ -528,3 +528,128 @@ test("restore rehydrates children from a persisted record", async () => {
 		h.cleanup();
 	}
 });
+
+test("collect runs verification-output criteria and promotes attested to verified", async () => {
+	const h = harness();
+	try {
+		const commands: string[] = [];
+		const orchestrator = new Orchestrator({
+			client: h.client,
+			runDir: h.runDir,
+			cwd: "/work",
+			sleep: async (ms) => {
+				h.fake.advance(ms);
+			},
+			verifyRunner: async (command, cwd) => {
+				commands.push(`${cwd}::${command}`);
+				return { code: 0, stdout: "ok\n", stderr: "" };
+			},
+		});
+		const handle = await orchestrator.launch({
+			agent: agent({
+				acceptance: {
+					level: "attested",
+					criteria: [
+						{
+							id: "typecheck-test-pass",
+							must: "npm run typecheck 与 npm test 全绿",
+							evidence: ["verification-output"],
+							severity: "required",
+						},
+					],
+				},
+			}),
+			task: "t",
+		});
+		writeFileSync(
+			handle.sessionFile,
+			transcript([
+				{ role: "user", text: "t" },
+				{
+					role: "assistant",
+					stopReason: "stop",
+					text: '{"ok": true, "reason": "done"}',
+				},
+			]),
+		);
+		const collected = await orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+		assert.equal(collected.acceptance.status, "accepted");
+		assert.equal(collected.acceptance.level, "verified");
+		assert.equal(commands.length, 1);
+		assert.match(commands[0] ?? "", /\/work::npm run typecheck/);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("collect reports blocked without waiting out the timeout", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({ onBlocked: "forward" }),
+			task: "t",
+		});
+		assert.equal(handle.child.onBlocked, "forward");
+		h.fake.block(handle.name);
+		const started = Date.now();
+		const collected = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 60_000,
+		});
+		assert.ok(Date.now() - started < 5_000, "must not wait the full timeout");
+		assert.equal(collected.blocked, true);
+		assert.equal(collected.execution.status, "running");
+		assert.equal(
+			h.orchestrator.childrenSnapshot().find((c) => c.name === handle.name)
+				?.state,
+			"blocked",
+		);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("cachedCollect returns the snapshot after retire so a later collect is a no-wait", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
+		writeFileSync(
+			handle.sessionFile,
+			transcript([
+				{ role: "user", text: "go" },
+				{ role: "assistant", stopReason: "stop", text: "ok" },
+			]),
+		);
+		await h.orchestrator.collect(handle.name, { timeoutMs: 5_000 });
+		await h.orchestrator.retire(handle.name);
+		const cached = h.orchestrator.cachedCollect(handle.name);
+		assert.ok(cached);
+		assert.equal(cached.execution.status, "success");
+		assert.equal(h.orchestrator.cachedCollect("nobody"), undefined);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("approveBlocked sends y and lets collect run again", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
+		h.fake.block(handle.name);
+		await h.orchestrator.collect(handle.name, { timeoutMs: 5_000 });
+		await h.orchestrator.approveBlocked(handle.name);
+		const child = h.orchestrator
+			.childrenSnapshot()
+			.find((c) => c.name === handle.name);
+		assert.equal(child?.state, "working");
+		assert.equal(child?.execution, undefined);
+		assert.ok(
+			h.fake.sentKeys.some((entry) => entry.keys.includes("y")),
+			"approval must reach herdr as send-keys y",
+		);
+	} finally {
+		h.cleanup();
+	}
+});
+

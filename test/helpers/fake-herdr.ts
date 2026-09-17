@@ -238,6 +238,15 @@ export class FakeHerdr {
 		return this.agents.get(name)?.status === "exited";
 	}
 
+	/** Script a tool-approval wait (design §5.3). */
+	block(name: string): void {
+		const agent = this.agents.get(name);
+		if (!agent) return;
+		agent.status = "blocked";
+		const pane = this.panes.get(agent.paneId);
+		if (pane) pane.agent_status = "blocked";
+	}
+
 	// -- internals -----------------------------------------------------------------
 
 	private runTurn(name: string, prompt: string): void {
@@ -523,6 +532,19 @@ export class FakeHerdr {
 				const agent = this.agents.get(target ?? "");
 				this.sentKeys.push({ target: target ?? "", keys, at: this.clock });
 				if (!agent) return fail("agent_not_found", `no agent ${target}`);
+				if (agent.status === "blocked") {
+					const pane = this.panes.get(agent.paneId);
+					if (keys.some((key) => key === "y" || key === "Y")) {
+						agent.status = "working";
+						if (pane) pane.agent_status = "working";
+					} else if (
+						keys.some((key) => key === "n" || key === "N" || key === "escape")
+					) {
+						agent.status = "idle";
+						if (pane) pane.agent_status = "idle";
+					}
+					return okOut({ sent: keys });
+				}
 				// F11: ctrl+d is the clean exit; ctrl+c does NOT stop the agent.
 				if (keys.includes("ctrl+d")) {
 					agent.status = "exited";

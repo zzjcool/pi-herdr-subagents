@@ -56,11 +56,12 @@ test("runtime: async watch notifies the parent once and drops the widget entry",
 	await waitFor(() => runtime.activeJobs().length === 0, "job released");
 	const sent = messages[0] as {
 		message: { customType: string; content: string; display: boolean };
-		options: { triggerTurn: boolean };
+		options: { triggerTurn: boolean; deliverAs: string };
 	};
 	assert.equal(sent.message.customType, SUBAGENT_NOTIFY_TYPE);
 	assert.equal(sent.message.display, false);
 	assert.equal(sent.options.triggerTurn, true);
+	assert.equal(sent.options.deliverAs, "followUp");
 	assert.match(sent.message.content, /Background task completed: \*\*worker-0 \(worker\)\*\*/);
 	assert.equal(runtime.activeJobs().length, 0);
 	assert.equal((busy.at(-1) as { active: boolean }).active, false);
@@ -186,4 +187,85 @@ test("runtime: dispose clears jobs and busy overlay", () => {
 	assert.equal((busy.at(-1) as { active: boolean }).active, false);
 	runtime.watch("w1");
 	assert.equal(runtime.activeJobs().length, 0);
+});
+
+test("runtime: collect after watch finished returns the cached snapshot", async () => {
+	const runtime = createSessionRuntime({ sendMessage() {} });
+	runtime.track({
+		name: "w1",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/w.jsonl",
+		timeoutMs: 1_000,
+		collect: async () => snapshot({ output: "cached-output" }),
+	});
+	runtime.watch("w1");
+	await waitFor(() => runtime.activeJobs().length === 0, "watch finished");
+	const pending = runtime.consumeCollect("w1");
+	assert.ok(pending, "finished collect must stay cached after the widget drops");
+	const collected = await pending;
+	assert.equal(collected.output, "cached-output");
+});
+
+test("runtime: a blocked child asks the parent and does not recycle", async () => {
+	let retired = 0;
+	let handled = 0;
+	const messages: unknown[] = [];
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message);
+		},
+	});
+	runtime.track({
+		name: "w1",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/w.jsonl",
+		timeoutMs: 1_000,
+		collect: async () =>
+			snapshot({
+				execution: { status: "running", reason: "blocked: waiting for approval" },
+				blocked: true,
+			}),
+		retire: async () => {
+			retired += 1;
+		},
+		handleBlocked: async () => {
+			handled += 1;
+			return "hold";
+		},
+	});
+	runtime.watch("w1");
+	await waitFor(() => handled === 1, "blocked handler");
+	assert.equal(retired, 0);
+	assert.equal(messages.length, 0, "blocked is not a completion");
+	assert.equal(runtime.get("w1")?.state, "blocked");
+	assert.equal(runtime.activeJobs().length, 1, "pane stays on the widget");
+});
+
+test("runtime: approving a blocked child rewatches instead of releasing", async () => {
+	let collects = 0;
+	const runtime = createSessionRuntime({ sendMessage() {} });
+	runtime.track({
+		name: "w1",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/w.jsonl",
+		timeoutMs: 1_000,
+		collect: async () => {
+			collects += 1;
+			if (collects === 1) {
+				return snapshot({
+					execution: { status: "running" },
+					blocked: true,
+				});
+			}
+			return snapshot();
+		},
+		handleBlocked: async () => "resume",
+	});
+	runtime.watch("w1");
+	await waitFor(() => collects >= 2, "rewatch after approve");
+	await waitFor(() => runtime.activeJobs().length === 0, "terminal release");
+	assert.equal(collects, 2);
 });

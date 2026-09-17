@@ -265,6 +265,8 @@ export interface ChildRecord {
 	 * surface them without re-reading the agent definition.
 	 */
 	pendingCriteria?: AcceptanceCriterion[];
+	/** Snapshotted at launch so a later collect can honour design §5.3. */
+	onBlocked?: OnBlockedPolicy;
 
 	// artifacts
 	artifacts?: Array<{ kind: string; path: string }>;

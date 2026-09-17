@@ -495,6 +495,7 @@ test("enforced fields are NOT reported as unenforced", () => {
 		"placement: new-tab",
 		"tools: [read]",
 		"steer: true",
+		"onBlocked: forward",
 		"---",
 		"body",
 	].join("\n");

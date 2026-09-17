@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+	completionDeliveryOptions,
 	completionStatusOf,
 	deliverCompletion,
 	formatCollectFailure,
@@ -74,7 +75,15 @@ test("formatCollectFailure wraps an exception as a failed notice", () => {
 	assert.doesNotMatch(notice.content, /Pane recycled/);
 });
 
-test("deliverCompletion sends subagent-notify with triggerTurn", () => {
+test("completionDeliveryOptions follows up instead of steering", () => {
+	assert.deepEqual(completionDeliveryOptions(true), {
+		triggerTurn: true,
+		deliverAs: "followUp",
+	});
+	assert.deepEqual(completionDeliveryOptions(false), { triggerTurn: false });
+});
+
+test("deliverCompletion sends subagent-notify with followUp wakeup", () => {
 	const sent: unknown[] = [];
 	const ok = deliverCompletion(
 		{
@@ -93,11 +102,12 @@ test("deliverCompletion sends subagent-notify with triggerTurn", () => {
 	assert.equal(sent.length, 1);
 	const payload = sent[0] as {
 		message: { customType: string; display: boolean };
-		options: { triggerTurn: boolean };
+		options: { triggerTurn: boolean; deliverAs: string };
 	};
 	assert.equal(payload.message.customType, SUBAGENT_NOTIFY_TYPE);
 	assert.equal(payload.message.display, false);
 	assert.equal(payload.options.triggerTurn, true);
+	assert.equal(payload.options.deliverAs, "followUp");
 });
 
 test("deliverCompletion returns false when sendMessage throws", () => {

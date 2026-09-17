@@ -15,7 +15,7 @@ export const PARENT_PLAYBOOK = [
 	"   One child:  subagent({ agent: \"worker\", task: \"...\" })",
 	"   Parallel:   subagent({ tasks: [{ agent, task }, { agent, task }] })",
 	"2. Same agent type shares one tab (each child is a pane). Different types get different tabs. Prefer tasks[] over two separate tool calls.",
-	"3. Then return control. Running children show next to the input. A completion message wakes this session. Finished children recycle their pane (and the type tab when it is empty) automatically — do not retire or close panes. Resume from the session file if you need the child again.",
+	"3. Then return control. Running children show next to the input. A completion message wakes this session when it is idle; if this session is still working, the notice waits until the current turn finishes. Finished children recycle their pane (and the type tab when it is empty) automatically — do not retire or close panes. Resume from the session file if you need the child again.",
 	"4. Later control is only `subagent({ action: \"steer\"|\"continue\"|\"resume\"|\"collect\"|\"status\"|\"list\", name })`.",
 	"Forbidden: `herdr --help`, bare `herdr agent|pane|tab`, `herdr pane split`, `herdr agent start|prompt|wait`, `test HERDR_ENV`, telling a child to prompt this pane.",
 ].join("\n");

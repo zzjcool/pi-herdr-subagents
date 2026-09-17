@@ -16,9 +16,10 @@ subagent({ tasks: [
 ```
 
 That is the entire dispatch. The tool creates the type tab, splits panes, starts
-agents, shows status next to the input, and wakes this session when a child
-finishes. **Same agent type = one tab, different panes.** A scout and a
-reviewer get two tabs; two scouts share one.
+agents, shows status **above the input**, and queues a completion when a child
+finishes. If this session is idle it wakes immediately; if it is still working,
+the notice waits until the current turn ends. **Same agent type = one tab,
+different panes.** A scout and a reviewer get two tabs; two scouts share one.
 
 **First action is the `subagent` tool.** Do not `test HERDR_ENV`, do not
 `herdr --help`, do not `herdr agent` / `herdr pane`, do not `pane split` /
@@ -28,18 +29,26 @@ plugin will block them. Prefer one `tasks[]` call over two separate launches.
 Then return control. Completions arrive as `Background task completed: **name**`.
 The plugin recycles the child's pane (and the type tab when empty) when the
 turn finishes. Do not `retire` or close panes yourself. `resume` from the
-session file if you need the child again. Call `collect` only when this turn
-must have the result (headless). Pass `async: false` only for a short
-foreground run.
+session file if you need the child again. `collect` after auto-watch returns
+the cached snapshot; `retire` after auto-recycle is a no-op. Pass `async: false`
+only for a short foreground run.
 
 ## Task cards
 
-1. Concrete task (files in/out, constraints).
-2. Scope: which paths the child may touch; no spawning further agents; no
-   reading or prompting other panes.
-3. Output path + format. **No wakeup instruction.** Never tell a child to
-   `herdr agent prompt` this pane.
-4. Final line must be machine-readable: `{"ok": true|false, "reason": "..."}`.
+Write the work, the paths, and the output location. The plugin **already
+appends** frozen constraints to every child:
+
+- do not prompt / wait on / send-keys to any other pane
+- do not read or close panes that are not yours
+- do not spawn nested agents
+- end with `{"ok": true|false, "reason": "..."}` on its own line
+
+Do **not** add a wakeup instruction. Never tell a child to
+`herdr agent prompt` this pane.
+
+Read-only roles (`scout`, `reviewer`) still have `bash` for reconnaissance;
+writes are blocked by the child-guard. You do not need to repeat “do not `rm`”
+in the task unless you want extra emphasis.
 
 ## Later control
 
@@ -47,8 +56,12 @@ foreground run.
 subagent({ action: "steer", name, message })
 subagent({ action: "continue", name, message })
 subagent({ action: "resume", name, message })
+subagent({ action: "status", name })
 subagent({ action: "list" })
 ```
+
+If a child is waiting on a tool approval, the parent TUI gets a confirm
+(`onBlocked: forward`). Do not invent a `steer` just to type `y`.
 
 ## Model profiles
 
@@ -67,5 +80,6 @@ verifies they still resolve.
 
 ## Isolation
 
-A child can `herdr pane read` any pane in the session. Never put secrets on
-screen while children run. Do not treat a pane as a sandbox.
+Child-guard blocks `herdr agent prompt` and foreign `pane read`, and it blocks
+writes for read-only roles. Herdr is still **one trust domain**: never put
+secrets on screen while children run. Do not treat a pane as a sandbox.

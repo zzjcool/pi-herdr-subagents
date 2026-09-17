@@ -18,6 +18,20 @@
 | 隔离 | 进程级天然隔离 | **无隔离，需靠纪律**（exp10 实测） |
 | 回收 | 自动 | 需显式，但 tab close 可原子化 |
 
+### 实现状态（相对本文档）
+
+下面 F 条目里不少写的是「当时的缺口」。当前运行时已经钉死、以 [README](../README.md) 为准：
+
+- 子进程强制加载 child-guard：拦 `herdr agent prompt|wait|send-keys|start`、外 pane read、只读角色写操作
+- 任务卡自动附录（禁止 wakeup、必须 `{"ok":…}`）
+- worker 的 `verification-output` 在 collect 后由插件跑 `npm run typecheck && npm test`，从 `attested` 升到 `verified` 或拒绝
+- `onBlocked: forward` 弹父会话 confirm（无 TUI 则 notify）
+- 自动 recycle；已 watch 的 `collect` 返回缓存；已回收的 `retire` 是 no-op
+- 完成通知 `deliverAs: followUp`；状态栏在输入框上方
+
+仍未强制（`action=list` 会标 `⚠ not enforced yet`）：`worktree` / `toolBudget` / `turnBudget` / `fallbackModels` / `allowNestedSubagents`（真正的嵌套上限是 `maxSubagentDepth`）。
+F23 的结论仍然成立：pane 不是沙箱，child-guard 只覆盖 bash/herdr 这一层。
+
 ---
 
 ## 1. 实测结论汇总（33 条）
@@ -198,8 +212,11 @@ launch (async) ──→ 子 pane 跑
        │        （pi-subagents fleet-status / setStatus）
        └─ collect 在后台等 turn 结束
               │
-              └─ pi.sendMessage({ customType: "subagent-notify" }, { triggerTurn: true })
-                 父会话被唤醒，读结果。成功默认 display:false（不刷屏），失败才显示。
+              └─ pi.sendMessage({ customType: "subagent-notify" },
+                    { triggerTurn: true, deliverAs: "followUp" })
+                 父会话空闲则立刻唤醒；若父会话还在跑当前 turn（工具循环），
+                 等这一轮结束后再投递，避免 steer 打断正在干的事。
+                 成功默认 display:false（不刷屏），失败才显示。
 ```
 
 父 agent 的正确用法：`subagent` 工具 launch 之后把控制权交回用户，等 completion

@@ -1,24 +1,52 @@
 ---
 name: pi-herdr-subagents
 npm: "@zzjcool/pi-herdr-subagents"
-description: "Delegate work to child Pi agents running in Herdr panes: visible, steerable, resumable, with accurate success/failure accounting. Use when a task would benefit from parallel workers, fresh-context adversarial review, or long-running background subtasks that must survive the parent. Do not use for trivial single-file edits, running tests, or answering simple questions. Requires HERDR_ENV=1."
+description: "Delegate work to child Pi agents running in Herdr panes: visible, steerable, resumable, with accurate success/failure accounting. Use when a task would benefit from parallel workers, fresh-context adversarial review, or long-running background subtasks that must survive the parent. Do not use for trivial single-file edits, running tests, or answering simple questions."
 ---
 
 # @zzjcool/pi-herdr-subagents
 
-Delegate work to child Pi agents running in **Herdr panes**. Unlike one-shot spawn
-models, a herdr subagent is a **supervised live process**: it stays resident across
-turns, can be steered mid-flight, resumed after the pane is gone, and its pane stays
-visible to you and the user.
+A [Pi](https://github.com/badlogic/pi-mono) extension that delegates work to
+**child Pi agents in [Herdr](https://herdr.dev) panes**.
 
-Before using any `herdr` command, verify you are inside Herdr:
+A herdr subagent is a **supervised live process**, not a one-shot function call.
+It stays resident across turns, can be steered mid-flight, resumed after its
+pane is gone, and stays visible to you. The parent session never has to invent
+`herdr pane split` / `herdr agent start` — one `subagent` tool call is the
+whole launch path.
 
-```bash
-test "${HERDR_ENV:-}" = 1
-```
+> **Name note.** The package is scoped (`@zzjcool/...`) on purpose: the
+> unscoped name `pi-herdr-subagents` on npm belongs to an unrelated project.
+> Installing that one will not give you this code.
 
-If the check fails, do not attempt delegation; tell the user this extension requires
-running inside Herdr.
+## Contents
+
+- [Requirements](#requirements)
+- [Install](#install)
+- [What the plugin does for you](#what-the-plugin-does-for-you)
+- [Quick start](#quick-start)
+- [Tool reference](#tool-reference)
+- [Bundled roles](#bundled-roles)
+- [Model profiles (cheap / medium / strong)](#model-profiles-cheap--medium--strong)
+- [Settings](#settings)
+- [Custom agents](#custom-agents)
+- [Isolation](#isolation)
+- [Success and failure](#success-and-failure)
+- [Programmatic API](#programmatic-api)
+- [Development](#development)
+- [Known limitations](#known-limitations)
+
+## Requirements
+
+- **Pi** (the coding agent that loads this package as an extension)
+- **Herdr**, with the parent session running **inside** a Herdr pane
+  (`HERDR_ENV=1`). The plugin talks to herdr to create tabs/panes and start
+  child agents; it will not launch anything from a plain terminal Pi.
+- Node.js 22+ if you are developing the package itself
+
+You do **not** need to run `test "$HERDR_ENV" = 1` or `herdr --help` yourself.
+The parent model must not either — the plugin blocks that ritual and checks
+herdr on every launch.
 
 ## Install
 
@@ -26,37 +54,123 @@ running inside Herdr.
 pi install npm:@zzjcool/pi-herdr-subagents
 ```
 
-Or from a local checkout / git:
+From git (picks up commits that are not on npm yet):
 
 ```bash
-pi install /path/to/pi-herdr-subagents
 pi install git:github.com/zzjcool/pi-herdr-subagents
 ```
 
-Requires [Herdr](https://herdr.dev) and `HERDR_ENV=1`. Five roles ship with the
-package (`scout`, `planner`, `worker`, `reviewer`, `oracle`) and are available
-immediately after install — see [Bundled roles](#bundled-roles).
+From a local checkout:
 
-> **Name note.** This package is scoped (`@zzjcool/...`) on purpose: the unscoped
-> name `pi-herdr-subagents` on npm belongs to an unrelated third-party project.
-> Installing that one will not give you this code.
+```bash
+pi install /path/to/herdr-subagents
+```
+
+Then **reload the parent session** (`/reload`, or restart Pi). After install,
+five roles (`scout`, `planner`, `worker`, `reviewer`, `oracle`) are available
+with no extra files to copy — see [Bundled roles](#bundled-roles).
+
+To update a git install: `pi update`. To switch from a path/git install to npm
+once a release is published, remove the old package and `pi install npm:@zzjcool/pi-herdr-subagents`.
+
+## What the plugin does for you
+
+These used to be “please remember this in the prompt.” They are now
+**scripts**. Neither the parent model nor the child has to cooperate for them
+to hold.
+
+| Concern | What happens |
+| --- | --- |
+| Launch | One `subagent` call creates the type tab, splits a pane, starts `pi`, and begins watching. Same agent type shares one tab (each child is a pane). |
+| Status | Running children are painted **above the parent input**. Elapsed time keeps ticking after the tool call returns. |
+| Completion | When a turn finishes, the plugin injects `Background task completed: **name**` into the parent. If the parent is idle it wakes immediately; if it is still in a tool loop, the notice waits (`followUp`) instead of steering mid-turn. |
+| Recycle | Terminal children get `ctrl+d`, then pane close (and the type tab when it is empty). You do not `retire` or close panes. `blocked` is the exception — the pane stays. |
+| Child must not ping the parent | Every child Pi loads a **child-guard** extension. `herdr agent prompt/wait/send-keys/start`, pane split, tab create/close, and reading someone else’s pane are blocked. |
+| Task-card boilerplate | A frozen appendix is appended to every child task: no wakeup, no nested agents, end with `{"ok": true\|false, "reason": "..."}`. |
+| Read-only roles | `acceptance.role: read-only` (scout, reviewer, …) may still have `bash` for `rg` / `git log` / `ls`, but writes (`rm`, `git commit`, `echo > file`, `npm install`, `sed -i`, …) are blocked. |
+| Acceptance | `{"ok": true}` is only **attested**. If a required criterion lists `evidence: [verification-output]` (the bundled `worker` does), collect then runs `npm run typecheck && npm test` in the child’s cwd and promotes the result to **verified** or rejects it. |
+| Tool approval (`blocked`) | `onBlocked: forward` (default) pops a **confirm** in the parent TUI. Yes → `send-keys y` and keep watching. No → deny. No TUI → a notify is queued instead of silently waiting for the parent model to `steer`. `auto-approve` / `notify` are the other policies. |
+| Late `collect` / `retire` | If watch already collected, `collect` returns the cached snapshot. If the pane is already gone, `retire` is a no-op that points at the session file. |
+
+What is still a **judgment** (and must stay one):
+
+- whether to spawn a child, which role, and what the task should say
+- what to do with the completion (accept, `steer`, `continue`, ignore)
+- whether a semantic checklist item like “no secrets in the diff” actually holds
+
+## Quick start
+
+Use the `subagent` tool. **Do not run herdr CLI or env checks first.** Do not
+tell the child to prompt the parent.
+
+```text
+subagent({
+  agent: "reviewer",
+  task: "Review src/foo.ts for regressions. Write findings to /tmp/review.md."
+})
+```
+
+The frozen appendix (verdict JSON, no wakeup) is added automatically. You can
+still write a detailed task card; just do not include “when done, `herdr agent
+prompt` the parent.”
+
+Parallel fan-out — one tool call, then return control:
+
+```text
+subagent({ tasks: [
+  { agent: "worker", task: "<task A>" },
+  { agent: "worker", task: "<task B>" },
+  { agent: "reviewer", task: "<task C>" },
+] })
+```
+
+Steer a running agent (current task abandoned, context kept):
+
+```text
+subagent({ action: "steer", name: "reviewer-0", message: "Stop the API review; focus on the migration script instead." })
+```
+
+Pass `async: false` only when **this turn** must have the result before it
+ends. The default is async: launch, return control, get a completion later.
+
+## Tool reference
+
+| `action` | Purpose |
+| --- | --- |
+| *(omitted)* / `launch` | Start one child (`agent` + `task`) or several (`tasks[]` / `chain[]`) |
+| `steer` | Prompt a live child; it drops the current turn and takes the new message |
+| `continue` | Prompt a live child without abandoning the current turn |
+| `resume` | Relaunch from the session file if the pane is already gone |
+| `status` | Show the persisted record (state, pane, session path, last execution) |
+| `collect` | Wait for the current turn (or return the cache if watch already did) |
+| `list` | Roles the parent can spawn, with provenance (`builtin` / `user` / `project`) |
+| `retire` | Close the pane. After auto-recycle this is a documented no-op |
+
+Useful launch fields: `model`, `cwd`, `placement` (`split-down` / `split-right` /
+`new-tab`), `agentScope` (`user` / `project` / `both`), `async`.
+
+Handles look like `reviewer-0`. `subagent({ action: "list" })` is the way to
+see roles; `status` / `collect` take `name`.
 
 ## Bundled roles
 
-Five role definitions ship inside the package and load with **zero setup**. They are
-anchored to the package itself (not to `~/.pi/agent/agents`), so they are present
-right after install — pi's package resource conventions have no `agents/` slot, so a
-manifest entry alone would be silently ignored.
+Five role definitions ship inside the package and load with **zero setup**.
+They are anchored to the package itself (not to `~/.pi/agent/agents`), because
+Pi’s package resource conventions have no `agents/` slot — a manifest entry
+alone would be silently ignored.
 
-| Role | Purpose | Default model |
+| Role | Purpose | Acceptance |
 | --- | --- | --- |
-| `scout` | Read-only reconnaissance: map code, conventions, environment. Facts only. | parent session (or `subagents.defaultModel`) |
-| `planner` | Turn a task into a parallelisable, verifiable plan; freeze interfaces. | parent session (or `subagents.defaultModel`) |
-| `worker` | Implement a frozen plan; run tests; self-report a verdict. | parent session (or `subagents.defaultModel`) |
-| `reviewer` | Read-only adversarial review; findings with path + severity. | parent session (or `subagents.defaultModel`) |
-| `oracle` | Final arbitration on a contested plan. | parent session (or `subagents.defaultModel`) |
+| `scout` | Read-only reconnaissance: map code, conventions, environment. Facts only. | attested, **read-only** bash |
+| `planner` | Turn a task into a parallelisable, verifiable plan; freeze interfaces. | attested |
+| `worker` | Implement a frozen plan; run tests; self-report a verdict. | **verified** via `npm run typecheck && npm test` |
+| `reviewer` | Read-only adversarial review; findings with path + severity. | attested, **read-only** bash |
+| `oracle` | Final arbitration on a contested plan. | attested |
 
-Bundled roles do **not** pin a vendor model. A child uses the parent session's model unless you set `subagents.defaultModel`, `subagents.agentOverrides.<name>.model`, pass `model` on the tool call, or [load a model profile](#model-profiles-cheap--medium--strong).
+Bundled roles do **not** pin a vendor model. A child uses the parent session’s
+model unless you set `subagents.defaultModel`,
+`subagents.agentOverrides.<name>.model`, pass `model` on the tool call, or
+[load a model profile](#model-profiles-cheap--medium--strong).
 
 Precedence, lowest to highest — later layers override earlier ones by name:
 
@@ -64,20 +178,19 @@ Precedence, lowest to highest — later layers override earlier ones by name:
 builtin (shipped)  <  extra dirs  <  ~/.pi/agent/agents  <  <project>/.pi/agents
 ```
 
-So you can shadow any bundled role with your own definition of the same name.
+Shadow any bundled role by putting a same-name `*.md` in `~/.pi/agent/agents`
+or `<repo>/.pi/agents`.
 
-- `subagents.disableBuiltins: true` in settings drops the bundled layer entirely.
-- `PI_HERDR_SUBAGENTS_EXTRA_AGENT_DIRS` (PATH-style) injects extra read-only role
-directories — for a Nix store, a container, or a read-only mount, where copying
-into `~/.pi/agent/agents` is not possible.
-- `subagent action=list` shows every role with its provenance tag (`builtin`,
-`user`, or `project`).
+- `subagents.disableBuiltins: true` drops the bundled layer entirely.
+- `PI_HERDR_SUBAGENTS_EXTRA_AGENT_DIRS` (PATH-style) injects extra read-only
+  role directories — Nix store, container, read-only mount.
+- `subagent({ action: "list" })` shows every role with its provenance tag.
 
 ## Model profiles (cheap / medium / strong)
 
-Same workflow as pi-subagents: classify a provider's models into three capability
-tiers, then bind roles to those tiers so you do not have to change the parent
-session model every time.
+Same workflow as pi-subagents: classify a provider’s models into three
+capability tiers, then bind roles to those tiers so you do not have to change
+the parent session model every time.
 
 | Tier | Roles |
 | --- | --- |
@@ -91,10 +204,11 @@ session model every time.
 /subagents-load-profile <provider>.quota
 ```
 
-That writes two profiles (`<provider>.quota` leans cheaper, `<provider>.quality`
-leans stronger) under `~/.pi/agent/profiles/pi-herdr-subagents/` and, on load,
-copies `agentOverrides` into `~/.pi/agent/settings.json`. Project
-`.pi/settings.json` still wins on overlapping keys.
+That writes two profiles (`<provider>.quota` leans cheaper,
+`<provider>.quality` leans stronger) under
+`~/.pi/agent/profiles/pi-herdr-subagents/` and, on load, copies
+`agentOverrides` into `~/.pi/agent/settings.json`. Project `.pi/settings.json`
+still wins on overlapping keys.
 
 Other commands: `/subagents-profiles` lists saved profiles;
 `/subagents-check-profile <name>` re-checks each assigned model against the
@@ -117,205 +231,222 @@ You can still hand-write the same mapping:
 }
 ```
 
-## The mental model
+## Settings
 
-| You might assume | Reality (measured) |
+Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
+(project). Project wins on overlap.
+
+```json
+{
+  "subagents": {
+    "defaultModel": "provider/id",
+    "disableBuiltins": false,
+    "maxSubagentSpawnsPerSession": 8,
+    "agentOverrides": {
+      "worker": { "model": "provider/id", "thinking": "medium" }
+    },
+    "agentOverridesByProvider": {
+      "cb": { "worker": { "model": "cb/glm-5.3" } }
+    },
+    "modelScope": { "allow": ["cb/*", "openai/*"] },
+    "herdr": {
+      "defaultPlacement": "split-down",
+      "maxConcurrentAgents": 6,
+      "startRetries": 40,
+      "startRetryBackoffMs": 150,
+      "sessionRetentionDays": 7
+    }
+  }
+}
+```
+
+| Key | Meaning |
 | --- | --- |
-| Subagent is a function call | It is a supervised live process in a pane |
-| `done` means finished | `done` means "finished this turn" — the process is still alive |
-| `agent_status` tells success/failure | It does **not**: success, model error, and kill all report `done` |
-| Parent death kills children | Children keep running and complete their task |
-| Isolation is enforced | **It is not** — see [Isolation](#isolation-discipline-not-enforcement) |
+| `defaultModel` | Fallback model for roles that do not pin one |
+| `agentOverrides` | Per-role field overlay (`model`, `thinking`, `tools`, `disabled`, …) |
+| `agentOverridesByProvider` | Same overlay, keyed by the **parent** provider id |
+| `modelScope.allow` | Glob list of `provider/id` the parent may assign. Explicit tool `model` is an error if it misses; inherited is a warning |
+| `disableBuiltins` | Do not load the five shipped roles |
+| `maxSubagentSpawnsPerSession` | Hard cap on how many children this session may start |
+| `herdr.maxConcurrentAgents` | Layout / density hint (default 6) |
+| `herdr.startRetries` | `agent_pane_busy` retries (default 40 × 150ms+) |
 
-Two orthogonal dimensions, never conflate them:
+Run records and child session jsonl live under `<cwd>/.pi-subagents/`. That
+directory is the resume credential; do not delete it while you still want to
+`resume` a child.
 
-- **Lifecycle** (`launching → working → awaiting → retired/exited`): is the process alive?
-- **Execution outcome** (`success / failed / aborted / truncated / running`): did the
-  task succeed? Derived ONLY from the session jsonl `stopReason` of the last turn.
+## Custom agents
 
-`state: retired` + `execution.status: failed` is a normal, expected combination.
+A role is a markdown file with YAML frontmatter + a system prompt body:
 
-## Quick start
+```markdown
+---
+name: researcher
+description: Read-only paper/code survey
+tools: read, grep, find, ls, bash
+timeoutMs: 600000
+acceptance:
+  level: attested
+  role: read-only
+kind: pi
+placement: split-down
+steer: true
+onBlocked: forward
+---
 
-Use the `subagent` tool. One call is the whole launch path (tab → pane → start
-→ watch). **Do not run herdr CLI or env checks first.** The child runs in a
-Herdr pane, status shows next to the parent input, and this extension wakes
-the parent with a completion message. **Do not tell the child to prompt the
-parent.**
-
-```text
-subagent({
-  agent: "reviewer",
-  task: "Review src/foo.ts for regressions. Write findings to /tmp/review.md. End with {\"ok\": true|false, \"reason\": \"...\"}."
-})
+You are a read-only researcher. Facts with paths. No edits.
 ```
 
-Parallel fan-out — one tool call, then return control:
+Put it in `~/.pi/agent/agents/researcher.md` (user) or
+`<repo>/.pi/agents/researcher.md` (project). Required fields: `name`,
+`description`. Useful optional fields: `model`, `thinking`, `tools`, `skills`,
+`timeoutMs`, `placement`, `onBlocked` (`forward` / `auto-approve` / `notify`),
+`acceptance.role` (`read-only` / `writer`), `acceptance.criteria` with
+`evidence: [verification-output]` if collect should actually run tests.
 
-```text
-subagent({ tasks: [
-  { agent: "worker", task: "<task A>" },
-  { agent: "worker", task: "<task B>" },
-  { agent: "reviewer", task: "<task C>" },
-] })
-```
+`subagent({ action: "list" })` prints `⚠ not enforced yet: …` for keys that
+are parsed but not acted on (`worktree`, `toolBudget`, `turnBudget`,
+`fallbackModels`, `allowNestedSubagents`, …). A listed key that does nothing
+is worse than an unknown key — if you see that warning, the field is
+decoration.
 
-Steer a running agent (its current task is abandoned, context kept):
+## Isolation
 
-```text
-subagent({ action: "steer", name: "reviewer-0", message: "Stop the API review; focus on the migration script instead." })
-```
+Herdr panes are **one trust domain**. A child can in principle `herdr pane
+read` any pane in the session (measured: F23). We now **enforce** a subset of
+that discipline; the rest is still on you.
 
-Pass `async: false` only when this turn must have the result before it ends.
+**Enforced in the child process**
 
-## Success/failure model
+- `herdr agent prompt|wait|send-keys|start`
+- `herdr pane split`, `herdr tab create|close`
+- `herdr pane read|close` of a pane that is not this child’s
+- for `acceptance.role: read-only`: filesystem writes, `git` mutations,
+  package-manager installs, `sed -i`, redirects onto files
 
-**herdr cannot tell you whether an agent succeeded.** You must derive it from the
-agent's session jsonl:
+**Still not a sandbox**
 
-| Signal | Meaning |
+- `HERDR_SOCKET_PATH` cannot be overridden per pane (F24)
+- a true isolated session would break the visible/steerable model (F25)
+- never put secrets on screen in any pane while children run
+- owner tokens: recycle only panes the tree registered; skip + warn otherwise
+
+If a task genuinely needs isolation, run it **outside** herdr (plain `pi`, no
+`HERDR_ENV`), rather than pretending panes are sandboxed.
+
+## Success and failure
+
+**herdr `agent_status` cannot tell you whether an agent succeeded.** Success,
+model error, and kill all report `done`. The plugin derives outcome from the
+child’s session jsonl (`stopReason` of the last turn) and from the
+machine-readable verdict.
+
+Two orthogonal dimensions — never conflate them:
+
+- **Lifecycle** (`launching → working → awaiting → blocked → retired/exited`):
+  is the process alive?
+- **Execution** (`success / failed / aborted / truncated / running`): did the
+  task succeed?
+
+`state: retired` + `execution.status: failed` is a normal combination.
+
+| Session signal | Execution |
 | --- | --- |
-| Last turn's assistant `stopReason: "stop"` | success |
-| `stopReason: "error"` (message without "aborted") | failed |
-| `stopReason: "error"` + "This operation was aborted" | aborted (graceful esc) |
+| Last turn `stopReason: "stop"` | success |
+| `stopReason: "error"` without “aborted” | failed |
+| `stopReason: "error"` + “This operation was aborted” | aborted |
 | Last user prompt with **no** assistant message | aborted (killed mid-turn) |
-| Last assistant message is `stopReason: "toolUse"` | aborted (terminated during a tool call) |
+| Last assistant `stopReason: "toolUse"` and the agent is gone | aborted |
+| Last assistant `toolUse` and herdr says `blocked` | not terminal — confirm / wait |
 | `stopReason: "length"` | truncated |
-| No messages at all | unknown |
+| No messages | unknown |
 
-Rules that surprise people:
+On top of that:
 
-- **Only the last turn decides the outcome.** A tool error (`toolResult.isError: true`)
-  in turn 1 followed by a clean turn 2 is overall **success**; tool errors are
-  diagnostics, never status (they are counted in `toolErrors`).
-- **"aborted" is never written as a stopReason.** Graceful interruption writes
-  `error` + an "aborted" message; a hard kill writes no assistant message at all.
-- **Self-reported failure is invisible to the execution layer.** An agent that replies
-  "FAILED: ..." still has `stopReason: "stop"` and status `done`. Require every child
-  to end with a machine-readable verdict, and treat `{"ok": false}` as rejection:
-  `{"ok": true, "reason": "..."}` or `{"ok": false, "reason": "..."}`.
-- **Recycle destroys the evidence.** After the agent exits, `agent get` returns
-  `agent_not_found`. Always collect/derive the outcome (and snapshot it into the run
-  record) **before** retiring the pane.
+- **Only the last turn decides execution.** A tool error in turn 1 followed by
+  a clean turn 2 is overall success. `toolErrors` is diagnostic only.
+- **Self-report is attested, not verified.** `{"ok": true}` is the agent
+  marking its own homework. Worker’s `verification-output` criterion is the
+  exception: the plugin runs the test command itself.
+- **Recycle destroys live evidence** (`agent get` → `agent_not_found`). The
+  plugin collects and snapshots `execution` into `.pi-subagents/run.json`
+  **before** closing the pane. Resume uses the session file, not the pane.
 
-## Recycling (unconditional)
+## Programmatic API
 
-Closing the pane loses nothing: the session jsonl on disk is strictly more
-informative than the pane (error messages, stopReason, tool errors, usage). So
-recycle unconditionally once the task reaches a terminal state:
+Hosts that are not the Pi `subagent` tool can drive the same machinery:
 
-1. Task is terminal (`awaiting` / `retired` / `failed` / `aborted`).
-   **Exception:** `blocked` is not terminal — the agent is alive waiting for an
-   approval; keep the pane (and back any blocked decision with a timeout; the
-   detection has a false-positive rate).
-2. **Collect first** (derive outcome from session jsonl, persist it).
-3. Graceful exit: `herdr agent send-keys <name> ctrl+d` —
-   **twice if needed**, wait ~2s.
-   Never `ctrl+c`; measured to leave the agent alive.
-4. Still alive? `herdr pane close <pane-id>` (session file survives, resume works).
-5. Batch fallback: `herdr tab close <tab-id>` empties the whole task tab atomically.
-6. Mark retired; keep session files per retention policy.
+```ts
+import {
+  createHerdrClient,
+  Orchestrator,
+  loadAgentsFromDir,
+} from "@zzjcool/pi-herdr-subagents/api";
 
-Resume a retired agent in a fresh pane (context fully preserved):
+const client = createHerdrClient();
+const [scout] = loadAgentsFromDir("/path/to/agents", "user");
+const orch = new Orchestrator({
+  client,
+  runDir: "/tmp/run",
+  cwd: process.cwd(),
+});
+const handle = await orch.launch({ agent: scout, task: "survey the repo" });
+const result = await orch.collect(handle.name);
+```
+
+Everything re-exported from `./api` is covered by the test suite. Do not import
+from `src/` directly.
+
+## Development
 
 ```bash
-herdr pane split --current --direction down --cwd "$PWD" --no-focus
-herdr agent start reviewer-1 --kind pi --pane <pane-id> -- --session <session-file>
+git clone https://github.com/zzjcool/pi-herdr-subagents.git
+cd pi-herdr-subagents
+npm install
+npm run typecheck
+npm test                 # unit
+npm run test:integration # fake herdr, no live binary
 ```
 
-## Tab organisation
+Live tests (`npm run test:live`) need a real herdr on `PATH` and
+`HERDR_ENV=1`. They are skipped otherwise.
 
-```text
-workspace = project/repo boundary (follows cwd)
-  tab     = one task
-    pane  = one subagent
-```
-
-- **Tab is the isolation boundary and the batch-recycle unit.** One task per tab when
-  tasks are unrelated or long-lived; split into the current tab for a single agent or
-  2–4 closely related parallel agents.
-- `placement: split-down | split-right | new-tab` in agent
-  frontmatter picks the layout.
-- Orphan audit: after recycling, compare
-  `herdr pane list --workspace <ws>` panes in
-  the task tab against registered children; unregistered panes mean something created
-  panes outside the tree.
-- `herdr tab rename <tab-id> <label>` is cheap (~20ms) —
-  use it as a live status board.
-
-## CLI quick reference (verified flags only)
+Container checks (host Pi config bind-mounted, package at `/plugin`) live in
+`test/docker/`. Each numbered script is one feature:
 
 ```bash
-herdr pane split --current --direction <right|down> [--cwd <path>] [--no-focus] [--env KEY=VALUE]
-herdr pane close <pane_id>
-herdr pane read <PANE_ID> [--source visible|recent|recent-unwrapped|detection] [--lines <N>]
-herdr pane list [--workspace <WORKSPACE_ID>]
-herdr tab create [--workspace <ID>] [--cwd <path>] [--label <text>] [--no-focus]
-herdr tab close <tab_id>
-herdr tab rename <TAB_ID> <LABEL>
-herdr agent start <NAME> --kind <KIND> --pane <ID> [--timeout <MS>] [-- <agent args>]
-herdr agent prompt <TARGET> <TEXT> [--wait] [--until <STATUS>] [--timeout <MS>]
-herdr agent wait <TARGET> [--until <STATUS>] [--timeout <MS>]
-herdr agent read <TARGET> [--source <SOURCE>] [--lines <N>]
-herdr agent send-keys <TARGET> <KEY>...
+bash test/docker/verify-1-child-guard.sh
+bash test/docker/verify-2-task-appendix.sh
+bash test/docker/verify-3-readonly.sh
+bash test/docker/verify-4-acceptance.sh
+bash test/docker/verify-5-blocked.sh
+bash test/docker/verify-6-cache.sh
 ```
 
-Notes:
+They expect image `pi-herdr-sandbox:latest` and copy `~/.pi/agent/{settings,models,auth}.json`
+into a disposable home so the container uses your providers without writing
+back. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-- Agent names must match `[a-z][a-z0-9_-]{0,31}`. A name is released when the agent
-  exits and may be reused; while alive, reuse fails with `agent_name_taken`.
-- Parallel `agent start` races with `agent_pane_busy` (2/6 failures measured with no
-  delay). Retry with backoff (≈150ms + 50ms·i) eliminates it completely.
-- Errors come as `{"error":{code,message}}` JSON on **stderr** with exit code 1.
-- A missing agent binary does not fail loudly: `agent start` times out (~15s). Probe
-  `which <binary>` before starting non-pi kinds.
-- `agent read` returns rendered terminal text, not JSON. Programmatic diagnostics
-  belong in the session jsonl; `pane read` is for human eyes.
-- Non-pi kinds (claude, codex, …) expose no session ref: no usage, no stopReason,
-  outcome can only be `unknown`. Use `pi` kind when you need reliable accounting.
-
-## Isolation: discipline, not enforcement
-
-**There is no enforced isolation between herdr panes.** Measured findings:
-
-- **F23** — a child agent can `herdr pane read` ANY pane in the session, including
-  yours and the user's. A rouge or prompt-injected child can exfiltrate whatever is
-  on screen (verified with a planted secret).
-- **F24** — `HERDR_SOCKET_PATH` cannot be overridden per-pane via `--env`; herdr
-  reserves it, so children cannot even be pointed at a restricted socket.
-- **F25** — the only real isolation is a named session (separate socket + server),
-  which breaks the visible/steerable model this extension exists for.
-
-Treat the whole herdr session as a **single trust domain**. This is a trusted internal
-tool, not an untrusted-code sandbox:
-
-1. **Tab boundary + orphan audit** — contain and detect, cannot prevent.
-2. **Tool allowlists** — agents that do not need `bash` or `edit` must not have them
-   (the built-in `reviewer` is read-only by frontmatter).
-3. **Prompt discipline** — every child's system prompt explicitly forbids touching
-   panes outside its own task.
-4. **Never put secrets on screen** in panes a child can read while it runs.
-5. **Owner tokens** — children are recorded with an owner token; recycle only panes
-   the tree registered, and skip + warn on anything else.
-
-If a task genuinely needs isolation, run it outside herdr (fresh `pi` process without
-herdr env) rather than pretending panes are sandboxed.
+The measured design (findings F1–F46, why session jsonl is the source of
+truth, why recycle is unconditional) is [docs/design.md](docs/design.md).
+Historical “this field is parsed but inert” notes in that file may predate
+the runtime table above — trust this README and `action=list`’s
+`unenforcedFields` for what is actually wired.
 
 ## Known limitations
 
-- **No isolation** (F23–F25): as above. Discipline + audit only.
-- **`agent_status` has no success/failure semantics** (F26): never gate on it; read
-  the session jsonl.
-- **`agent get` has no error field** (F27): after exit everything is gone — collect
-  before recycle.
-- **Non-pi kinds degrade** (F7): no usage, no cost, no reliable outcome (only
-  `unknown`); resume depends on each CLI's own support.
-- **`blocked` detection is screen-heuristic** (F10/F8 family): false positives exist;
-  always pair with a timeout.
-- **`pane process-info` cannot classify working/idle** (measured: empty diff): use
-  jsonl quiet-window + message counts instead.
-- **Panes are scarce** (screen real estate): cap concurrency
-  (`herdr.maxConcurrentAgents`, default 6); pool warm panes is not worth it (~0.9s
-  saved vs ~3s cold start).
-- **herdr version coupling**: verify `herdr --help` before relying on a flag; this
-  doc only lists flags verified against the installed binary.
+- **Not a sandbox** (F23–F25): child-guard covers bash/herdr dispatch and
+  read-only writes; it does not give you process isolation.
+- **`agent_status` has no success/failure semantics** (F26).
+- **Non-pi kinds degrade** (F7): no usage, no reliable outcome (`unknown`);
+  resume depends on each CLI.
+- **`blocked` is screen-heuristic**: false positives exist; the confirm is
+  paired with the collect timeout as a backstop.
+- **Verification command is frozen** to `npm run typecheck && npm test` for
+  `verification-output` criteria. Other evidence types stay a checklist.
+- **Panes are scarce**: cap fan-out (`maxSubagentSpawnsPerSession` /
+  `herdr.maxConcurrentAgents`). Warm-pane pooling is not worth it (~0.9s).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
