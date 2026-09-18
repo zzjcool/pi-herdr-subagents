@@ -755,23 +755,27 @@ async function launchStep(
 		return;
 	}
 
-	const model = resolveStepModel(session, agent, step);
-	// When a preset is referenced this carries the preset's kind/model/thinking;
-	// otherwise it is the ORIGINAL agent object (zero drift for no-preset runs).
-	const effective = model.agent;
-	const resolved = model.resolved;
-
-	const violation = checkModelScope(
-		resolved.model,
-		session.settings.modelScope,
-		"explicit",
-	);
-	if (violation && violation.severity === "error") {
-		session.results.push(`✗ ${violation.message}`);
-		return;
-	}
-
 	try {
+		// Preset expansion and the scope check can THROW (an undefined preset is
+		// a loud error by design), so both run INSIDE the guard. Leaving them
+		// above it let a single bad `preset:` reject the whole `Promise.all`,
+		// discarding the refusal lines of every healthy sibling step.
+		const model = resolveStepModel(session, agent, step);
+		// When a preset is referenced this carries the preset's kind/model/thinking;
+		// otherwise it is the ORIGINAL agent object (zero drift for no-preset runs).
+		const effective = model.agent;
+		const resolved = model.resolved;
+
+		const violation = checkModelScope(
+			resolved.model,
+			session.settings.modelScope,
+			"explicit",
+		);
+		if (violation && violation.severity === "error") {
+			session.results.push(`✗ ${violation.message}`);
+			return;
+		}
+
 		// Let `launch()` allocate: it consults the GLOBAL herdr name namespace.
 		// Pre-allocating here from local state alone would bypass that check and
 		// collide with another session's agent.

@@ -21,6 +21,8 @@
 
 import {
 	AGENT_KINDS,
+	ErrorCodes,
+	SubagentError,
 	type AgentConfig,
 	type AgentKind,
 	type ModelSourceInfo,
@@ -140,8 +142,11 @@ export function requirePreset(
 	const suffix = defined.length
 		? `Defined: ${defined.join(", ")}.`
 		: "None are defined.";
-	throw new Error(
+	// A `SubagentError` gives the refusal line a code instead of a bare
+	// `Error:` prefix (see `launchStep`'s catch), matching every other refusal.
+	throw new SubagentError(
 		`Preset '${name}' is not defined in subagents.presets. ${suffix}`,
+		ErrorCodes.INVALID_PARAMS,
 	);
 }
 
@@ -158,9 +163,10 @@ export function assertKindModelCoherent(
 ): void {
 	if (!model) return;
 	if (nativeModelFor(kind, model) === undefined) {
-		throw new Error(
+		throw new SubagentError(
 			`Preset '${presetName}' sets model '${model}', which kind '${kind}' cannot accept ` +
 				`(it would be silently dropped at start). Fix the preset's kind or model.`,
+			ErrorCodes.INVALID_PARAMS,
 		);
 	}
 }
