@@ -21,6 +21,12 @@ import {
 	type StatusEntry,
 	type StatusUi,
 } from "../tui/status.ts";
+import {
+	mergeProgress,
+	progressFromSessionFile,
+	type LiveProgress,
+} from "../shared/progress.ts";
+import type { AgentKind } from "../shared/types.ts";
 
 export interface CollectSnapshot {
 	execution: { status: string; reason?: string };
@@ -45,6 +51,15 @@ export interface TrackedJobInput {
 	sessionFile: string;
 	spawnedAt?: number;
 	timeoutMs: number;
+	kind?: AgentKind;
+	model?: string;
+	thinking?: string | false;
+	worktreeBranch?: string;
+	/**
+	 * Extra live fields when session jsonl is missing or incomplete (non-pi
+	 * kinds). Called on a slower cadence than the widget tick.
+	 */
+	probe?: () => Promise<LiveProgress>;
 	collect: () => Promise<CollectSnapshot>;
 	persist?: (snapshot: CollectSnapshot) => Promise<void>;
 	/** Recycle the pane after a terminal collect. Blocked children stay open. */
@@ -66,6 +81,9 @@ export interface TrackedJob extends TrackedJobInput {
 	watching: boolean;
 	generation: number;
 	collectPromise?: Promise<CollectSnapshot>;
+	probed?: LiveProgress;
+	probePromise?: Promise<void>;
+	lastProbeAt?: number;
 }
 
 export interface SessionRuntimeDeps {
@@ -73,9 +91,12 @@ export interface SessionRuntimeDeps {
 	emitBusy?: (active: boolean, label?: string) => void;
 	now?: () => number;
 	refreshMs?: number;
+	/** How often to call `probe` (non-pi live fields). */
+	probeMs?: number;
 }
 
 const DEFAULT_REFRESH_MS = 500;
+const DEFAULT_PROBE_MS = 2_000;
 
 /** Recycle after collect unless the child is still waiting on the user. */
 export function shouldRecycleAfterCollect(status: string): boolean {
@@ -103,6 +124,7 @@ export interface SessionRuntime {
 export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 	const now = deps.now ?? Date.now;
 	const refreshMs = deps.refreshMs ?? DEFAULT_REFRESH_MS;
+	const probeMs = deps.probeMs ?? DEFAULT_PROBE_MS;
 	const jobs = new Map<string, TrackedJob>();
 	const finished = new Map<string, CollectSnapshot>();
 	const board = createStatusBoard();
@@ -115,12 +137,33 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 		[...jobs.values()]
 			.filter((job) => job.state !== "retired")
 			.sort((a, b) => a.spawnedAt - b.spawnedAt)
-			.map((job) => ({
-				name: job.name,
-				agent: job.agent,
-				state: job.state,
-				startedAt: job.spawnedAt,
-			}));
+			.map(statusEntryFromJob);
+
+	const kickProbes = (): void => {
+		if (disposed) return;
+		const t = now();
+		for (const job of jobs.values()) {
+			if (!job.probe || job.probePromise) continue;
+			if (job.lastProbeAt !== undefined && t - job.lastProbeAt < probeMs) {
+				continue;
+			}
+			job.lastProbeAt = t;
+			job.probePromise = job
+				.probe()
+				.then((live) => {
+					if (disposed || jobs.get(job.name) !== job) return;
+					job.probed = live;
+					board.paint(entries(), now());
+					syncBusy();
+				})
+				.catch(() => {
+					/* live fields are best-effort */
+				})
+				.finally(() => {
+					if (jobs.get(job.name) === job) job.probePromise = undefined;
+				});
+		}
+	};
 
 	const syncBusy = (): void => {
 		const list = entries();
@@ -141,6 +184,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 		if (disposed) return;
 		board.paint(entries(), now());
 		syncBusy();
+		kickProbes();
 	};
 
 	const ensureTimer = (): void => {
@@ -188,6 +232,11 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 				existing.sessionFile = input.sessionFile;
 				existing.agent = input.agent;
 				existing.runId = input.runId;
+				existing.kind = input.kind;
+				existing.model = input.model;
+				existing.thinking = input.thinking;
+				existing.worktreeBranch = input.worktreeBranch;
+				existing.probe = input.probe;
 				existing.state = "working";
 				ensureTimer();
 				refreshUi();
@@ -345,4 +394,26 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 	};
 
 	return runtime;
+}
+
+function statusEntryFromJob(job: TrackedJob): StatusEntry {
+	const live = mergeProgress(
+		progressFromSessionFile(job.sessionFile),
+		job.probed,
+	);
+	const model = live.model ?? job.model;
+	const thinking = live.thinking ?? job.thinking;
+	return {
+		name: job.name,
+		agent: job.agent,
+		state: job.state,
+		startedAt: job.spawnedAt,
+		...(job.kind ? { kind: job.kind } : {}),
+		...(model ? { model } : {}),
+		...(thinking !== undefined ? { thinking } : {}),
+		...(job.worktreeBranch ? { worktreeBranch: job.worktreeBranch } : {}),
+		...(live.herdrStatus ? { herdrStatus: live.herdrStatus } : {}),
+		...(live.turns ? { turns: live.turns } : {}),
+		...(live.lastTools?.length ? { lastTools: live.lastTools } : {}),
+	};
 }

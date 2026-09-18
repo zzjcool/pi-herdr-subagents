@@ -1,8 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createSessionRuntime } from "../../src/extension/runtime.ts";
 import { SUBAGENT_NOTIFY_TYPE } from "../../src/extension/notify.ts";
 import type { CollectSnapshot } from "../../src/extension/runtime.ts";
+import { withTempDir } from "../helpers/tmp.ts";
+import { assistantMsg, modelChange, sessionHeader, userMsg } from "../helpers/fixtures.ts";
 
 function snapshot(over: Partial<CollectSnapshot> = {}): CollectSnapshot {
 	return {
@@ -268,4 +272,94 @@ test("runtime: approving a blocked child rewatches instead of releasing", async 
 	await waitFor(() => collects >= 2, "rewatch after approve");
 	await waitFor(() => runtime.activeJobs().length === 0, "terminal release");
 	assert.equal(collects, 2);
+});
+
+test("runtime: session jsonl fills model, turns, and in-flight tools", async () => {
+	await withTempDir(async (dir) => {
+		const sessionFile = join(dir, "worker-0.jsonl");
+		writeFileSync(
+			sessionFile,
+			[
+				sessionHeader(),
+				modelChange("cb/glm-5.3"),
+				userMsg("go"),
+				assistantMsg({
+					stopReason: "toolUse",
+					tools: ["bash"],
+					model: "cb/glm-5.3",
+				}),
+			].join("\n"),
+		);
+		const rendered: string[] = [];
+		const runtime = createSessionRuntime({
+			sendMessage() {},
+			now: () => 5_000,
+		});
+		runtime.bind({
+			hasUI: true,
+			ui: {
+				theme: { fg: (_c, text) => text },
+				setStatus() {},
+				setWidget(_key, content) {
+					if (typeof content === "function") {
+						const component = content({ requestRender() {} }, {
+							fg: (_c, text) => text,
+						});
+						rendered.splice(0, rendered.length, ...component.render());
+					}
+				},
+			},
+		});
+		runtime.track({
+			name: "worker-0",
+			runId: "r-1",
+			agent: "worker",
+			sessionFile,
+			timeoutMs: 1_000,
+			kind: "pi",
+			thinking: "medium",
+			worktreeBranch: "pi-subagent/worker-0-abcd",
+			collect: () => new Promise(() => {}),
+		});
+		assert.match(rendered.join("\n"), /cb\/glm-5\.3:medium/);
+		assert.match(rendered.join("\n"), /turn 1/);
+		assert.match(rendered.join("\n"), /bash/);
+		assert.match(rendered.join("\n"), /wt worker-0-abcd/);
+		runtime.dispose();
+	});
+});
+
+test("runtime: non-pi probe fills the same live fields", async () => {
+	const runtime = createSessionRuntime({
+		sendMessage() {},
+		now: () => 1_000,
+		probeMs: 0,
+	});
+	runtime.track({
+		name: "cursor-0",
+		runId: "r-1",
+		agent: "reviewer",
+		sessionFile: "",
+		timeoutMs: 1_000,
+		kind: "cursor",
+		model: "inherit-parent",
+		probe: async () => ({
+			model: "cursor/gpt-4.1",
+			herdrStatus: "working",
+			turns: 2,
+			lastTools: ["edit"],
+		}),
+		collect: () => new Promise(() => {}),
+	});
+	await waitFor(
+		() => runtime.get("cursor-0")?.probed?.model === "cursor/gpt-4.1",
+		"probe result",
+	);
+	assert.deepEqual(runtime.get("cursor-0")?.probed, {
+		model: "cursor/gpt-4.1",
+		herdrStatus: "working",
+		turns: 2,
+		lastTools: ["edit"],
+	});
+	runtime.dispose();
 });

@@ -43,7 +43,7 @@ test("formatBusyLabel matches the herdr overlay copy", () => {
 	);
 });
 
-test("formatWidgetLines matches the pi-subagents async roster", () => {
+test("formatWidgetLines keeps the compact roster when no extra fields are set", () => {
 	assert.deepEqual(formatWidgetLines([], 5_000), []);
 	assert.deepEqual(formatWidgetLines(entries.slice(0, 1), 5_000), [
 		"● worker-0 (worker) · 4s",
@@ -55,6 +55,52 @@ test("formatWidgetLines matches the pi-subagents async roster", () => {
 	assert.equal(lines[2], "│    ⎿  working");
 	assert.equal(lines[3], "└─ ● reviewer-1 (reviewer) · 3s");
 	assert.equal(lines[4], "     ⎿  working");
+});
+
+test("formatWidgetLines adds model, thinking, kind, tools, and worktree", () => {
+	assert.deepEqual(
+		formatWidgetLines(
+			[
+				{
+					name: "worker-0",
+					agent: "worker",
+					state: "working",
+					startedAt: 1_000,
+					model: "cb/glm-5.3",
+					thinking: "medium",
+					turns: 2,
+					lastTools: ["bash", "read"],
+					worktreeBranch: "pi-subagent/worker-0-abcd",
+				},
+			],
+			5_000,
+		),
+		[
+			"● worker-0 (worker) · cb/glm-5.3:medium · 4s",
+			"  ⎿  working · turn 2 · bash, read · wt worker-0-abcd",
+		],
+	);
+	assert.deepEqual(
+		formatWidgetLines(
+			[
+				{
+					name: "cursor-0",
+					agent: "reviewer",
+					state: "working",
+					startedAt: 1_000,
+					kind: "cursor",
+					model: "cursor/gpt-4.1",
+					herdrStatus: "working",
+					lastTools: ["edit"],
+				},
+			],
+			5_000,
+		),
+		[
+			"● cursor-0 (reviewer) · cursor · cursor/gpt-4.1 · 4s",
+			"  ⎿  working · edit",
+		],
+	);
 });
 
 test("applyStatus paints above the editor and in the footer", () => {

@@ -6,8 +6,9 @@
  *   - messages are `{"type":"message","message":{role, content, stopReason, ...}}`
  *   - toolResult errors carry `isError: true` (exp12-4)
  *
- * Only `type === "message"` events influence parseSessionText/deriveOutcome;
- * the header builders exist so tests exercise realistic transcripts.
+ * Only `type === "message"` events influence deriveOutcome. `model_change`
+ * headers populate `parsed.model` so the status widget can show the live
+ * model before the first assistant message.
  */
 
 /** Default usage block, overridable field by field. */

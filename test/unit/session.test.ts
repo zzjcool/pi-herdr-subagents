@@ -149,6 +149,22 @@ test("extractVerdict on fenced ```json block parses the JSON inside", () => {
 
 // ── Supplementary behaviour required by the spec text ─────────────────────────
 
+test("model_change header populates parsed.model before any assistant message", () => {
+	const parsed = parseLines(sessionHeader(), modelChange("cb/glm-5.3-flash"));
+	assert.equal(parsed.model, "cb/glm-5.3-flash");
+	assert.equal(parsed.turns.length, 0);
+	assert.equal(deriveOutcome(parsed).status, "unknown");
+});
+
+test("assistant model overrides an earlier model_change", () => {
+	const parsed = parseLines(
+		modelChange("cb/old"),
+		userMsg("go"),
+		assistantMsg({ stopReason: "stop", text: "ok", model: "cb/new" }),
+	);
+	assert.equal(parsed.model, "cb/new");
+});
+
 test("parseSessionFile: missing file → empty ParsedSession (no throw)", () => {
 	const parsed = parseSessionFile("/nonexistent/path/session.jsonl");
 	assert.equal(parsed.output, "");

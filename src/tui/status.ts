@@ -7,6 +7,8 @@
  * plus `requestRender`, not a one-shot `string[]` on a dying context.
  */
 
+import { isThinkingLevel } from "../shared/types.ts";
+
 export const STATUS_WIDGET_KEY = "herdr-subagent-status";
 export const STATUS_FOOTER_KEY = "herdr-subagents";
 export const STATUS_WIDGET_PLACEMENT = "aboveEditor" as const;
@@ -17,6 +19,12 @@ export interface StatusEntry {
 	state: string;
 	startedAt: number;
 	herdrStatus?: string;
+	kind?: string;
+	model?: string;
+	thinking?: string | false;
+	worktreeBranch?: string;
+	turns?: number;
+	lastTools?: string[];
 }
 
 export function formatElapsed(ms: number): string {
@@ -48,6 +56,61 @@ function entryStatus(entry: StatusEntry): string {
 	return entry.herdrStatus ?? entry.state;
 }
 
+function formatModel(entry: StatusEntry): string | undefined {
+	const raw = entry.model?.trim();
+	if (!raw) return undefined;
+	const idx = raw.lastIndexOf(":");
+	const suffix = idx === -1 ? undefined : raw.slice(idx + 1);
+	const suffixIsThinking = Boolean(suffix && isThinkingLevel(suffix));
+	const base = suffixIsThinking ? raw.slice(0, idx) : raw;
+	const fromModel =
+		suffixIsThinking && suffix !== "off" ? suffix : undefined;
+	const thinking =
+		fromModel ??
+		(typeof entry.thinking === "string" &&
+		entry.thinking !== "off" &&
+		isThinkingLevel(entry.thinking)
+			? entry.thinking
+			: undefined);
+	return thinking ? `${base}:${thinking}` : base;
+}
+
+function formatWorktreeBranch(branch: string): string {
+	return branch.replace(/^pi-subagent\//, "");
+}
+
+function headlineBits(entry: StatusEntry, now: number): string[] {
+	const bits = [`${entry.name}${roleSuffix(entry)}`];
+	if (entry.kind && entry.kind !== "pi") bits.push(entry.kind);
+	const model = formatModel(entry);
+	if (model) bits.push(model);
+	bits.push(formatElapsed(now - entry.startedAt));
+	return bits;
+}
+
+function detailBits(entry: StatusEntry): string[] {
+	const bits = [entryStatus(entry)];
+	if (entry.turns && entry.turns > 0) bits.push(`turn ${entry.turns}`);
+	if (entry.lastTools?.length) {
+		bits.push(entry.lastTools.slice(0, 2).join(", "));
+	}
+	if (entry.worktreeBranch) {
+		bits.push(`wt ${formatWorktreeBranch(entry.worktreeBranch)}`);
+	}
+	return bits;
+}
+
+function formatEntryLines(
+	entry: StatusEntry,
+	now: number,
+	prefix: { head: string; detail: string },
+): string[] {
+	return [
+		`${prefix.head}● ${headlineBits(entry, now).join(" · ")}`,
+		`${prefix.detail}  ⎿  ${detailBits(entry).join(" · ")}`,
+	];
+}
+
 /**
  * Compact roster copied from pi-subagents' async widget: a header plus
  * `● name · elapsed` / `⎿  state` rows.
@@ -58,21 +121,17 @@ export function formatWidgetLines(
 ): string[] {
 	if (entries.length === 0) return [];
 	if (entries.length === 1) {
-		const entry = entries[0]!;
-		return [
-			`● ${entry.name}${roleSuffix(entry)} · ${formatElapsed(now - entry.startedAt)}`,
-			`  ⎿  ${entryStatus(entry)}`,
-		];
+		return formatEntryLines(entries[0]!, now, { head: "", detail: "" });
 	}
 	const lines = [`● Async agents · herdr`];
 	for (const [index, entry] of entries.entries()) {
 		const last = index === entries.length - 1;
-		const branch = last ? "└─" : "├─";
-		const cont = last ? "   " : "│  ";
 		lines.push(
-			`${branch} ● ${entry.name}${roleSuffix(entry)} · ${formatElapsed(now - entry.startedAt)}`,
+			...formatEntryLines(entry, now, {
+				head: last ? "└─ " : "├─ ",
+				detail: last ? "   " : "│  ",
+			}),
 		);
-		lines.push(`${cont}  ⎿  ${entryStatus(entry)}`);
 	}
 	return lines;
 }

@@ -169,6 +169,15 @@ test("agent: valid non-pi kind is honored", () => {
 	assert.equal(a?.kind, "cursor");
 });
 
+test("agent: herdr grok kind is honored rather than coerced to pi", () => {
+	const a = parseAgentDocument(
+		"---\nname: r\ndescription: d\nkind: grok\n---\np",
+		"/f.md",
+		"user",
+	);
+	assert.equal(a?.kind, "grok");
+});
+
 test("agent: tools parse from comma string and array spellings", () => {
 	const s = parseAgentDocument(
 		"---\nname: r\ndescription: d\ntools: read, bash\n---\np",

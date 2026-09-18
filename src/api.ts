@@ -127,6 +127,13 @@ export {
 } from "./runs/args.ts";
 export type { BuildArgsInput, BuildArgsResult } from "./runs/args.ts";
 export {
+	cursorModel,
+	isPiShapedModel,
+	nativeModelFor,
+	planKindStart,
+} from "./runs/kind.ts";
+export type { KindStartPlan } from "./runs/kind.ts";
+export {
 	createChildWorktree,
 	isGitRepo,
 	removeChildWorktree,
@@ -206,8 +213,17 @@ export {
 	parseSessionFile,
 	parseSessionText,
 } from "./shared/session.ts";
+export {
+	mergeProgress,
+	progressFromAgentInfo,
+	progressFromPaneInfo,
+	progressFromSession,
+	progressFromSessionFile,
+} from "./shared/progress.ts";
+export type { LiveProgress } from "./shared/progress.ts";
 
 // ── shared vocabulary ───────────────────────────────────────────────────────
+export { AGENT_KINDS } from "./shared/types.ts";
 export type {
 	AcceptanceConfig,
 	AcceptanceCriterion,

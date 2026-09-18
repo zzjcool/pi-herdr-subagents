@@ -234,6 +234,12 @@ function applyEvent(
 	parsed: ParsedSession,
 	event: Record<string, unknown>,
 ): void {
+	if (event.type === "model_change") {
+		const model =
+			typeof event.model === "string" ? event.model.trim() : "";
+		if (model) parsed.model = model;
+		return;
+	}
 	if (event.type !== "message") return;
 	const message = event.message as Record<string, unknown> | undefined;
 	if (!message || typeof message !== "object") return;

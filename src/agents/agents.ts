@@ -8,19 +8,20 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type {
-	AgentConfig,
-	AgentDiscoveryResult,
-	AgentKind,
-	AgentScope,
-	AgentSource,
-	AcceptanceConfig,
-	AcceptanceCriterion,
-	OnBlockedPolicy,
-	Placement,
-	SystemPromptMode,
-	ToolBudgetConfig,
-	TurnBudgetConfig,
+import {
+	AGENT_KINDS,
+	type AgentConfig,
+	type AgentDiscoveryResult,
+	type AgentKind,
+	type AgentScope,
+	type AgentSource,
+	type AcceptanceConfig,
+	type AcceptanceCriterion,
+	type OnBlockedPolicy,
+	type Placement,
+	type SystemPromptMode,
+	type ToolBudgetConfig,
+	type TurnBudgetConfig,
 } from "../shared/types.ts";
 import {
 	parseFrontmatter,
@@ -73,18 +74,7 @@ function extraAgentDirs(): string[] {
 	});
 }
 
-const VALID_KINDS: ReadonlySet<string> = new Set([
-	"pi",
-	"claude",
-	"codex",
-	"cursor",
-	"gemini",
-	"opencode",
-	"copilot",
-	"droid",
-	"kimi",
-	"qwen",
-]);
+const VALID_KINDS: ReadonlySet<string> = new Set(AGENT_KINDS);
 
 const VALID_PLACEMENTS: ReadonlySet<string> = new Set([
 	"split-down",

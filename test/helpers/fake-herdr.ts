@@ -43,6 +43,7 @@ interface FakePane {
 	workspace_id: string;
 	cwd: string | null;
 	agent_status: string | undefined;
+	title?: string;
 	/** ms timestamp when pane_busy expires (F19). */
 	busyUntil: number;
 	/** Text visible to `pane read` (F6: plain text, not JSON). */
@@ -71,6 +72,7 @@ interface FakeAgent {
 	sessionPath: string | null;
 	status: "idle" | "working" | "done" | "blocked" | "exited";
 	labels: Record<string, string>;
+	tokens: unknown;
 	/** Prompt text currently queued for the agent. */
 	pendingPrompts: string[];
 	/** Scripted transcript: each entry is a turn the agent will "complete". */
@@ -223,6 +225,7 @@ export class FakeHerdr {
 			sessionPath,
 			status: "idle",
 			labels: {},
+			tokens: { input: 0, output: 0 },
 			pendingPrompts: [],
 			script: [],
 			scriptIndex: 0,
@@ -230,6 +233,31 @@ export class FakeHerdr {
 		const pane = this.panes.get(paneId);
 		if (pane) pane.agent_status = "idle";
 		return this.agents.get(name)!;
+	}
+
+	/** Overlay live status fields reported by `agent get` / pane title. */
+	setLiveProgress(
+		name: string,
+		opts: {
+			labels?: Record<string, string>;
+			tokens?: unknown;
+			title?: string;
+			status?: FakeAgent["status"];
+		},
+	): void {
+		const agent = this.agents.get(name);
+		if (!agent) throw new FakeHerdrError("agent_not_found", `no agent ${name}`);
+		if (opts.labels) Object.assign(agent.labels, opts.labels);
+		if (opts.tokens !== undefined) agent.tokens = opts.tokens;
+		if (opts.status) {
+			agent.status = opts.status;
+			const pane = this.panes.get(agent.paneId);
+			if (pane) pane.agent_status = opts.status;
+		}
+		if (opts.title) {
+			const pane = this.panes.get(agent.paneId);
+			if (pane) pane.title = opts.title;
+		}
 	}
 
 	/** Script the next turn(s) an agent will run. */
@@ -616,7 +644,7 @@ export class FakeHerdr {
 			workspace_id: pane.workspace_id,
 			agent_status: pane.agent_status ?? null,
 			cwd: pane.cwd,
-			terminal_title_stripped: `pane ${pane.pane_id}`,
+			terminal_title_stripped: pane.title ?? `pane ${pane.pane_id}`,
 		};
 	}
 
@@ -646,7 +674,7 @@ export class FakeHerdr {
 				? { kind: "session", source: "pi", value: agent.sessionPath }
 				: null,
 			state_labels: agent.labels,
-			tokens: { input: 0, output: 0 },
+			tokens: agent.tokens,
 		};
 	}
 }

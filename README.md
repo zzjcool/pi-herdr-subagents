@@ -82,7 +82,7 @@ to hold.
 | Concern | What happens |
 | --- | --- |
 | Launch | One `subagent` call creates the type tab, splits a pane, starts `pi`, and begins watching. Same agent type shares one tab (each child is a pane). |
-| Status | Running children are painted **above the parent input**. Elapsed time keeps ticking after the tool call returns. |
+| Status | Running children are painted **above the parent input** with model (`:thinking` when set), kind (if not `pi`), turn / in-flight tool, and worktree branch. Elapsed time keeps ticking after the tool call returns. Non-pi kinds (cursor, claude, …) fill the same slots from `agent get` labels / pane title when jsonl is absent. |
 | Completion | When a turn finishes, the plugin injects `Background task completed: **name**` into the parent. If the parent is idle it wakes immediately; if it is still in a tool loop, the notice waits (`followUp`) instead of steering mid-turn. |
 | Recycle | Terminal children get `ctrl+d`, then pane close (and the type tab when it is empty). You do not `retire` or close panes. `blocked` is the exception — the pane stays. |
 | Child must not ping the parent | Every child Pi loads a **child-guard** extension. `herdr agent prompt/wait/send-keys/start`, pane split, tab create/close, and reading someone else’s pane are blocked. |
@@ -450,6 +450,7 @@ bash test/docker/verify-9-worktree.sh
 bash test/docker/verify-10-fallback.sh
 bash test/docker/verify-11-nested-alias.sh
 bash test/docker/verify-12-workspace.sh
+bash test/docker/verify-13-kinds.sh        # kinds + models; live CodeBuddy/Cursor when mounted
 ```
 
 They expect image `pi-herdr-sandbox:latest` and copy `~/.pi/agent/{settings,models,auth}.json`
@@ -467,8 +468,7 @@ the runtime table above — trust this README and `action=list`’s
 - **Not a sandbox** (F23–F25): child-guard covers bash/herdr dispatch and
   read-only writes; it does not give you process isolation.
 - **`agent_status` has no success/failure semantics** (F26).
-- **Non-pi kinds degrade** (F7): no usage, no reliable outcome (`unknown`);
-  resume depends on each CLI.
+- **Non-pi kinds degrade** (F7): same Herdr control plane (`start` → `prompt` → `wait`), but no usage and outcome is `unknown` unless the pane text includes a verdict JSON. Resume depends on each CLI.
 - **`blocked` is screen-heuristic**: false positives exist; the confirm is
   paired with the collect timeout as a backstop.
 - **Verification** runs `criterion.command` when a required criterion asks

@@ -67,6 +67,11 @@ export interface BuildArgsInput {
 	allowNestedSubagents?: boolean;
 	/** Isolated worktree branch the child should commit and MR from. */
 	worktreeBranch?: string;
+	/**
+	 * When false, omit `@task.md`. The orchestrator always delivers the task
+	 * with `herdr agent prompt` so every kind shares the same control plane.
+	 */
+	includeTask?: boolean;
 }
 
 export interface BuildArgsResult {
@@ -92,7 +97,7 @@ export function buildPiArgs(input: BuildArgsInput): BuildArgsResult {
 	pushToolArgs(args, input.agent);
 	pushSkillArgs(args, input.agent);
 	pushSystemPromptArgs(args, tempFiles, input);
-	pushTaskArg(args, tempFiles, input);
+	if (input.includeTask !== false) pushTaskArg(args, tempFiles, input);
 
 	return { args, tempFiles };
 }

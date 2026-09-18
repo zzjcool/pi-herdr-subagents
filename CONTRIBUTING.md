@@ -55,6 +55,7 @@ bash test/docker/verify-9-worktree.sh         # git worktree cwd
 bash test/docker/verify-10-fallback.sh        # fallbackModels
 bash test/docker/verify-11-nested-alias.sh    # nested + alias + completionGuard
 bash test/docker/verify-12-workspace.sh       # pi install + child pinned to parent Space
+bash test/docker/verify-13-kinds.sh           # kind/model matrix; live CodeBuddy when mounted
 ```
 
 Or all at once:
@@ -62,6 +63,10 @@ Or all at once:
 ```bash
 npm run test:docker
 ```
+
+`verify-13-kinds.sh` is **not** in `npm run test:docker`: it bind-mounts host
+`codebuddy` / `cursor-agent` and (unless `LIVE_KIND_PROBES=0`) calls live
+CodeBuddy. The numbered 1–12 scripts stay offline/mock.
 
 Override paths with `HOST_PI_AGENT`, `DOCKER_PI_HOME`, `PI_DOCKER_IMAGE`.
 

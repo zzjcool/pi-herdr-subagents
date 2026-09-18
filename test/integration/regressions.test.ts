@@ -298,9 +298,10 @@ test("regression: launch() falls back to the agent's configured model", async ()
 		});
 		assert.equal(
 			handle.child.model,
-			undefined,
-			"child.model records only an explicit override",
+			"cb/glm-5.3-flash",
+			"child.model records the model that was actually started",
 		);
+		assert.equal(handle.child.thinking, "medium");
 
 		const start = fake.commands.find(
 			(c) => c.args[0] === "agent" && c.args[1] === "start",
@@ -1031,14 +1032,13 @@ test("regression: an agent without criteria reports none", async () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // F38 (found by exercising the installed plugin end-to-end): herdr refuses an
-// argv element containing a control character — `agent start` fails with
-// `invalid_agent_argument` ("cannot be encoded safely for the target shell").
-// Nearly every real task card is multi-line, so passing the task as one argv
-// element made the common case unlaunchable. The task is now ALWAYS written to
-// a file and referenced with `@path`.
+// argv element containing a control character on `agent start -- …` (those
+// tokens are encoded into the pane's shell). The task is therefore never a
+// start argument: every kind gets it via `herdr agent prompt`, which pastes
+// into the already-running agent.
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("regression: a multi-line task never lands in argv (F38)", async () => {
+test("regression: a multi-line task never lands in start argv (F38)", async () => {
 	const runDir = mkdtempSync(path.join(tmpdir(), "regress-multiline-"));
 	try {
 		const fake = new FakeHerdr();
@@ -1058,26 +1058,24 @@ test("regression: a multi-line task never lands in argv (F38)", async () => {
 		);
 		assert.ok(start, "agent start must have been invoked");
 
-		// No argv element may contain a control character, or herdr rejects the
-		// launch outright.
 		for (const arg of start.args) {
 			assert.doesNotMatch(
 				arg,
 				/[\n\r\t]/,
-				`control character leaked into argv: ${JSON.stringify(arg)}`,
+				`control character leaked into start argv: ${JSON.stringify(arg)}`,
+			);
+			assert.equal(
+				arg.startsWith("@"),
+				false,
+				"task must not be a start @file argument",
 			);
 		}
 
-		// The task must still reach the child — by file reference. (The temp file
-		// itself is removed when `launch` returns, so its CONTENT is asserted by
-		// the `buildPiArgs` unit test; here the transport is what matters.)
-		const taskArg = start.args.find((a) => a.startsWith("@"));
-		assert.ok(taskArg, "the task must be passed as an @file reference");
-		assert.match(
-			taskArg,
-			/task\.md$/,
-			"the reference must point at the task file",
+		const prompt = fake.commands.find(
+			(c) => c.args[0] === "agent" && c.args[1] === "prompt",
 		);
+		assert.ok(prompt, "task is delivered with agent prompt");
+		assert.match(prompt.args.at(-1) ?? "", /line one\nline two\ttabbed/);
 	} finally {
 		rmSync(runDir, { recursive: true, force: true });
 	}

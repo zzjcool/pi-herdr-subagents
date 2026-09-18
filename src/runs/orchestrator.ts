@@ -56,8 +56,15 @@ import {
 	SubagentError,
 	type Usage,
 } from "../shared/types.ts";
+import {
+	mergeProgress,
+	progressFromAgentInfo,
+	progressFromPaneInfo,
+	progressFromSession,
+	type LiveProgress,
+} from "../shared/progress.ts";
 import { applyVerification, type VerifyRunner } from "./acceptance.ts";
-import { buildPiArgs } from "./args.ts";
+import { planKindStart } from "./kind.ts";
 import { canUseCachedCollect } from "../extension/recycle.ts";
 import {
 	createChildWorktree,
@@ -213,6 +220,15 @@ function deriveAcceptance(
 					level: "none",
 					reason: "no machine-readable verdict",
 				};
+	} else if (
+		execution.status === "unknown" ||
+		execution.status === "running"
+	) {
+		acceptance = {
+			status: "unknown",
+			level: "none",
+			reason: execution.reason ?? execution.status,
+		};
 	} else {
 		acceptance = {
 			status: "rejected",
@@ -677,10 +693,7 @@ export class Orchestrator {
 			name = started.name;
 			sessionFile = started.sessionFile;
 			const usedModel = started.model;
-			const snapshotModel =
-				input.model || (usedModel && usedModel !== input.agent.model)
-					? usedModel
-					: undefined;
+			const thinking = input.thinking ?? input.agent.thinking;
 
 			const child = this.recordChild({
 				name,
@@ -688,12 +701,13 @@ export class Orchestrator {
 				paneId: pane.paneId,
 				tabId: pane.tabId,
 				sessionFile,
-				...(snapshotModel ? { model: snapshotModel } : {}),
+				...(usedModel ? { model: usedModel } : {}),
+				...(thinking !== undefined ? { thinking } : {}),
 				...(worktreePath ? { worktreePath } : {}),
 				...(worktreeBranch ? { worktreeBranch } : {}),
 			});
 			// Sidebar metadata is not on the launch critical path.
-			void this.announceChild(child, input.agent.name, snapshotModel).catch(
+			void this.announceChild(child, input.agent.name, usedModel).catch(
 				() => {},
 			);
 
@@ -747,7 +761,7 @@ export class Orchestrator {
 		let lastError: unknown;
 		for (let i = 0; i < input.candidates.length; i += 1) {
 			const model = input.candidates[i];
-			const built = buildPiArgs({
+			const plan = planKindStart({
 				agent: input.agent,
 				task: input.task,
 				sessionFile,
@@ -756,6 +770,7 @@ export class Orchestrator {
 				tempDir: input.tempDir,
 				cwd: input.cwd,
 				allowNestedSubagents: input.agent.allowNestedSubagents,
+				includeTask: false,
 				...(input.worktreeBranch
 					? { worktreeBranch: input.worktreeBranch }
 					: {}),
@@ -765,17 +780,25 @@ export class Orchestrator {
 					name,
 					kind: input.kind,
 					paneId: input.paneId,
-					args: built.args,
+					args: plan.args,
 					reallocate: () => {
 						const next = input.reallocate();
 						sessionFile = this.sessionFileFor(next);
 						return next;
 					},
 				});
+				const prompted = await this.client.agentPrompt(name, plan.taskText);
+				if (!prompted.ok) {
+					throw new SubagentError(
+						`agent prompt failed (${prompted.error.code}): ${prompted.error.message}`,
+						prompted.error.code,
+						{ paneId: input.paneId },
+					);
+				}
 				return {
 					name,
 					sessionFile,
-					...(model ? { model } : {}),
+					...(plan.recordModel ? { model: plan.recordModel } : {}),
 				};
 			} catch (error) {
 				lastError = error;
@@ -867,6 +890,7 @@ export class Orchestrator {
 		tabId: string | undefined;
 		sessionFile: string;
 		model?: string;
+		thinking?: string | false;
 		worktreePath?: string;
 		worktreeBranch?: string;
 	}): ChildRecord {
@@ -893,6 +917,7 @@ export class Orchestrator {
 			...(agent.completionGuard ? { completionGuard: true } : {}),
 			...(input.tabId ? { tabId: input.tabId } : {}),
 			...(input.model ? { model: input.model } : {}),
+			...(input.thinking !== undefined ? { thinking: input.thinking } : {}),
 			...(input.worktreePath ? { worktreePath: input.worktreePath } : {}),
 			...(input.worktreeBranch ? { worktreeBranch: input.worktreeBranch } : {}),
 		};
@@ -916,6 +941,9 @@ export class Orchestrator {
 			tokens: {
 				agent: agentName,
 				model: model ?? "inherit",
+				...(typeof child.thinking === "string"
+					? { thinking: child.thinking }
+					: {}),
 				run: path.basename(this.runDir),
 			},
 		});
@@ -935,15 +963,10 @@ export class Orchestrator {
 	/**
 	 * Wait for the current turn to settle, then derive the outcome (F26-F31).
 	 *
-	 * Never trust `agent_status` for success/failure — it reports "done" for
-	 * successes, LLM errors, and kills alike.
-	 *
-	 * `agent wait` alone is NOT sufficient: it matches any settled state, so it
-	 * returns immediately when the agent is idle and the turn has not started
-	 * yet (observed in end-to-end testing: collect returned in 19ms with zero
-	 * assistant messages). The turn is therefore confirmed by watching the
-	 * session file for actual progress, with `agent wait` used only as a fast
-	 * wake-up signal.
+	 * Control plane is Herdr (`agent wait`) for every kind. Session jsonl is
+	 * only a richer parser when the child actually wrote turns (pi). Otherwise
+	 * the pane transcript is the result. `agent_status` is never success/failure
+	 * (F26): it reports "done" for successes, LLM errors, and kills alike.
 	 */
 	async collect(
 		name: string,
@@ -959,26 +982,48 @@ export class Orchestrator {
 		const deadline = this.now() + timeoutMs;
 		const initial = parseSessionFile(child.sessionFile);
 
-		// Fast path: the turn has ALREADY settled (common when the caller polls
-		// status first, re-collects after a crash, or collects a finished child).
-		// Without this the wait below would never observe new growth and would
-		// block for the entire timeout.
 		const alreadySettled = isLastTurnComplete(initial);
 		const wait = alreadySettled
 			? "settled"
-			: await this.awaitTurn(child, initial, deadline);
+			: initial.turns.length > 0
+				? await this.awaitTurn(child, initial, deadline)
+				: await this.awaitHerdrSettle(child, deadline);
 		if (wait === "blocked") return this.blockedResult(child);
 		const timedOut = wait === "timeout";
 
 		const parsed = parseSessionFile(child.sessionFile);
-		const execution = await this.resolveExecution(
-			name,
+		if (parsed.turns.length > 0) {
+			return this.finishCollect(
+				child,
+				parsed,
+				await this.resolveExecution(name, parsed, timedOut, timeoutMs),
+				deadline,
+			);
+		}
+
+		return this.finishCollect(
+			child,
 			parsed,
-			timedOut,
-			timeoutMs,
+			await this.executionFromPane(child, timedOut, timeoutMs),
+			deadline,
+			await this.readPaneOutput(child),
 		);
+	}
+
+	private async finishCollect(
+		child: ChildRecord,
+		parsed: ReturnType<typeof parseSessionFile>,
+		execution: Execution,
+		deadline: number,
+		paneOutput?: string,
+	): Promise<CollectResult> {
+		const output = paneOutput ?? parsed.output;
+		const forVerdict =
+			paneOutput !== undefined
+				? { ...parsed, lastTurnOutput: paneOutput, output: paneOutput }
+				: parsed;
 		const acceptance = await applyVerification(
-			deriveAcceptance(parsed, execution, child.pendingCriteria, {
+			deriveAcceptance(forVerdict, execution, child.pendingCriteria, {
 				...(child.completionGuard ? { completionGuard: true } : {}),
 			}),
 			{
@@ -996,11 +1041,36 @@ export class Orchestrator {
 
 		return {
 			execution,
-			output: parsed.output,
+			output,
 			usage: parsed.usage,
-			model: parsed.model,
+			model: parsed.model ?? child.model ?? null,
 			acceptance,
 		};
+	}
+
+	private async readPaneOutput(child: ChildRecord): Promise<string> {
+		if (!child.paneId) return "";
+		const read = await this.client.paneRead(child.paneId, {
+			source: "recent-unwrapped",
+			lines: 200,
+		});
+		return read.ok ? read.value : "";
+	}
+
+	private async executionFromPane(
+		child: ChildRecord,
+		timedOut: boolean,
+		timeoutMs: number,
+	): Promise<Execution> {
+		if (!timedOut) {
+			return {
+				status: "unknown",
+				reason: "no session jsonl; collected from pane",
+				model: child.model ?? null,
+			};
+		}
+		const empty = emptyParsedSession();
+		return this.resolveExecution(child.name, empty, true, timeoutMs);
 	}
 
 	/**
@@ -1037,6 +1107,25 @@ export class Orchestrator {
 	async rejectBlocked(name: string): Promise<void> {
 		this.clearBlocked(name);
 		await bestEffort(this.client.agentSendKeys(name, "n"));
+	}
+
+	/**
+	 * Herdr-native settle: `agent wait` then let a session file flush if it exists.
+	 * Used when jsonl has no turns yet (any kind, including pi before first write).
+	 */
+	private async awaitHerdrSettle(
+		child: ChildRecord,
+		deadline: number,
+	): Promise<"settled" | "timeout" | "blocked"> {
+		if (await this.isAgentBlocked(child.name)) return "blocked";
+		const remaining = Math.max(1, deadline - this.now());
+		const waited = await this.client.agentWait(child.name, {
+			timeoutMs: remaining,
+		});
+		await this.waitForQuiet(child.sessionFile, deadline);
+		if (await this.isAgentBlocked(child.name)) return "blocked";
+		if (!waited.ok && this.now() >= deadline) return "timeout";
+		return "settled";
 	}
 
 	/**
@@ -1292,6 +1381,27 @@ export class Orchestrator {
 		return res.value.flatMap((p) =>
 			p.tab_id === tabId && !known.has(p.pane_id) ? [p.pane_id] : [],
 		);
+	}
+
+	/**
+	 * Best-effort live fields for the parent status widget.
+	 *
+	 * Pi children are covered by session jsonl. Non-pi kinds (F7) have no
+	 * session ref, so this also reads `agent get` / pane title and maps
+	 * whatever labels, tokens, or model-like title those CLIs expose.
+	 */
+	async probeProgress(name: string): Promise<LiveProgress> {
+		const child = this.children.get(name);
+		if (!child) return {};
+		const parts: LiveProgress[] = [];
+		if (child.paneId) {
+			const pane = await this.client.paneGet(child.paneId);
+			if (pane.ok) parts.push(progressFromPaneInfo(pane.value));
+		}
+		const agentState = await this.client.agentGet(name);
+		if (agentState.ok) parts.push(progressFromAgentInfo(agentState.value));
+		parts.push(progressFromSession(parseSessionFile(child.sessionFile)));
+		return mergeProgress(...parts);
 	}
 
 	childrenSnapshot(): ChildRecord[] {

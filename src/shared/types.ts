@@ -18,17 +18,33 @@ export type AgentScope = "user" | "project" | "both";
 export type SystemPromptMode = "replace" | "append";
 
 /** herdr agent kinds we can launch. Mirrors `herdr agent start --kind`. */
-export type AgentKind =
-	| "pi"
-	| "claude"
-	| "codex"
-	| "cursor"
-	| "gemini"
-	| "opencode"
-	| "copilot"
-	| "droid"
-	| "kimi"
-	| "qwen";
+export const AGENT_KINDS = [
+	"pi",
+	"claude",
+	"codex",
+	"gemini",
+	"cursor",
+	"devin",
+	"agy",
+	"cline",
+	"omp",
+	"mastracode",
+	"opencode",
+	"copilot",
+	"kimi",
+	"kiro",
+	"droid",
+	"amp",
+	"grok",
+	"hermes",
+	"kilo",
+	"qodercli",
+	"qwen",
+	"maki",
+	"muse",
+] as const;
+
+export type AgentKind = (typeof AGENT_KINDS)[number];
 
 /** Where a subagent's pane is placed (design §8.3). */
 export type Placement = "split-down" | "split-right" | "new-tab";
@@ -282,7 +298,9 @@ export interface ChildRecord {
 	// config echo (for diagnostics)
 	agent?: string;
 	kind?: AgentKind;
+	/** Model actually started with (resolved + fallback). */
 	model?: string;
+	thinking?: string | false;
 }
 
 export interface RunRecord {

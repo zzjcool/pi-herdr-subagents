@@ -898,3 +898,86 @@ test("launch injects budget and nested-allow env into the pane", async () => {
 	}
 });
 
+test("probeProgress maps non-pi herdr labels onto the same live fields as jsonl", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({
+				name: "reviewer",
+				kind: "cursor",
+				model: "grok-4.6",
+			}),
+			task: "t",
+		});
+		assert.equal(handle.child.kind, "cursor");
+		assert.equal(handle.child.model, "cursor-grok-4.6-high");
+		h.fake.setLiveProgress(handle.name, {
+			status: "working",
+			labels: { model: "cursor/gpt-4.1", tool: "edit", turns: "2" },
+			title: "Cursor · cursor/gpt-4.1",
+		});
+		const live = await h.orchestrator.probeProgress(handle.name);
+		assert.equal(live.model, "cursor/gpt-4.1");
+		assert.equal(live.herdrStatus, "working");
+		assert.equal(live.turns, 2);
+		assert.deepEqual(live.lastTools, ["edit"]);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("every kind starts via herdr then gets the task as agent prompt", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({
+				kind: "cursor",
+				model: "grok-4.6",
+				thinking: "medium",
+				systemPrompt: "You are a cursor child.",
+			}),
+			task: "review src/foo.ts",
+		});
+		const start = h.fake.commands.find(
+			(c) => c.args[0] === "agent" && c.args[1] === "start",
+		);
+		assert.ok(start);
+		const startArgv = start.args.join(" ");
+		assert.match(startArgv, /--kind cursor/);
+		assert.match(startArgv, /--model cursor-grok-4\.6-medium/);
+		assert.equal(
+			start.args.includes("--session"),
+			false,
+			"pi --session must not be forwarded to cursor",
+		);
+		assert.equal(
+			start.args.some((a) => a.startsWith("@")),
+			false,
+			"task is not a start argument",
+		);
+
+		const prompt = h.fake.commands.find(
+			(c) => c.args[0] === "agent" && c.args[1] === "prompt",
+		);
+		assert.ok(prompt);
+		assert.equal(prompt.args[2], handle.name);
+		assert.match(prompt.args.at(-1) ?? "", /You are a cursor child/);
+		assert.match(prompt.args.at(-1) ?? "", /review src\/foo\.ts/);
+
+		const paneId = handle.paneId;
+		assert.ok(paneId);
+		const pane = h.fake.panes.get(paneId);
+		assert.ok(pane);
+		pane.screen.push('CURSOR_OK\n{"ok": true, "reason": "reviewed"}');
+
+		const collected = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+		assert.equal(collected.execution.status, "unknown");
+		assert.match(collected.output, /CURSOR_OK/);
+		assert.equal(collected.acceptance.status, "accepted");
+	} finally {
+		h.cleanup();
+	}
+});
+

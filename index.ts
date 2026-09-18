@@ -999,13 +999,24 @@ function followJob(
 		watch: boolean;
 	},
 ): void {
+	const child = input.orchestrator
+		.childrenSnapshot()
+		.find((entry) => entry.name === input.name);
 	const existing = runtime.get(input.name);
+	const nonPi = child?.kind && child.kind !== "pi";
 	runtime.track({
 		name: input.name,
 		runId: input.runId,
 		agent: input.agent,
 		sessionFile: input.sessionFile,
 		timeoutMs: input.timeoutMs,
+		...(child?.kind ? { kind: child.kind } : {}),
+		...(child?.model ? { model: child.model } : {}),
+		...(child?.thinking !== undefined ? { thinking: child.thinking } : {}),
+		...(child?.worktreeBranch ? { worktreeBranch: child.worktreeBranch } : {}),
+		...(nonPi
+			? { probe: () => input.orchestrator.probeProgress(input.name) }
+			: {}),
 		collect: () =>
 			input.orchestrator.collect(input.name, { timeoutMs: input.timeoutMs }),
 		persist: async () =>
@@ -1020,12 +1031,12 @@ function followJob(
 			);
 		},
 		handleBlocked: async (snapshot) => {
-			const child = input.orchestrator
+			const current = input.orchestrator
 				.childrenSnapshot()
 				.find((entry) => entry.name === input.name);
 			const ui = blockedUi.get(runtime);
 			const decision = await applyOnBlockedPolicy({
-				policy: child?.onBlocked ?? "forward",
+				policy: current?.onBlocked ?? "forward",
 				name: input.name,
 				reason: snapshot.execution.reason,
 				confirm: ui?.getConfirm(),
