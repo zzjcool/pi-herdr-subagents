@@ -216,6 +216,33 @@ test("BUG A1: the refusal names the real model source, not the preset", () => {
 	);
 });
 
+test("BUG A1: a tool `model` override and the parent model are blamed apart", () => {
+	// Both arrive as `source.type === "dispatch"`, but one was chosen by the
+	// caller and the other is merely the parent's model. The message must not
+	// call the parent's model an "override".
+	assert.throws(
+		() =>
+			resolveStepModel({
+				agent: agent(),
+				step: { preset: "cursorOnly" },
+				params: { model: "cb/kimi-k3" },
+				settings: { presets: { cursorOnly: { kind: "cursor" } } },
+			}),
+		/from the per-run model override/,
+	);
+	assert.throws(
+		() =>
+			resolveStepModel({
+				agent: agent(),
+				step: { preset: "cursorOnly" },
+				params: {},
+				dispatchModel: "cb/kimi-k3",
+				settings: { presets: { cursorOnly: { kind: "cursor" } } },
+			}),
+		/from the parent session model/,
+	);
+});
+
 test("BUG A1: a coherent preset still launches (guard is not over-eager)", () => {
 	const out = resolveStepModel({
 		agent: agent({ preset: "visual" }),

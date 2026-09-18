@@ -18,7 +18,7 @@
  * so validating the preset's own pair would let an incoherent pair ship.
  */
 
-import type { AgentConfig, ModelSourceInfo, PresetConfig } from "../shared/types.ts";
+import type { AgentConfig, PresetConfig } from "../shared/types.ts";
 import { providerOf, resolveModel, type ResolvedModel } from "./model-resolution.ts";
 import { assertKindModelCoherent, expandPreset } from "./presets.ts";
 
@@ -87,21 +87,41 @@ export function resolveStepModel(input: StepModelInput): StepModelResult {
 			effective.kind,
 			resolved.model,
 			expanded.presetName,
-			describeModelOrigin(resolved.source),
+			describeModelOrigin(resolved, override, input.dispatchModel),
 		);
 	}
 
 	return { resolved, agent: effective, usedPreset: expanded !== undefined };
 }
 
-/** Human-readable origin for a coherence error, so the blame lands correctly. */
-function describeModelOrigin(source: ModelSourceInfo | undefined): string | undefined {
+/**
+ * Human-readable origin for a coherence error, so the blame lands correctly.
+ *
+ * `resolved.source.type` alone is not enough: `"dispatch"` is emitted both for
+ * the per-run `model` override (model-resolution.ts) AND for the fall-through to
+ * the dispatching session's model. Those are different claims — one was chosen
+ * by the caller, the other is just the parent's model — so they are told apart
+ * by comparing the winning model against the two inputs.
+ */
+function describeModelOrigin(
+	resolved: ResolvedModel,
+	override: string | undefined,
+	dispatchModel: string | undefined,
+): string | undefined {
+	const source = resolved.source;
 	if (!source) return undefined;
+	if (source.type === "dispatch") {
+		if (override !== undefined && resolved.model === override) {
+			return "the per-run model override";
+		}
+		if (dispatchModel !== undefined && resolved.model === dispatchModel) {
+			return "the parent session model";
+		}
+		return "the per-run model override";
+	}
 	switch (source.type) {
 		case "preset":
 			return "the preset";
-		case "dispatch":
-			return "the per-run model override";
 		case "agentOverrides":
 			return "agentOverrides";
 		case "frontmatter":

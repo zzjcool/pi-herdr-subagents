@@ -86,7 +86,10 @@ if (cmd === "agent" && sub === "start") {
 	// so an empty one would leave the watcher polling until its timeout.
 	const nameIdx = argv.indexOf("--name");
 	const name = nameIdx >= 0 ? argv[nameIdx + 1] : "child";
-	const sessionPath = `/tmp/fake-herdr/${name}.jsonl`;
+	// Session files live beside the call log, NOT in a shared /tmp path, so the
+	// test's own cleanup of its temp dir reclaims them (no cross-run residue).
+	const base = log ? dirname(log) : "/tmp";
+	const sessionPath = `${base}/sessions/${name}.jsonl`;
 	try {
 		mkdirSync(dirname(sessionPath), { recursive: true });
 		writeFileSync(
