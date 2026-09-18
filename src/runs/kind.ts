@@ -128,8 +128,13 @@ export function cursorModel(
 	const effort = cursorEffort(thinking);
 	const lower = compact.toLowerCase();
 
+	// Cursor ships two Autos: legacy `auto`/`default` (bundled Auto pricing)
+	// and Router `auto-smart` (Balance/Intelligence bill the routed model).
+	// Do not collapse `auto` into Auto Balance — cheap search agents want the
+	// legacy slug, and billing lists them as distinct line items.
+	if (lower === "auto" || lower === "default") return "auto";
+
 	if (
-		lower === "auto" ||
 		lower === "auto-smart" ||
 		lower === "auto-balance" ||
 		lower === "autobalance"

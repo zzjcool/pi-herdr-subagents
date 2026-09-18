@@ -629,7 +629,7 @@ test("formatAgentRoster lists user roles so the parent can pick search without l
 			description: "联网检索，只返回带出处的事实",
 			kind: "cursor",
 			source: "user",
-			model: "auto-smart[optimize_for=balanced]",
+			model: "auto",
 			systemPrompt: "",
 			systemPromptMode: "replace",
 			inheritProjectContext: true,
@@ -649,7 +649,7 @@ test("formatAgentRoster lists user roles so the parent can pick search without l
 		},
 	]);
 	assert.match(roster, /Available subagent roles/);
-	assert.match(roster, /- search \[user\] \(kind=cursor, model=auto-smart\[optimize_for=balanced\]\)/);
+	assert.match(roster, /- search \[user\] \(kind=cursor, model=auto\)/);
 	assert.match(roster, /- worker \[builtin\] — 实现者/);
 	assert.doesNotMatch(roster, /kind=pi/);
 });

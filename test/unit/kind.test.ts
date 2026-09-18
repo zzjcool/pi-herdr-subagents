@@ -25,8 +25,11 @@ function agent(over: Partial<AgentConfig> = {}): AgentConfig {
 	};
 }
 
-test("cursorModel maps Auto Balance onto the CLI slug", () => {
-	assert.equal(cursorModel("auto"), "auto-smart[optimize_for=balanced]");
+test("cursorModel keeps legacy Auto distinct from Auto Balance", () => {
+	assert.equal(cursorModel("auto"), "auto");
+	assert.equal(cursorModel("default"), "auto");
+	assert.equal(cursorModel("auto", "max"), "auto");
+	assert.equal(cursorModel("auto-smart"), "auto-smart[optimize_for=balanced]");
 	assert.equal(cursorModel("Auto Balance"), "auto-smart[optimize_for=balanced]");
 	assert.equal(
 		cursorModel("auto-smart[optimize_for=balanced]"),
