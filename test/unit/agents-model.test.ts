@@ -128,10 +128,44 @@ test("resolve: per-run override wins over everything", () => {
 	const r = resolveModel({
 		agent: agent({ model: "frontmatter-model" }),
 		override: "override-model",
+		presetModel: "preset-model",
 		dispatchModel: "parent/model",
 		defaultModel: "default-model",
 	});
 	assert.equal(r.model, "override-model");
+});
+
+test("resolve: preset model beats agentOverrides (level 2)", () => {
+	const r = resolveModel({
+		agent: agent(),
+		presetModel: "cb/kimi-k3",
+		settings: { agentOverrides: { reviewer: { model: "cb/flash" } } },
+	});
+	assert.equal(r.model, "cb/kimi-k3");
+	assert.equal(r.source?.type, "preset");
+});
+
+test("resolve: preset model beats the provider-scoped override too", () => {
+	const r = resolveModel({
+		agent: agent(),
+		presetModel: "cb/kimi-k3",
+		settings: {
+			agentOverridesByProvider: { cb: { reviewer: { model: "scoped" } } },
+		},
+		parentProvider: "cb",
+	});
+	assert.equal(r.model, "cb/kimi-k3");
+	assert.equal(r.source?.type, "preset");
+});
+
+test("resolve: no preset means the old chain is bit-for-bit unchanged", () => {
+	const r = resolveModel({
+		agent: agent({ model: "frontmatter" }),
+		settings: { agentOverrides: { reviewer: { model: "override" } } },
+		dispatchModel: "parent/model",
+	});
+	assert.equal(r.model, "override");
+	assert.equal(r.source?.type, "agentOverrides");
 });
 
 test("resolve: provider-scoped override beats plain override", () => {
@@ -234,6 +268,11 @@ test("overrides: absent overrides returns the same list", () => {
 	assert.equal(applyAgentOverrides(list, undefined), list);
 });
 
+test("overrides: applyOverride honours a preset reference", () => {
+	const out = applyOverride(agent(), { preset: "strong" });
+	assert.equal(out.preset, "strong");
+});
+
 test("overrides: applyDefaultModel only fills agents without a model", () => {
 	const out = applyDefaultModel(
 		[agent({ name: "a" }), agent({ name: "b", model: "keep" })],
@@ -319,6 +358,60 @@ test("settings: agentOverrides shallow-merge across scopes", () => {
 		{ agentOverrides: { b: { model: "pb" } } },
 	);
 	assert.deepEqual(Object.keys(merged.agentOverrides ?? {}).sort(), ["a", "b"]);
+});
+
+test("settings: presets survive parseSubagentSettings (the whitelist)", () => {
+	// parseSubagentSettings assigns each key it reads explicitly; a parsed key
+	// that is never assigned is silently discarded. This is the assertion the
+	// whole feature leans on: `presets` must NOT be silently dropped. The
+	// unknown-key twin below proves the drop is real, so this assertion is
+	// not vacuous.
+	const parsed = parseSubagentSettings(
+		{
+			subagents: {
+				presets: { strong: { kind: "pi", model: "cb/kimi-k3" } },
+			},
+		},
+		"/s.json",
+	);
+	assert.deepEqual(parsed.presets, {
+		strong: { kind: "pi", model: "cb/kimi-k3" },
+	});
+});
+
+test("settings: unknown subagents keys ARE silently dropped (whitelist)", () => {
+	// Documents the exact behaviour the presets whitelist guards against:
+	// any key not explicitly parsed+assigned vanishes without a word.
+	const parsed = parseSubagentSettings(
+		{ subagents: { typoKey: { model: "cb/x" } } },
+		"/s.json",
+	);
+	assert.deepEqual(parsed, {});
+	assert.equal((parsed as Record<string, unknown>).typoKey, undefined);
+});
+
+test("settings: presets shallow-merge across user/project", () => {
+	const merged = resolveSubagentSettings(
+		{
+			presets: {
+				cheap: { model: "cb/flash" },
+				strong: { model: "cb/user-strong" },
+			},
+		},
+		{ presets: { strong: { model: "cb/project-strong" } } },
+	);
+	assert.deepEqual(merged.presets, {
+		cheap: { model: "cb/flash" },
+		strong: { model: "cb/project-strong" },
+	});
+});
+
+test("settings: project without presets keeps the user's presets", () => {
+	const merged = resolveSubagentSettings(
+		{ presets: { cheap: { model: "cb/flash" } } },
+		{ defaultModel: "cb/mid" },
+	);
+	assert.deepEqual(merged.presets, { cheap: { model: "cb/flash" } });
 });
 
 test("settings: loadSubagentSettings tolerates a missing file", () => {

@@ -432,9 +432,10 @@ function promptMode(value: unknown): SystemPromptMode {
 	return str(value) === "append" ? "append" : "replace";
 }
 
-/** `model`, `fallbackModels`, `thinking` (design §6.2). */
+/** `model`, `fallbackModels`, `thinking`, `preset` (design §6.2). */
 function applyModelFields(config: AgentConfig, fm: AgentFrontmatter): void {
 	setIf(config, "model", str(fm.model));
+	setIf(config, "preset", str(fm.preset));
 	setIf(config, "fallbackModels", list(fm.fallbackModels));
 
 	// `thinking: false` disables reasoning and must stay distinct from absent.

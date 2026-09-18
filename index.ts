@@ -25,6 +25,12 @@ import {
 	applyDefaultModel,
 } from "./src/agents/overrides.ts";
 import { resolveModel, providerOf } from "./src/agents/model-resolution.ts";
+import {
+	applyPreset,
+	assertKindModelCoherent,
+	requirePreset,
+	resolvePresetName,
+} from "./src/agents/presets.ts";
 import { checkModelScope } from "./src/agents/model-scope.ts";
 import {
 	loadSubagentSettings,
@@ -81,6 +87,9 @@ const TaskItem = Type.Object({
 	task: Type.String({ description: "Task to delegate" }),
 	cwd: Type.Optional(Type.String()),
 	model: Type.Optional(Type.String()),
+	preset: Type.Optional(
+		Type.String({ description: "Named kind+model+thinking preset" }),
+	),
 	worktree: Type.Optional(
 		Type.Boolean({
 			description:
@@ -124,6 +133,9 @@ const SubagentParams = Type.Object({
 	),
 	model: Type.Optional(
 		Type.String({ description: "Model override for this run" }),
+	),
+	preset: Type.Optional(
+		Type.String({ description: "Named kind+model+thinking preset" }),
 	),
 	cwd: Type.Optional(Type.String()),
 	placement: Type.Optional(PlacementSchema),
@@ -731,7 +743,7 @@ interface LaunchSession {
  */
 async function launchStep(
 	session: LaunchSession,
-	step: { agent: string; task: string; model?: string; worktree?: boolean },
+	step: { agent: string; task: string; model?: string; preset?: string; worktree?: boolean },
 ): Promise<void> {
 	const agent = findAgent(session.agents, step.agent);
 	if (!agent) {
@@ -744,6 +756,9 @@ async function launchStep(
 	}
 
 	const model = resolveStepModel(session, agent, step);
+	// When a preset is referenced this carries the preset's kind/model/thinking;
+	// otherwise it is the ORIGINAL agent object (zero drift for no-preset runs).
+	const effective = model.agent;
 	const resolved = model.resolved;
 
 	const violation = checkModelScope(
@@ -761,23 +776,23 @@ async function launchStep(
 		// Pre-allocating here from local state alone would bypass that check and
 		// collide with another session's agent.
 		const handle = await session.orchestrator.launch({
-			agent,
+			agent: effective,
 			task: step.task,
 			...(resolved.model ? { model: resolved.model } : {}),
 			...(model.placement ? { placement: model.placement } : {}),
 			worktree: resolveLaunchWorktree({
-				roleDefault: agent.worktree,
+				roleDefault: effective.worktree,
 				launch: session.params.worktree,
 				step: step.worktree,
 			}),
 		});
 		await session.store.addChild(session.runId, handle.child);
 		session.handles.push(handle.name);
-		if (agent.timeoutMs !== undefined) {
-			session.timeoutByName.set(handle.name, agent.timeoutMs);
+		if (effective.timeoutMs !== undefined) {
+			session.timeoutByName.set(handle.name, effective.timeoutMs);
 		}
 		session.results.push(
-			`▶ ${handle.name} (${agent.name}) pane=${handle.paneId}`,
+			`▶ ${handle.name} (${effective.name}) pane=${handle.paneId}`,
 		);
 		session.onUpdate?.({
 			content: [
@@ -790,10 +805,10 @@ async function launchStep(
 		});
 		// Surface frontmatter keys that are accepted but inert, so a user does
 		// not believe an unenforced setting is protecting them.
-		if (agent.unenforcedFields?.length) {
+		if (effective.unenforcedFields?.length) {
 			session.results.push(
-				`  ⚠ ${agent.name} sets fields that are not enforced yet: ` +
-					`${agent.unenforcedFields.join(", ")}`,
+				`  ⚠ ${effective.name} sets fields that are not enforced yet: ` +
+					`${effective.unenforcedFields.join(", ")}`,
 			);
 		}
 	} catch (error) {
@@ -827,17 +842,44 @@ export function unknownAgentLine(
  * `parentProvider` is derived from the dispatching model so that
  * `agentOverridesByProvider.<provider>.<agent>` (design §6.2, level 2) applies;
  * without it the provider-scoped overrides parsed from settings are dead.
+ *
+ * Preset expansion happens here: a referenced `preset` (tool param →
+ * agentOverrides → frontmatter) is looked up, patched onto a COPY of the
+ * agent, checked for kind/model coherence, and its model fed to `resolveModel`
+ * as the new level-2 candidate. An undefined preset name throws — the loud
+ * error is caught by launchStep and rendered as a refusal line, never a
+ * silent fallback to the dispatch model.
  */
 function resolveStepModel(
 	session: LaunchSession,
 	agent: AgentConfig,
-	step: { model?: string },
-): { resolved: ReturnType<typeof resolveModel>; placement?: Placement } {
+	step: { model?: string; preset?: string },
+): {
+	resolved: ReturnType<typeof resolveModel>;
+	placement?: Placement;
+	agent: AgentConfig;
+} {
 	const { params, settings } = session;
 	const override = step.model ?? params.model;
-	const resolved = resolveModel({
+
+	const ref = resolvePresetName({
+		toolPreset: step.preset ?? params.preset,
 		agent,
+		settings,
+	});
+	let effective = agent;
+	let presetModel: string | undefined;
+	if (ref) {
+		const preset = requirePreset(ref.name, settings.presets);
+		effective = applyPreset(agent, ref.name, preset);
+		assertKindModelCoherent(effective.kind, effective.model, ref.name);
+		presetModel = preset.model;
+	}
+
+	const resolved = resolveModel({
+		agent: effective,
 		...(override ? { override } : {}),
+		...(presetModel ? { presetModel } : {}),
 		...(session.dispatchModel ? { dispatchModel: session.dispatchModel } : {}),
 		...(settings.defaultModel ? { defaultModel: settings.defaultModel } : {}),
 		...(session.dispatchModel
@@ -848,6 +890,7 @@ function resolveStepModel(
 	return {
 		resolved,
 		...(params.placement ? { placement: params.placement as Placement } : {}),
+		agent: effective,
 	};
 }
 
@@ -877,6 +920,7 @@ type Plan =
 				agent: string;
 				task: string;
 				model?: string;
+				preset?: string;
 				worktree?: boolean;
 			}>;
 	  }
@@ -885,16 +929,19 @@ type Plan =
 export function buildPlan(params: {
 	agent?: string;
 	task?: string;
+	preset?: string;
 	tasks?: Array<{
 		agent: string;
 		task: string;
 		model?: string;
+		preset?: string;
 		worktree?: boolean;
 	}>;
 	chain?: Array<{
 		agent: string;
 		task: string;
 		model?: string;
+		preset?: string;
 		worktree?: boolean;
 	}>;
 	worktree?: boolean;
@@ -919,7 +966,13 @@ export function buildPlan(params: {
 		return {
 			ok: true,
 			task: params.task as string,
-			steps: [{ agent: params.agent as string, task: params.task as string }],
+			steps: [
+				{
+					agent: params.agent as string,
+					task: params.task as string,
+					...(params.preset ? { preset: params.preset } : {}),
+				},
+			],
 		};
 	}
 
@@ -955,6 +1008,7 @@ interface PlanStep {
 	agent: string;
 	task: string;
 	model?: string;
+	preset?: string;
 	worktree?: boolean;
 }
 

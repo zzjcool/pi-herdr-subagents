@@ -5,9 +5,12 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import {
 	cursorModel,
+	isPiShapedModel,
 	nativeModelFor,
 	planKindStart,
 } from "../../src/runs/kind.ts";
+import { applyThinkingSuffix } from "../../src/runs/args.ts";
+import { assertKindModelCoherent } from "../../src/agents/presets.ts";
 import type { AgentConfig } from "../../src/shared/types.ts";
 
 function agent(over: Partial<AgentConfig> = {}): AgentConfig {
@@ -56,6 +59,37 @@ test("nativeModelFor drops inherited pi ids for non-pi kinds", () => {
 	assert.equal(
 		nativeModelFor("pi", "cb/glm-5.3", "medium"),
 		"cb/glm-5.3:medium",
+	);
+});
+
+// The coherence guard (src/agents/presets.ts) leans on these predicates; the
+// direct coverage lives here, next to the code they exercise.
+
+test("isPiShapedModel accepts provider/id(:level) and rejects CLIs' bare slugs", () => {
+	assert.equal(isPiShapedModel("cb/kimi-k3"), true);
+	assert.equal(isPiShapedModel("cb/glm-5.3:high"), true);
+	assert.equal(isPiShapedModel("grok-4.6"), false);
+	assert.equal(isPiShapedModel("auto-smart[optimize_for=balanced]"), false);
+});
+
+test("applyThinkingSuffix appends :level for pi and drops it for false", () => {
+	assert.equal(applyThinkingSuffix("cb/kimi-k3", "high"), "cb/kimi-k3:high");
+	assert.equal(applyThinkingSuffix("cb/kimi-k3", false), "cb/kimi-k3");
+	assert.equal(applyThinkingSuffix("cb/kimi-k3", undefined), "cb/kimi-k3");
+	assert.equal(applyThinkingSuffix(undefined, "high"), undefined);
+});
+
+test("kind/model coherence guard: cursor + pi-shaped model throws, pi accepts", () => {
+	// This is the silent-drop the presets feature must never allow:
+	// nativeModelFor("cursor", "cb/kimi-k3") === undefined, so the launch
+	// would otherwise start on the CLI default while the preset claims a model.
+	assert.equal(nativeModelFor("cursor", "cb/kimi-k3"), undefined);
+	assert.throws(
+		() => assertKindModelCoherent("cursor", "cb/kimi-k3", "strong"),
+		/Preset 'strong'/,
+	);
+	assert.doesNotThrow(() =>
+		assertKindModelCoherent("pi", "cb/kimi-k3", "strong"),
 	);
 });
 

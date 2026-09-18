@@ -13,6 +13,7 @@ import type {
 	SubagentsSettings,
 } from "../shared/types.ts";
 import { parseModelScopeConfig } from "./model-scope.ts";
+import { parsePresets } from "./presets.ts";
 
 const VALID_PLACEMENTS: ReadonlySet<string> = new Set([
 	"split-down",
@@ -172,6 +173,10 @@ export function parseSubagentSettings(
 	const herdr = parseHerdrSettings(input.herdr, filePath);
 	if (herdr) out.herdr = herdr;
 
+	// THE WHITELIST: every key read above must be assigned, or it is silently
+	// discarded. `presets` is the newest key and the easiest to drop here.
+	setIf(out, "presets", parsePresets(input.presets, { filePath }));
+
 	return out;
 }
 
@@ -266,7 +271,8 @@ export function loadSubagentSettings(
 
 /**
  * Merge project settings over user settings.
- * `herdr` and `agentOverrides` shallow-merge; `modelScope` is replaced wholesale.
+ * `herdr`, `agentOverrides` and `presets` shallow-merge;
+ * `modelScope` is replaced wholesale.
  */
 export function resolveSubagentSettings(
 	user: SubagentsSettings,
@@ -298,6 +304,10 @@ export function resolveSubagentSettings(
 
 	if (project.herdr) {
 		out.herdr = { ...(user.herdr ?? {}), ...project.herdr };
+	}
+
+	if (project.presets) {
+		out.presets = { ...(user.presets ?? {}), ...project.presets };
 	}
 
 	return out;

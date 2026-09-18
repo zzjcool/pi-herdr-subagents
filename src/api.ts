@@ -62,6 +62,13 @@ export type {
 	ResolveModelInput,
 } from "./agents/model-resolution.ts";
 export {
+	applyPreset,
+	assertKindModelCoherent,
+	parsePresets,
+	requirePreset,
+	resolvePresetName,
+} from "./agents/presets.ts";
+export {
 	checkModelScope,
 	matchesScopePattern,
 	parseModelScopeConfig,
@@ -248,6 +255,7 @@ export type {
 	OnBlockedPolicy,
 	PaneInfo,
 	Placement,
+	PresetConfig,
 	RunRecord,
 	StopReason,
 	SubagentsSettings,

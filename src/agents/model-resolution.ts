@@ -3,13 +3,16 @@
  *
  * Precedence, strongest first:
  *   1. per-run override
- *   2. agentOverridesByProvider.<parentProvider>.<name>.model
- *   3. agentOverrides.<name>.model
- *   4. agent frontmatter `model`
- *   5. subagents.defaultModel
- *   6. the dispatching (parent) session model
+ *   2. preset model (a referenced `subagents.presets.<name>.model`)
+ *   3. agentOverridesByProvider.<parentProvider>.<name>.model
+ *   4. agentOverrides.<name>.model
+ *   5. agent frontmatter `model`
+ *   6. subagents.defaultModel
+ *   7. the dispatching (parent) session model
  *
  * `model: "inherit"` at any of levels 1-4 explicitly selects the parent model.
+ * Level 2 is new: the preset's model is passed in by the caller (which owns
+ * preset expansion), so this module stays a pure candidate chain.
  */
 
 import type {
@@ -23,6 +26,11 @@ export interface ResolveModelInput {
 	agent: AgentConfig;
 	/** Per-run override (highest priority). */
 	override?: string;
+	/**
+	 * Model of the referenced preset (level 2 — beats agentOverrides, loses
+	 * to `override`). Set by the caller after `applyPreset`/`requirePreset`.
+	 */
+	presetModel?: string;
 	/** The parent session's model as `provider/id`. */
 	dispatchModel?: string;
 	/** `subagents.defaultModel`. */
@@ -77,6 +85,7 @@ export function resolveModel(input: ResolveModelInput): ResolvedModel {
 		scope?: "user" | "project";
 	}> = [
 		{ value: input.override, source: "dispatch" },
+		{ value: input.presetModel, source: "preset" },
 		{
 			value: providerScopedModel(input.settings, input.parentProvider, name),
 			source: "agentOverrides",

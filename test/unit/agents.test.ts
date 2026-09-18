@@ -251,6 +251,25 @@ test("agent: frontmatterFields records provenance", () => {
 	assert.ok(a?.frontmatterFields?.has("name"));
 });
 
+test("agent: frontmatter preset is parsed onto the config", () => {
+	const a = parseAgentDocument(
+		"---\nname: r\ndescription: d\npreset: strong\n---\np",
+		"/f.md",
+		"user",
+	);
+	assert.equal(a?.preset, "strong");
+	// Absent preset stays absent — the no-preset path must be untouched.
+	const plain = parseAgentDocument(
+		"---\nname: r\ndescription: d\n---\np",
+		"/f.md",
+		"user",
+	);
+	assert.equal(plain?.preset, undefined);
+	// `preset` is enforced (level 2 of model precedence), so it must never
+	// be reported as an accepted-but-inert field.
+	assert.equal(a?.unenforcedFields?.includes("preset") ?? false, false);
+});
+
 // ─────────────────────────── discovery ───────────────────────────
 
 test("discovery: loadAgentsFromDir skips bad files without throwing", () => {

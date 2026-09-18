@@ -88,6 +88,8 @@ export interface AgentConfig {
 
 	// ── model ──
 	model?: string;
+	/** Name of a `subagents.presets` entry that bundles kind+model+thinking. */
+	preset?: string;
 	fallbackModels?: string[];
 	thinking?: string | false;
 
@@ -146,6 +148,7 @@ export interface ModelSourceInfo {
 	type:
 		| "subagents.defaultModel"
 		| "agentOverrides"
+		| "preset"
 		| "frontmatter"
 		| "dispatch"
 		| "inherit";
@@ -567,6 +570,19 @@ export interface Handle {
 // Settings (design §6.3)
 // =============================================================================
 
+/**
+ * One named kind+model+thinking bundle in `subagents.presets`.
+ *
+ * `kind` and `model` travel together — a preset whose model does not fit the
+ * target kind is rejected at expansion time (see `assertKindModelCoherent`),
+ * because `nativeModelFor()` would otherwise silently drop the model.
+ */
+export interface PresetConfig {
+	kind?: AgentKind;
+	model?: string;
+	thinking?: string | false;
+}
+
 export interface HerdrSettings {
 	defaultPlacement?: Placement;
 	maxConcurrentAgents?: number;
@@ -580,6 +596,12 @@ export interface SubagentsSettings {
 	defaultModel?: string;
 	defaultProvider?: string;
 	agentOverrides?: Record<string, Partial<AgentConfig> & { disabled?: boolean }>;
+	/**
+	 * Named kind+model+thinking bundles, referenced by `preset:` (frontmatter,
+	 * agentOverrides, or tool param). A preset wins over `agentOverrides` and
+	 * loses to the per-run tool `model` (design §6.2, level 2).
+	 */
+	presets?: Record<string, PresetConfig>;
 	/**
 	 * Role fields layered by the active parent provider (design §6.2).
 	 * Lets one role definition be configured differently per provider, e.g.

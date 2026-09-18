@@ -19,6 +19,7 @@ const OVERRIDE_FIELDS = [
 	// scalars
 	"description",
 	"model",
+	"preset",
 	"thinking",
 	"output",
 	"kind",
