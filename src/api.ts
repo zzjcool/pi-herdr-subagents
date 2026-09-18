@@ -251,6 +251,7 @@ export type {
 	ExecutionStatus,
 	HerdrError,
 	HerdrResult,
+	ModelOrigin,
 	ModelScopeConfig,
 	ModelScopeViolation,
 	ModelSourceInfo,

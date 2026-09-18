@@ -517,7 +517,12 @@ the runtime table above — trust this README and `action=list`’s
 ## Known limitations
 
 - **Not a sandbox** (F23–F25): child-guard covers bash/herdr dispatch and
-  read-only writes; it does not give you process isolation.
+  read-only writes; it does not give you process isolation. The read-only
+  bash rules are a **text heuristic** over the command line, so they miss
+  indirect writes — `node -e "require('fs').writeFileSync(…)"`,
+  `python3 -c "open('f','w')…"` and `perl -i` all pass, as does any child whose
+  agent definition omits `acceptance.role` (the guard is keyed off it). Treat it
+  as a guard-rail against accidents, not a boundary against intent.
 - **`agent_status` has no success/failure semantics** (F26).
 - **Non-pi kinds degrade** (F7): same Herdr control plane (`start` → `prompt` → `wait`), but no usage and outcome is `unknown` unless the pane text includes a verdict JSON that is not just the echoed launch prompt. Cursor starts with `--trust` (and `--force` when `onBlocked: auto-approve`) so workspace-trust does not block the first prompt. Resume depends on each CLI.
 - **A model the kind cannot express**: `--model` is built per CLI (pi wants
