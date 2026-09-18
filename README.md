@@ -520,6 +520,14 @@ the runtime table above — trust this README and `action=list`’s
   read-only writes; it does not give you process isolation.
 - **`agent_status` has no success/failure semantics** (F26).
 - **Non-pi kinds degrade** (F7): same Herdr control plane (`start` → `prompt` → `wait`), but no usage and outcome is `unknown` unless the pane text includes a verdict JSON that is not just the echoed launch prompt. Cursor starts with `--trust` (and `--force` when `onBlocked: auto-approve`) so workspace-trust does not block the first prompt. Resume depends on each CLI.
+- **A model the kind cannot express**: `--model` is built per CLI (pi wants
+  `provider/id`, cursor wants slugs like `cursor-grok-4.6-high`). A model that
+  cannot be expressed is omitted rather than mangled. Whether that is refused or
+  allowed depends on how it was chosen — an **explicit** choice (frontmatter,
+  `agentOverrides`, a preset, a `model` param) is refused before any pane is
+  created, while an **inherited** one (`subagents.defaultModel`, the parent
+  session's model) is dropped on purpose and reported as `modelDropped`, because
+  the parent's pi model simply means nothing to another CLI.
 - **`blocked` is screen-heuristic**: false positives exist; the confirm is
   paired with the collect timeout as a backstop.
 - **Verification** runs `criterion.command` when a required criterion asks

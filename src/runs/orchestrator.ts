@@ -32,6 +32,7 @@ import {
 	TOOL_TIMEOUT_MS_ENV,
 } from "../extension/budget.ts";
 import { modelCandidates } from "../agents/model-resolution.ts";
+import { nativeModelFor } from "./kind.ts";
 import {
 	countAssistantMessages,
 	deriveOutcome,
@@ -52,6 +53,7 @@ import {
 	type Handle,
 	type HerdrClient,
 	MAX_NESTED_PATH_ENTRIES,
+	type ModelOrigin,
 	type NestedPathEntry,
 	type Placement,
 	type RunRecord,
@@ -626,6 +628,16 @@ export class Orchestrator {
 		placement?: Placement;
 		/** Parent override; when omitted, the role's `worktree` flag is used. */
 		worktree?: boolean;
+		/**
+		 * How `model` was chosen. Decides whether a model the target CLI cannot
+		 * accept is refused or dropped (see `planModelCandidates`).
+		 *
+		 * Defaults to `"explicit"` when `model` was passed and `"inherited"`
+		 * otherwise. Callers that resolved a model themselves (the subagent tool)
+		 * MUST pass the real origin, or an inherited parent model will be
+		 * misreported as an explicit choice and refused.
+		 */
+		modelOrigin?: ModelOrigin;
 	}): Promise<Handle> {
 		// Allocate against BOTH our own children and the global herdr namespace.
 		// herdr names are session-global, so an unrelated agent holding
@@ -640,6 +652,16 @@ export class Orchestrator {
 		if (input.name) this.layout.rememberName(input.name);
 
 		this.assertWithinBudgets();
+
+		// Validate the model chain against the target kind BEFORE allocating any
+		// resource (session file, temp dir, worktree, pane), so a refusal leaks
+		// nothing — same invariant `assertWithinBudgets` honours above.
+		const modelPlan = this.planModelCandidates({
+			agent: input.agent,
+			...(input.model !== undefined ? { model: input.model } : {}),
+			origin: input.modelOrigin ?? this.defaultModelOrigin(input),
+			...(input.thinking !== undefined ? { thinking: input.thinking } : {}),
+		});
 
 		let sessionFile = this.sessionFileFor(name);
 		preCreateSessionFile(sessionFile);
@@ -673,10 +695,7 @@ export class Orchestrator {
 			);
 			paneId = pane.paneId;
 
-			const candidates = modelCandidates(
-				input.model ?? input.agent.model,
-				input.agent.fallbackModels,
-			);
+			const candidates = modelPlan.candidates;
 			const started = await this.startWithModelFallback({
 				name,
 				kind: input.agent.kind,
@@ -711,6 +730,7 @@ export class Orchestrator {
 				sessionFile,
 				...(usedModel ? { model: usedModel } : {}),
 				...(thinking !== undefined ? { thinking } : {}),
+				...(modelPlan.dropped.length ? { modelDropped: modelPlan.dropped } : {}),
 				...(worktreePath ? { worktreePath } : {}),
 				...(worktreeBranch ? { worktreeBranch } : {}),
 				promptText: started.promptText,
@@ -744,6 +764,100 @@ export class Orchestrator {
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
+	}
+
+	/**
+	 * How to classify the model when the caller did not say.
+	 *
+	 * A per-run `model` param is the caller's own choice, so it is explicit. When
+	 * only `agent.model` is set, `agent.modelSource` separates the two ways that
+	 * field gets filled: `applyDefaultModel` stamps
+	 * `subagents.defaultModel` (a global fallback → inherited), while frontmatter
+	 * and `agentOverrides` leave it unset (a deliberate per-role value →
+	 * explicit). The subagent tool always passes the real origin, so this default
+	 * only serves direct `Orchestrator.launch` callers.
+	 */
+	private defaultModelOrigin(input: {
+		agent: AgentConfig;
+		model?: string;
+	}): ModelOrigin {
+		if (input.model !== undefined) return "explicit";
+		const source = input.agent.modelSource?.type;
+		if (source === "subagents.defaultModel") return "inherited";
+		if (input.agent.model !== undefined) return "explicit";
+		return "inherited";
+	}
+
+	/**
+	 * Build the model chain for a launch and decide what to do when the target
+	 * CLI cannot accept a candidate.
+	 *
+	 * `nativeModelFor` returns `undefined` for a model the kind cannot express
+	 * (e.g. a pi-shaped `provider/id` handed to cursor), which silently omits
+	 * `--model` and leaves the child on the CLI's own default. Whether that is a
+	 * bug or the intended outcome depends ENTIRELY on how the model was chosen:
+	 *
+	 *   explicit  — frontmatter / agentOverrides / preset / per-run `model`.
+	 *               Someone deliberately named this model, so dropping it is a
+	 *               mistake: refuse before any resource is allocated.
+	 *   inherited — `subagents.defaultModel` or the parent session's model. The
+	 *               parent is usually a different kind (pi), so its model is
+	 *               simply not applicable and dropping it is the documented
+	 *               behaviour (see `cursorModel`'s comment in kind.ts). Reported
+	 *               via `dropped` instead of failing.
+	 *
+	 * Unacceptable candidates are REMOVED from the chain used for launching, for
+	 * both origins: leaving one in would make it the first attempt, and since a
+	 * dropped model yields no `--model` flag at all, the child would start on the
+	 * CLI default instead of falling through to the next candidate. An impossible
+	 * chain (`fallbackModels` where nothing fits) is refused only when the caller
+	 * chose explicitly; an inherited chain just becomes model-less.
+	 */
+	private planModelCandidates(input: {
+		agent: AgentConfig;
+		model?: string;
+		origin: ModelOrigin;
+		thinking?: string | false;
+	}): { candidates: Array<string | undefined>; dropped: string[] } {
+		const requested = modelCandidates(
+			input.model ?? input.agent.model,
+			input.agent.fallbackModels,
+		);
+		const thinking = input.thinking ?? input.agent.thinking;
+		const kind = input.agent.kind;
+
+		const usable: Array<string | undefined> = [];
+		const dropped: string[] = [];
+		for (const candidate of requested) {
+			if (!candidate) {
+				usable.push(candidate);
+				continue;
+			}
+			if (nativeModelFor(kind, candidate, thinking) !== undefined) {
+				usable.push(candidate);
+			} else {
+				dropped.push(candidate);
+			}
+		}
+
+		// A model the kind cannot express is only a hard error when someone
+		// deliberately named it AND nothing viable is left to fall back to.
+		if (dropped.length > 0 && input.origin === "explicit" && usable.length === 0) {
+			throw new SubagentError(
+				`model '${dropped.join(", ")}' cannot be used with kind '${kind}' ` +
+					`(it would be silently dropped and the child would run on the ` +
+					`CLI default). Pick a model this CLI accepts, or remove it.`,
+				ErrorCodes.INVALID_PARAMS,
+			);
+		}
+
+		// Every candidate was unusable. `startWithModelFallback` needs one entry
+		// to make its start attempt, and a model-less start is exactly the
+		// intended outcome here, so keep the `[undefined]` shape that
+		// `modelCandidates` guarantees for an empty chain.
+		if (usable.length === 0) return { candidates: [undefined], dropped };
+
+		return { candidates: usable, dropped };
 	}
 
 	/**
@@ -906,6 +1020,7 @@ export class Orchestrator {
 		sessionFile: string;
 		model?: string;
 		thinking?: string | false;
+		modelDropped?: string[];
 		worktreePath?: string;
 		worktreeBranch?: string;
 		promptText?: string;
@@ -934,6 +1049,9 @@ export class Orchestrator {
 			...(input.tabId ? { tabId: input.tabId } : {}),
 			...(input.model ? { model: input.model } : {}),
 			...(input.thinking !== undefined ? { thinking: input.thinking } : {}),
+			...(input.modelDropped?.length
+				? { modelDropped: [...input.modelDropped] }
+				: {}),
 			...(input.worktreePath ? { worktreePath: input.worktreePath } : {}),
 			...(input.worktreeBranch ? { worktreeBranch: input.worktreeBranch } : {}),
 			...(input.promptText ? { promptText: input.promptText } : {}),

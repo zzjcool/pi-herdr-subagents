@@ -18,7 +18,7 @@
  * so validating the preset's own pair would let an incoherent pair ship.
  */
 
-import type { AgentConfig, PresetConfig } from "../shared/types.ts";
+import type { AgentConfig, ModelOrigin, PresetConfig } from "../shared/types.ts";
 import { providerOf, resolveModel, type ResolvedModel } from "./model-resolution.ts";
 import { assertKindModelCoherent, expandPreset } from "./presets.ts";
 
@@ -45,6 +45,15 @@ export interface StepModelResult {
 	agent: AgentConfig;
 	/** True when a preset was referenced and expanded. */
 	usedPreset: boolean;
+	/**
+	 * How the winning model was chosen, for `orchestrator.launch`'s guard.
+	 *
+	 * Only this layer can tell an inherited parent model from an explicit
+	 * choice: `ModelSourceInfo.type` reports both as `"dispatch"`. Passing the
+	 * wrong value here is what makes the orchestrator either refuse a legitimate
+	 * inherited model or silently accept a dropped explicit one.
+	 */
+	modelOrigin: ModelOrigin;
 }
 
 /**
@@ -83,54 +92,62 @@ export function resolveStepModel(input: StepModelInput): StepModelResult {
 	// this module is responsible for. An agent that merely sets `kind` keeps its
 	// pre-existing behaviour (that is an older, separate concern).
 	if (expanded) {
+		const origin = classifyModelOrigin(resolved, override);
 		assertKindModelCoherent(
 			effective.kind,
 			resolved.model,
 			expanded.presetName,
-			describeModelOrigin(resolved, override, input.dispatchModel),
+			origin.label,
 		);
 	}
 
-	return { resolved, agent: effective, usedPreset: expanded !== undefined };
+	return {
+		resolved,
+		agent: effective,
+		usedPreset: expanded !== undefined,
+		modelOrigin: classifyModelOrigin(resolved, override).origin,
+	};
 }
 
 /**
- * Human-readable origin for a coherence error, so the blame lands correctly.
+ * Classify how the winning model was chosen, with a label for error messages.
  *
- * `resolved.source.type` alone is not enough: `"dispatch"` is emitted both for
- * the per-run `model` override (model-resolution.ts) AND for the fall-through to
- * the dispatching session's model. Those are different claims — one was chosen
- * by the caller, the other is just the parent's model — so they are told apart
- * by comparing the winning model against the two inputs.
+ * `"dispatch"` is overloaded in `ModelSourceInfo`: it tags BOTH the per-run
+ * `model` override (a deliberate choice) and the fall-through to the
+ * dispatching session's model (inherited). The two are distinguished by
+ * comparing the winner against the override: the override is the first
+ * candidate, so anything else arriving as `dispatch` is the parent's model.
+ * That distinction is what stops the orchestrator from refusing a legitimately
+ * inherited parent model, so it lives in ONE place rather than being
+ * re-derived per caller.
  */
-function describeModelOrigin(
+function classifyModelOrigin(
 	resolved: ResolvedModel,
 	override: string | undefined,
-	dispatchModel: string | undefined,
-): string | undefined {
-	const source = resolved.source;
-	if (!source) return undefined;
-	if (source.type === "dispatch") {
-		if (override !== undefined && resolved.model === override) {
-			return "the per-run model override";
-		}
-		if (dispatchModel !== undefined && resolved.model === dispatchModel) {
-			return "the parent session model";
-		}
-		return "the per-run model override";
-	}
-	switch (source.type) {
+): { origin: ModelOrigin; label: string | undefined } {
+	const type = resolved.source?.type;
+
+	switch (type) {
 		case "preset":
-			return "the preset";
+			return { origin: "explicit", label: "the preset" };
 		case "agentOverrides":
-			return "agentOverrides";
+			return { origin: "explicit", label: "agentOverrides" };
 		case "frontmatter":
-			return "the agent's frontmatter";
+			return { origin: "explicit", label: "the agent's frontmatter" };
 		case "subagents.defaultModel":
-			return "subagents.defaultModel";
+			return { origin: "inherited", label: "subagents.defaultModel" };
 		case "inherit":
-			return "the parent session model";
+			return { origin: "inherited", label: "the parent session model" };
+		case "dispatch": {
+			// A per-run override is the caller's own choice; anything else that
+			// arrives as `dispatch` is the parent's model falling through.
+			if (override !== undefined && resolved.model === override) {
+				return { origin: "explicit", label: "the per-run model override" };
+			}
+			return { origin: "inherited", label: "the parent session model" };
+		}
 		default:
-			return undefined;
+			// No model resolved: nothing was chosen, so the CLI default applies.
+			return { origin: "inherited", label: undefined };
 	}
 }

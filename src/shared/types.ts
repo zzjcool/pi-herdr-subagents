@@ -46,6 +46,20 @@ export const AGENT_KINDS = [
 
 export type AgentKind = (typeof AGENT_KINDS)[number];
 
+/**
+ * How the model a child starts with was chosen.
+ *
+ * `explicit` — someone deliberately named it: agent frontmatter, an
+ * `agentOverrides` entry, a preset, or a per-run `model` param.
+ * `inherited` — it fell through from configuration not aimed at this role:
+ * `subagents.defaultModel`, or the parent session's own model.
+ *
+ * The distinction decides what happens when the target CLI cannot accept the
+ * model: an explicit choice is a mistake worth refusing, while an inherited
+ * parent model is expected to be irrelevant to a different CLI and is dropped.
+ */
+export type ModelOrigin = "explicit" | "inherited";
+
 /** Where a subagent's pane is placed (design §8.3). */
 export type Placement = "split-down" | "split-right" | "new-tab";
 
@@ -304,6 +318,17 @@ export interface ChildRecord {
 	/** Model actually started with (resolved + fallback). */
 	model?: string;
 	thinking?: string | false;
+	/**
+	 * Models that were requested but could not be handed to the target CLI's
+	 * `--model` (`nativeModelFor` returns undefined for them), so the child runs
+	 * on the CLI's own default instead.
+	 *
+	 * Only reachable for an INHERITED model — an explicitly chosen one is
+	 * refused before launch (see `Orchestrator.launch`'s `modelOrigin`). This is
+	 * the intended case: a `kind: cursor` role with no model of its own
+	 * inherits the parent's pi-shaped model, which must not be forwarded.
+	 */
+	modelDropped?: string[];
 	/**
 	 * Exact text sent with `herdr agent prompt`. Non-pi collect reads the pane,
 	 * which still contains this echo; strip it before extracting a verdict so a

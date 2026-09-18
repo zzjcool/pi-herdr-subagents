@@ -282,3 +282,83 @@ test("step-model: an undefined preset throws (never a silent fallback)", () => {
 		/Preset 'nope' is not defined in subagents\.presets\. Defined: /,
 	);
 });
+
+// ───────── modelOrigin: the explicit/inherited distinction the guard needs ─────────
+
+// `ModelSourceInfo.type` reports BOTH a per-run `model` override and the
+// parent session's fallen-through model as `"dispatch"`, so only this layer can
+// tell a deliberate choice from an inherited one. The orchestrator refuses an
+// explicit model the kind cannot accept and merely drops an inherited one, so
+// mislabelling here either breaks legitimate launches or hides a real mistake.
+
+test("origin: frontmatter, agentOverrides and preset are explicit choices", () => {
+	const frontmatter = resolveStepModel({
+		agent: agent({ model: "cb/a" }),
+		step: {},
+		params: {},
+		settings: {},
+	});
+	assert.equal(frontmatter.modelOrigin, "explicit");
+
+	const override = resolveStepModel({
+		agent: agent(),
+		step: {},
+		params: {},
+		settings: { agentOverrides: { scout: { model: "cb/b" } } },
+	});
+	assert.equal(override.modelOrigin, "explicit");
+
+	const preset = resolveStepModel({
+		agent: agent({ preset: "strong" }),
+		step: {},
+		params: {},
+		settings: PROFILE,
+	});
+	assert.equal(preset.modelOrigin, "explicit");
+});
+
+test("origin: defaultModel and the parent session model are inherited", () => {
+	const viaDefault = resolveStepModel({
+		agent: agent(),
+		step: {},
+		params: {},
+		settings: { defaultModel: "cb/default" },
+	});
+	assert.equal(viaDefault.modelOrigin, "inherited");
+
+	// The parent's model arrives as `source.type === "dispatch"`, exactly like a
+	// per-run override does — the distinction is the whole point of this field.
+	const viaParent = resolveStepModel({
+		agent: agent(),
+		step: {},
+		params: {},
+		dispatchModel: "cb/parent",
+		settings: {},
+	});
+	assert.equal(viaParent.resolved.source?.type, "dispatch");
+	assert.equal(viaParent.modelOrigin, "inherited");
+});
+
+test("origin: a per-run model param is an explicit choice", () => {
+	const viaTool = resolveStepModel({
+		agent: agent(),
+		step: {},
+		params: { model: "cb/chosen" },
+		dispatchModel: "cb/parent",
+		settings: {},
+	});
+	// Same `dispatch` source type as the inherited case above, opposite verdict.
+	assert.equal(viaTool.resolved.source?.type, "dispatch");
+	assert.equal(viaTool.modelOrigin, "explicit");
+});
+
+test("origin: no model anywhere is inherited (nothing was chosen)", () => {
+	const none = resolveStepModel({
+		agent: agent(),
+		step: {},
+		params: {},
+		settings: {},
+	});
+	assert.equal(none.resolved.model, undefined);
+	assert.equal(none.modelOrigin, "inherited");
+});

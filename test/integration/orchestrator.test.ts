@@ -1036,3 +1036,126 @@ test("cursor collect sends enter when the pane is still a paste preview", async 
 	}
 });
 
+
+// ─────────── kind/model coherence: explicit refused, inherited dropped ───────────
+
+// `nativeModelFor` returns undefined for a model the target CLI cannot express
+// (a pi-shaped `provider/id` handed to cursor), which silently omits `--model`
+// and leaves the child on the CLI's own default. Whether that is a bug or the
+// intended outcome depends on how the model was chosen, so the launch layer
+// refuses an EXPLICIT mismatch and permits an INHERITED one — the parent's pi
+// model is simply not applicable to a different CLI (kind.ts documents the
+// deliberate drop). Checked BEFORE any resource is allocated.
+
+test("launch: an explicit model the kind cannot accept is refused, leaking no pane", async () => {
+	const h = harness();
+	const before = h.fake.panes.size;
+	try {
+		await assert.rejects(
+			() =>
+				h.orchestrator.launch({
+					agent: agent({ kind: "cursor", model: "cb/kimi-k3" }),
+					task: "t",
+				}),
+			/cannot be used with kind 'cursor'/,
+		);
+		assert.equal(
+			h.fake.panes.size,
+			before,
+			"a model refusal must not leak a pane",
+		);
+		assert.equal(h.startAttempts(), 0, "no agent start should be attempted");
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("launch: an INHERITED model the kind cannot accept is dropped, not refused", async () => {
+	// The parent is pi; a cursor role with no model of its own inherits that
+	// pi-shaped model. Forwarding it is impossible, so it is dropped and the
+	// child runs on cursor's own default — the documented behaviour.
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({ kind: "cursor", model: "cb/kimi-k3" }),
+			task: "t",
+			modelOrigin: "inherited",
+		});
+		assert.ok(handle.name);
+		assert.deepEqual(
+			handle.child.modelDropped,
+			["cb/kimi-k3"],
+			"the dropped model must be recorded on the child for the caller to surface",
+		);
+		assert.equal(handle.child.model, undefined, "no model was actually passed");
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("launch: a compatible model still launches for a non-pi kind", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({ kind: "cursor", model: "grok-4.6" }),
+			task: "t",
+		});
+		assert.ok(handle.name);
+		// `child.model` records the NATIVE value actually handed to the CLI, which
+		// for cursor is the mapped slug rather than the frontmatter spelling.
+		assert.equal(handle.child.model, "cursor-grok-4.6-high");
+		assert.equal(handle.child.modelDropped, undefined);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("launch: an incompatible candidate is skipped in favour of a usable fallback", async () => {
+	// `fallbackModels` exists to try alternatives in order; a candidate the kind
+	// cannot express must not become the first attempt (it would start the child
+	// on the CLI default instead of falling through).
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({
+				kind: "cursor",
+				model: "cb/kimi-k3",
+				fallbackModels: ["grok-4.6"],
+			}),
+			task: "t",
+		});
+		assert.equal(handle.child.model, "cursor-grok-4.6-high");
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("launch: the default origin treats an explicit `model` param as a choice", async () => {
+	// Direct API callers (src/api.ts) pass `model` deliberately; the default
+	// must therefore refuse an unusable one rather than silently dropping it.
+	const h = harness();
+	try {
+		await assert.rejects(
+			() =>
+				h.orchestrator.launch({
+					agent: agent({ kind: "cursor" }),
+					task: "t",
+					model: "cb/kimi-k3",
+				}),
+			/cannot be used with kind 'cursor'/,
+		);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("launch: an agent with no model at all still launches", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
+		assert.ok(handle.name);
+		assert.equal(handle.child.modelDropped, undefined);
+	} finally {
+		h.cleanup();
+	}
+});

@@ -63,6 +63,7 @@ import {
 	DEFAULTS,
 	ErrorCodes,
 	type HerdrClient,
+	type ModelOrigin,
 	type Placement,
 	SubagentError,
 } from "./src/shared/types.ts";
@@ -778,6 +779,10 @@ async function launchStep(
 			agent: effective,
 			task: step.task,
 			...(resolved.model ? { model: resolved.model } : {}),
+			// The origin decides whether an unacceptable model is refused or
+			// dropped, and only this layer can tell them apart (a parent model
+			// arrives as the same `dispatch` source as a per-run override).
+			modelOrigin: model.modelOrigin,
 			...(model.placement ? { placement: model.placement } : {}),
 			worktree: resolveLaunchWorktree({
 				roleDefault: effective.worktree,
@@ -793,6 +798,16 @@ async function launchStep(
 		session.results.push(
 			`▶ ${handle.name} (${effective.name}) pane=${handle.paneId}`,
 		);
+		// An inherited model the target CLI cannot express is dropped on purpose
+		// (the parent's pi model means nothing to cursor). Say so, or the user
+		// reasonably believes the child is running the model they see on the
+		// parent — the same silent surprise this whole guard exists to remove.
+		if (handle.child.modelDropped?.length) {
+			session.results.push(
+				`  ⚠ ${effective.name} runs on ${effective.kind}'s own default: ` +
+					`${handle.child.modelDropped.join(", ")} does not apply to that CLI.`,
+			);
+		}
 		session.onUpdate?.({
 			content: [
 				{
@@ -852,6 +867,7 @@ function resolveStep(
 	resolved: ReturnType<typeof resolveModel>;
 	placement?: Placement;
 	agent: AgentConfig;
+	modelOrigin: ModelOrigin;
 } {
 	const { params, settings } = session;
 	const result = resolveStepModel({
@@ -865,6 +881,7 @@ function resolveStep(
 		resolved: result.resolved,
 		...(params.placement ? { placement: params.placement as Placement } : {}),
 		agent: result.agent,
+		modelOrigin: result.modelOrigin,
 	};
 }
 
