@@ -78,3 +78,26 @@ OK: preset 'strong' beats agentOverrides.scout.model
   still launch. No silent fallback anywhere.
 - Everything else matches the frozen plan. No files outside the authorized list were touched;
   `~/.pi/agent/settings.json` is untouched by any code path.
+
+---
+
+## Orchestrator correction (post-verification)
+
+**The claim above is inaccurate:** "Undefined preset throws → caught by `launchStep` and rendered as a `✗` refusal line".
+
+At the time of that report it was NOT caught. `resolveStepModel` (which runs `requirePreset`) and the `checkModelScope` call were placed ABOVE `launchStep`'s `try` block, so the throw escaped the function entirely. Reproduced by driving the real registered tool with `tasks[]` of one bad-preset step plus one healthy step:
+
+```
+=== THREW: Preset 'nonexistent' is not defined in subagents.presets. None are defined.
+=== RETURNED: undefined
+```
+
+Two consequences:
+1. The caller saw a raw thrown `Error`, not a `✗` line.
+2. In the parallel path (`await Promise.all(plan.steps.map(launchStep))`) the rejection discarded every healthy sibling's refusal/launch line, contradicting `launchStep`'s own doc comment ("Never throws: a bad step degrades to a message so the others still run").
+
+No integration test covered this path, so `npm test` was green while the behaviour was wrong — the acceptance claim did not establish what it appeared to.
+
+**Fixed** in `faf6c17`: preset expansion and the scope check moved inside the guard; both errors are now `SubagentError` so the refusal carries a code. Pinned by `test/unit/presets-regression.test.ts` (3 tests, driving the real tool through the real `launchStep`). Verified the tests fail when the fix is reverted (0 pass / 3 fail) and pass with it (3/3).
+
+Final: typecheck clean, unit 381/381, integration 80/80.
