@@ -196,3 +196,31 @@ test("child-guard turn budget blocks tools after too many turns", () => {
 		else process.env[MAX_TURNS_ENV] = previous;
 	}
 });
+
+// BUG: the redirect check was `/>{1,2}/` minus a preceding digit/&, so it both
+// over- and under-blocked. `=>`, `>=` and `->` are not redirection, and a `>`
+// inside quotes is literal text — yet those forms were refused, which blocked
+// the read-only probes a reviewing agent needs (found by a reviewer whose own
+// `node -e "[1].map(x => x+1)"` was rejected). Meanwhile `&>file` is a real
+// write that the old pattern let through.
+test("read-only role: comparison/arrow operators are not redirects", () => {
+	const env = { acceptanceRole: "read-only" as const };
+	// All of these are legitimate read-only work.
+	assert.equal(forbiddenChildReason(`node -e "[1].map(x => x+1)"`, env), undefined);
+	assert.equal(forbiddenChildReason(`node -e "if (a >= b) 1"`, env), undefined);
+	assert.equal(forbiddenChildReason("rg 'x => y' src/", env), undefined);
+	assert.equal(forbiddenChildReason("npm test", env), undefined);
+	assert.equal(forbiddenChildReason("npm run typecheck", env), undefined);
+	assert.equal(forbiddenChildReason(`node --experimental-strip-types -e "import('./src/x.ts')"`, env), undefined);
+	// Descriptor duplication and /dev/null are not file writes either.
+	assert.equal(forbiddenChildReason("cat f 2>&1", env), undefined);
+	assert.equal(forbiddenChildReason("echo hi > /dev/null", env), undefined);
+});
+
+test("read-only role: real redirects are still blocked, including &>file", () => {
+	const env = { acceptanceRole: "read-only" as const };
+	assert.ok(forbiddenChildReason("echo hi > /tmp/out", env));
+	assert.ok(forbiddenChildReason("echo hi >> /tmp/out", env));
+	// The old regex excluded a preceding `&`, so this real write slipped through.
+	assert.ok(forbiddenChildReason("echo hi &> /tmp/out", env));
+});

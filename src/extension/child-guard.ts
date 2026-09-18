@@ -154,8 +154,59 @@ function firstToken(chunk: string): string {
 	return match?.[1] ?? "";
 }
 
+/**
+ * Does this command write to the filesystem via output redirection?
+ *
+ * A naive `/>{1,2}/` is wrong in both directions: it fires on `=>`, `>=`, `->`
+ * and on a `>` inside quotes (which the shell does NOT treat as a redirect, so
+ * `node -e "[1].map(x => x+1)"` was refused), while it MISSES `&>file` because
+ * the preceding `&` was excluded. That false positive is not cosmetic: it
+ * blocks the read-only probes a reviewing agent needs, which is how this was
+ * found.
+ *
+ * So the operator is located by scanning outside quotes, then rejected only
+ * when it is genuinely part of a comparison/arrow/descriptor-duplication.
+ */
 function hasFilesystemRedirect(command: string): boolean {
-	return /(?:^|[^0-9&])>{1,2}\s*(?!\/dev\/null\b)/.test(command);
+	let inSingle = false;
+	let inDouble = false;
+
+	for (let i = 0; i < command.length; i += 1) {
+		const ch = command[i];
+
+		// Track quoting: a `>` inside quotes is literal text, not a redirect.
+		if (ch === "'" && !inDouble) {
+			inSingle = !inSingle;
+			continue;
+		}
+		if (ch === '"' && !inSingle) {
+			inDouble = !inDouble;
+			continue;
+		}
+		if (inSingle || inDouble) continue;
+		if (ch !== ">") continue;
+
+		const prev = command[i - 1] ?? "";
+		const next = command[i + 1] ?? "";
+
+		// `=>` (arrow), `->`, `<=`, `!=` and `>=` are not redirection.
+		if (prev === "=" || prev === "-" || prev === "<" || prev === "!") {
+			continue;
+		}
+		if (next === "=") continue;
+		// `2>&1` / `>&2`: descriptor duplication, not a file write.
+		if (next === "&") continue;
+		// `>>` is one operator; the second `>` was already consumed visually.
+		if (prev === ">") continue;
+
+		// Ignore the harmless sink so `cmd > /dev/null` stays allowed.
+		const rest = command.slice(i + (next === ">" ? 2 : 1)).trimStart();
+		if (/^\/dev\/null(\s|$)/.test(rest)) continue;
+
+		return true;
+	}
+
+	return false;
 }
 
 function classifyReadonlyBash(command: string): string | undefined {
