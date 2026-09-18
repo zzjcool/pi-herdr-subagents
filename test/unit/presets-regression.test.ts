@@ -84,7 +84,15 @@ async function runBatch(params: {
 	settings: Record<string, unknown>;
 	agents: Record<string, string>;
 	tasks: Array<Record<string, unknown>>;
-}): Promise<BatchOutcome> {	const dir = mkdtempSync(path.join(tmpdir(), "presets-launch-"));
+	/**
+	 * The parent session's model. Supplying this exercises the full end-to-end
+	 * path — tool → resolveStep → classifyModelOrigin → launch → `⚠` — for the
+	 * inherited-model case, which the orchestrator-level tests bypass by passing
+	 * `modelOrigin` directly.
+	 */
+	dispatchModel?: string;
+}): Promise<BatchOutcome> {
+	const dir = mkdtempSync(path.join(tmpdir(), "presets-launch-"));
 	const previous = {
 		child: process.env.PI_SUBAGENT_CHILD,
 		extra: process.env.PI_HERDR_SUBAGENTS_EXTRA_AGENT_DIRS,
@@ -152,6 +160,14 @@ async function runBatch(params: {
 						cwd: dir,
 						ui: { notify() {} },
 						hasUI: false,
+						...(params.dispatchModel
+							? {
+									model: {
+										provider: params.dispatchModel.split("/")[0],
+										id: params.dispatchModel.split("/").slice(1).join("/"),
+									},
+								}
+							: {}),
 					},
 				);
 			const text = (res.content ?? []).map((b) => b.text ?? "").join("\n");
@@ -285,4 +301,55 @@ test("launch: the tool `preset` param selects a different preset", async () => {
 	const start = herdrCalls.find((c) => c.startsWith("agent start"));
 	assert.ok(start, `expected a start call, saw: ${JSON.stringify(herdrCalls)}`);
 	assert.match(start!, /--model\s+cb\/kimi-k3/);
+});
+
+// ────── end-to-end: the kind/model guard through the real tool ──────
+//
+// The orchestrator-level tests pass `modelOrigin` directly, so they cannot
+// catch a break in the wiring that CLASSIFIES it (resolveStep →
+// classifyModelOrigin). These drive the real registered tool instead, with a
+// parent model supplied, so the whole chain is exercised.
+
+test("e2e: an inherited parent model is dropped and reported, not refused", async () => {
+	// The parent is pi; this cursor role has no model of its own, so it inherits
+	// the parent's pi-shaped model — which cursor cannot express.
+	const { threw, text, herdrCalls } = await runBatch({
+		settings: {},
+		agents: {
+			"websearch.md": "---\nname: websearch\ndescription: w\nkind: cursor\n---\np\n",
+		},
+		tasks: [{ agent: "websearch", task: "t" }],
+		dispatchModel: "cb/kimi-k3",
+	});
+
+	assert.equal(threw, undefined, `inherited model must not refuse: ${threw?.message}`);
+	assert.match(text, /▶\s+\S*websearch/, "the child must still launch");
+	// The user is told, rather than silently getting a different model.
+	assert.match(text, /⚠/);
+	assert.match(text, /cb\/kimi-k3/);
+	// And no --model was handed to a CLI that cannot take it.
+	const start = herdrCalls.find((c) => c.startsWith("agent start"));
+	assert.ok(start, `expected a start call, saw: ${JSON.stringify(herdrCalls)}`);
+	assert.doesNotMatch(start!, /--model/);
+});
+
+test("e2e: an explicit model the kind cannot express is refused, launching nothing", async () => {
+	const { text, herdrCalls } = await runBatch({
+		settings: {},
+		agents: {
+			// frontmatter is an EXPLICIT choice, unlike the inherited case above.
+			"websearch.md":
+				"---\nname: websearch\ndescription: w\nkind: cursor\nmodel: cb/kimi-k3\n---\np\n",
+		},
+		tasks: [{ agent: "websearch", task: "t" }],
+		dispatchModel: "cb/kimi-k3",
+	});
+
+	assert.match(text, /✗ websearch: /);
+	assert.match(text, /cannot be used with kind 'cursor'/);
+	assert.equal(
+		herdrCalls.filter((c) => c.startsWith("agent start")).length,
+		0,
+		"an explicit mismatch must not start an agent at all",
+	);
 });
