@@ -27,6 +27,7 @@ whole launch path.
 - [Quick start](#quick-start)
 - [Tool reference](#tool-reference)
 - [Bundled roles](#bundled-roles)
+- [Presets (kind+model+thinking)](#presets-kindmodelthinking)
 - [Model profiles (cheap / medium / strong)](#model-profiles-cheap--medium--strong)
 - [Settings](#settings)
 - [Custom agents](#custom-agents)
@@ -151,7 +152,7 @@ ends. The default is async: launch, return control, get a completion later.
 | `list` | Roles the parent can spawn, with provenance (`builtin` / `user` / `project`) |
 | `retire` | Close the pane. After auto-recycle this is a documented no-op |
 
-Useful launch fields: `model`, `cwd`, `placement` (`split-down` / `split-right` /
+Useful launch fields: `model`, `preset`, `cwd`, `placement` (`split-down` / `split-right` /
 `new-tab`), `worktree` (`true` = isolated branch + child opens an MR; `false` =
 edit the current checkout; omit = role default), `agentScope` (`user` /
 `project` / `both`), `async`.
@@ -178,8 +179,51 @@ alone would be silently ignored.
 
 Bundled roles do **not** pin a vendor model. A child uses the parent session’s
 model unless you set `subagents.defaultModel`,
-`subagents.agentOverrides.<name>.model`, pass `model` on the tool call, or
+`subagents.agentOverrides.<name>.model`, assign a named
+[preset](#presets-kindmodelthinking), pass `model` on the tool call, or
 [load a model profile](#model-profiles-cheap--medium--strong).
+
+## Presets (kind+model+thinking)
+
+Named bundles in settings, referenced from agent frontmatter (`preset: strong`),
+from `agentOverrides.<name>.preset`, or from the tool’s `preset` param (single
+launch, `tasks[]`, and `chain[]` all accept it):
+
+```json
+{
+  "subagents": {
+    "presets": {
+      "cheap":  { "kind": "pi", "model": "cb/deepseek-v4.1-flash", "thinking": "low" },
+      "strong": { "kind": "pi", "model": "cb/kimi-k3", "thinking": "high" },
+      "visual": { "kind": "cursor", "model": "grok-4.6" }
+    }
+  }
+}
+```
+
+Model precedence, strongest first:
+
+```text
+per-run tool `model`            (still wins over everything)
+→ preset kind / model / thinking
+→ agentOverridesByProvider.<provider>.<name>
+→ agentOverrides.<name>
+→ agent frontmatter `model`
+→ subagents.defaultModel
+→ the dispatching (parent) session model
+```
+
+A preset deliberately beats `agentOverrides` — that is the point of the level:
+profiles pin roles via `agentOverrides`, so a frontmatter-adjacent preset would
+be unreachable. Two guarantees:
+
+- **Atomic.** `kind` and `model` come from the same preset object; a preset
+  whose model does not fit its kind (e.g. `kind: cursor` with a pi-shaped
+  `provider/id`) throws instead of silently dropping the model at start.
+- **Loud.** Referencing an undefined preset is an error naming the defined
+  presets — never a silent fallback to the parent model.
+
+Agents with no `preset` resolve exactly as before.
 
 Precedence, lowest to highest — later layers override earlier ones by name:
 
@@ -272,7 +316,8 @@ Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
 | Key | Meaning |
 | --- | --- |
 | `defaultModel` | Fallback model for roles that do not pin one |
-| `agentOverrides` | Per-role field overlay (`model`, `thinking`, `tools`, `disabled`, …) |
+| `presets` | Named kind+model+thinking bundles, referenced via `preset:` — they beat `agentOverrides`, lose to the tool `model` |
+| `agentOverrides` | Per-role field overlay (`model`, `thinking`, `preset`, `tools`, `disabled`, …) |
 | `agentOverridesByProvider` | Same overlay, keyed by the **parent** provider id |
 | `modelScope.allow` | Glob list of `provider/id` the parent may assign. Explicit tool `model` is an error if it misses; inherited is a warning |
 | `disableBuiltins` | Do not load the five shipped roles |
@@ -308,7 +353,7 @@ You are a read-only researcher. Facts with paths. No edits.
 
 Put it in `~/.pi/agent/agents/researcher.md` (user) or
 `<repo>/.pi/agents/researcher.md` (project). Required fields: `name`,
-`description`. Useful optional fields: `model`, `thinking`, `tools`, `skills`,
+`description`. Useful optional fields: `model`, `preset`, `thinking`, `tools`, `skills`,
 `timeoutMs`, `placement`, `onBlocked` (`forward` / `auto-approve` / `notify`),
 `acceptance.role` (`read-only` / `writer`), `acceptance.criteria` with
 `evidence: [verification-output]` (and optional `command:`) if collect should

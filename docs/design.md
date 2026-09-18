@@ -562,12 +562,25 @@ onBlocked: forward          # forward | auto-approve | notify
 
 ```text
 per-run override
+  → preset 的 kind/model/thinking（subagents.presets.<name>，经 preset: 引用）
   → provider 作用域 override（agentOverridesByProvider.<provider>.<name>）
   → agentOverrides.<name>.model
   → agent frontmatter model
   → subagents.defaultModel
   → 父会话模型（读 $PI_PROVIDER / $PI_MODEL）
 ```
+
+preset 规则：
+
+- 引用方式：agent frontmatter `preset: <name>`、`agentOverrides.<name>.preset`、
+  或工具的 `preset` 参数（single/tasks/chain 均支持）
+- **原子性**：kind 与 model 必须来自同一个 preset 对象；preset 的 model 与 kind
+  不匹配时（如 `kind: cursor` 配 `cb/kimi-k3`）直接报错，而不是在启动时被
+  `nativeModelFor` 静默丢弃
+- **响亮失败**：引用了未定义的 preset 是错误（列出已定义的 preset），绝不静默
+  回退到父会话模型
+- preset 刻意高于 agentOverrides：profile 通过 agentOverrides 钉死角色模型，
+  若 preset 放在 frontmatter 同级则对它不可达。未引用 preset 的 agent 行为不变
 
 特殊值：
 
@@ -583,6 +596,10 @@ per-run override
     "defaultProvider": "cb",
     "agentOverrides": { "oracle": { "model": "cb/claude-opus-5" } },
     "agentOverridesByProvider": { "cb": { "worker": { "model": "cb/glm-5.3-flash" } } },
+    "presets": {
+      "cheap": { "kind": "pi", "model": "cb/deepseek-v4.1-flash", "thinking": "low" },
+      "strong": { "kind": "pi", "model": "cb/kimi-k3", "thinking": "high" }
+    },
     "modelScope": { "enforce": true, "allow": ["cb/*"] },
     "disableBuiltins": false,
     "disableThinking": false,
