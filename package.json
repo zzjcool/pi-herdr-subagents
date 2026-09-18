@@ -1,6 +1,6 @@
 {
   "name": "@zzjcool/pi-herdr-subagents",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Herdr-backed subagents for Pi: visible, steerable, resumable child agents in Herdr panes",
   "type": "module",
   "license": "MIT",
@@ -12,7 +12,13 @@
   "bugs": {
     "url": "https://github.com/zzjcool/pi-herdr-subagents/issues"
   },
-  "keywords": ["pi-package", "pi", "herdr", "subagents", "agents"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "herdr",
+    "subagents",
+    "agents"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -21,9 +27,15 @@
     "./api": "./src/api.ts"
   },
   "pi": {
-    "extensions": ["./index.ts"],
-    "skills": ["./skills"],
-    "prompts": ["./prompts"]
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ]
   },
   "files": [
     "index.ts",
@@ -53,11 +65,21 @@
     "typebox": "*"
   },
   "peerDependenciesMeta": {
-    "@earendil-works/pi-agent-core": { "optional": true },
-    "@earendil-works/pi-ai": { "optional": true },
-    "@earendil-works/pi-coding-agent": { "optional": true },
-    "@earendil-works/pi-tui": { "optional": true },
-    "typebox": { "optional": true }
+    "@earendil-works/pi-agent-core": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "^0.85.1",
