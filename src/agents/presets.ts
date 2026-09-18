@@ -25,9 +25,7 @@ import {
 	SubagentError,
 	type AgentConfig,
 	type AgentKind,
-	type ModelSourceInfo,
 	type PresetConfig,
-	type SubagentsSettings,
 } from "../shared/types.ts";
 import { nativeModelFor } from "../runs/kind.ts";
 
@@ -112,17 +110,21 @@ function parsePreset(
  *
  * The caller folds `agentOverrides` into the agent BEFORE this runs, so
  * `agent.preset` already reflects the first two levels below the tool param.
+ *
+ * Returns a bare name: the reference SITE is not consumed by any caller, and
+ * `ModelSourceInfo` already distinguishes the winning model's origin. (A
+ * `source` field here used to report tool-param references as `"dispatch"`,
+ * which in that union means "the parent session's model" — the opposite of an
+ * explicit per-run choice.)
  */
 export function resolvePresetName(input: {
 	toolPreset?: string;
 	agent: AgentConfig;
-	settings?: SubagentsSettings;
-}): { name: string; source: ModelSourceInfo["type"] } | undefined {
+}): string | undefined {
 	const tool = input.toolPreset?.trim();
-	if (tool) return { name: tool, source: "dispatch" };
+	if (tool) return tool;
 	const agentPreset = input.agent.preset?.trim();
-	if (agentPreset) return { name: agentPreset, source: "preset" };
-	return undefined;
+	return agentPreset || undefined;
 }
 
 /**
@@ -155,17 +157,26 @@ export function requirePreset(
  *
  * Reuses `nativeModelFor` rather than re-implementing the shape test, so the
  * guard can never disagree with the argv builder about what a kind accepts.
+ *
+ * `model` is the RESOLVED model — whichever precedence level actually won —
+ * not the preset's own `model`, because a per-run tool `model`, `defaultModel`,
+ * an override or the dispatch model can all beat or fill in for the preset.
+ * The message therefore names the preset's KIND as the origin and reports
+ * where the model came from, rather than implying the preset set it.
  */
 export function assertKindModelCoherent(
 	kind: AgentKind,
 	model: string | undefined,
 	presetName: string,
+	modelOrigin?: string,
 ): void {
 	if (!model) return;
 	if (nativeModelFor(kind, model) === undefined) {
+		const origin = modelOrigin ? ` (from ${modelOrigin})` : "";
 		throw new SubagentError(
-			`Preset '${presetName}' sets model '${model}', which kind '${kind}' cannot accept ` +
-				`(it would be silently dropped at start). Fix the preset's kind or model.`,
+			`Preset '${presetName}' selects kind '${kind}', but the resolved model '${model}'${origin} ` +
+				`cannot be used with that kind and would be silently dropped at start. ` +
+				`Fix the preset's kind or the model source.`,
 			ErrorCodes.INVALID_PARAMS,
 		);
 	}
@@ -192,4 +203,35 @@ export function applyPreset(
 	}
 	if (preset.thinking !== undefined) out.thinking = preset.thinking;
 	return out;
+}
+
+/**
+ * Expand the agent's referenced preset, if any.
+ *
+ * Single entry point for "which preset, was it defined, what does it change",
+ * so the launch path cannot accidentally look up a preset and then forget to
+ * apply it (or vice versa). Returns `undefined` when no preset is referenced,
+ * in which case the caller must pass the ORIGINAL agent through untouched.
+ *
+ * Throws when a referenced name is not defined — see `requirePreset`.
+ */
+export function expandPreset(input: {
+	agent: AgentConfig;
+	toolPreset?: string;
+	presets?: Record<string, PresetConfig>;
+}):
+	| { agent: AgentConfig; presetName: string; presetModel?: string }
+	| undefined {
+	const name = resolvePresetName({
+		toolPreset: input.toolPreset,
+		agent: input.agent,
+	});
+	if (!name) return undefined;
+	const preset = requirePreset(name, input.presets);
+	const expanded: { agent: AgentConfig; presetName: string; presetModel?: string } = {
+		agent: applyPreset(input.agent, name, preset),
+		presetName: name,
+	};
+	if (preset.model !== undefined) expanded.presetModel = preset.model;
+	return expanded;
 }

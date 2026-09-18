@@ -94,13 +94,19 @@ test("presets: tool param wins over the agent's own preset", () => {
 		toolPreset: "strong",
 		agent: agent({ preset: "cheap" }),
 	});
-	assert.deepEqual(r, { name: "strong", source: "dispatch" });
+	assert.equal(r, "strong");
 });
 
 test("presets: falls back to the agent's preset; absent means undefined", () => {
-	const r = resolvePresetName({ agent: agent({ preset: "cheap" }) });
-	assert.deepEqual(r, { name: "cheap", source: "preset" });
+	assert.equal(resolvePresetName({ agent: agent({ preset: "cheap" }) }), "cheap");
 	assert.equal(resolvePresetName({ agent: agent() }), undefined);
+});
+
+test("presets: a blank tool param is ignored, not treated as a name", () => {
+	assert.equal(
+		resolvePresetName({ toolPreset: "   ", agent: agent({ preset: "cheap" }) }),
+		"cheap",
+	);
 });
 
 // ─────────────────────────── requirePreset ───────────────────────────
@@ -139,7 +145,7 @@ test("presets: coherence guard rejects a pi-shaped model on cursor", () => {
 	// silently dropped at start, so the guard must throw first.
 	assert.throws(
 		() => assertKindModelCoherent("cursor", "cb/kimi-k3", "strong"),
-		/Preset 'strong' sets model 'cb\/kimi-k3', which kind 'cursor' cannot accept/,
+		/Preset 'strong' selects kind 'cursor', but the resolved model 'cb\/kimi-k3'/,
 	);
 });
 
@@ -155,6 +161,27 @@ test("presets: coherence guard accepts a cursor slug on cursor and no model", ()
 	);
 	assert.doesNotThrow(() =>
 		assertKindModelCoherent("pi", undefined, "quiet"),
+	);
+});
+
+test("presets: the guard reports where the model came from", () => {
+	// The preset may not be the source of the model at all: a tool `model`,
+	// `defaultModel` or the dispatch model can supply it. The message must not
+	// claim the preset set a model it never mentioned.
+	assert.throws(
+		() =>
+			assertKindModelCoherent(
+				"cursor",
+				"cb/kimi-k3",
+				"visual",
+				"subagents.defaultModel",
+			),
+		/from subagents\.defaultModel/,
+	);
+	// Omitting the origin keeps the message valid without inventing a source.
+	assert.throws(
+		() => assertKindModelCoherent("cursor", "cb/kimi-k3", "visual"),
+		/Preset 'visual' selects kind 'cursor'/,
 	);
 });
 

@@ -574,13 +574,17 @@ preset 规则：
 
 - 引用方式：agent frontmatter `preset: <name>`、`agentOverrides.<name>.preset`、
   或工具的 `preset` 参数（single/tasks/chain 均支持）
-- **原子性**：kind 与 model 必须来自同一个 preset 对象；preset 的 model 与 kind
-  不匹配时（如 `kind: cursor` 配 `cb/kimi-k3`）直接报错，而不是在启动时被
-  `nativeModelFor` 静默丢弃
+- **原子性**：校验的是 preset 的 `kind` 与**最终解析出的** model 这一对，而不是
+  preset 自身的 model。因为 model 可能来自更高或更低的层级（per-run tool `model`、
+  `defaultModel`、父会话模型、override），只校验 preset 自身会让不兼容的 pair 溜过去，
+  最终在启动时被 `nativeModelFor` 静默丢弃。校验点位于 `resolveModel` 之后
+  （`src/agents/step-model.ts`），只在该步骤确实引用了 preset 时生效
 - **响亮失败**：引用了未定义的 preset 是错误（列出已定义的 preset），绝不静默
-  回退到父会话模型
-- preset 刻意高于 agentOverrides：profile 通过 agentOverrides 钉死角色模型，
-  若 preset 放在 frontmatter 同级则对它不可达。未引用 preset 的 agent 行为不变
+  回退到父会话模型。报错会指明 model 的真实来源，不把责任误归于 preset
+- preset 刻意高于 agentOverrides：profile 通过 agentOverrides 钉死角色模型（`loadCatalog`
+  会先把它们折进 `agent.model`），若 preset 放在 frontmatter 同级则对它不可达。
+  未引用 preset 的 agent 行为不变
+- 解析逻辑抽到 `src/agents/step-model.ts`（纯函数，便于单测）
 
 特殊值：
 

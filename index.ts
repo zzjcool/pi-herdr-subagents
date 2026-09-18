@@ -24,13 +24,8 @@ import {
 	applyAgentOverrides,
 	applyDefaultModel,
 } from "./src/agents/overrides.ts";
-import { resolveModel, providerOf } from "./src/agents/model-resolution.ts";
-import {
-	applyPreset,
-	assertKindModelCoherent,
-	requirePreset,
-	resolvePresetName,
-} from "./src/agents/presets.ts";
+import { resolveModel } from "./src/agents/model-resolution.ts";
+import { resolveStepModel } from "./src/agents/step-model.ts";
 import { checkModelScope } from "./src/agents/model-scope.ts";
 import {
 	loadSubagentSettings,
@@ -760,7 +755,7 @@ async function launchStep(
 		// a loud error by design), so both run INSIDE the guard. Leaving them
 		// above it let a single bad `preset:` reject the whole `Promise.all`,
 		// discarding the refusal lines of every healthy sibling step.
-		const model = resolveStepModel(session, agent, step);
+		const model = resolveStep(session, agent, step);
 		// When a preset is referenced this carries the preset's kind/model/thinking;
 		// otherwise it is the ORIGINAL agent object (zero drift for no-preset runs).
 		const effective = model.agent;
@@ -841,20 +836,15 @@ export function unknownAgentLine(
 }
 
 /**
- * Resolve the model and placement a step will launch with.
+ * Resolve the model and placement one step will launch with.
  *
- * `parentProvider` is derived from the dispatching model so that
- * `agentOverridesByProvider.<provider>.<agent>` (design §6.2, level 2) applies;
- * without it the provider-scoped overrides parsed from settings are dead.
- *
- * Preset expansion happens here: a referenced `preset` (tool param →
- * agentOverrides → frontmatter) is looked up, patched onto a COPY of the
- * agent, checked for kind/model coherence, and its model fed to `resolveModel`
- * as the new level-2 candidate. An undefined preset name throws — the loud
- * error is caught by launchStep and rendered as a refusal line, never a
- * silent fallback to the dispatch model.
+ * The precedence logic itself lives in `resolveStepModel`
+ * (`src/agents/step-model.ts`), which is pure and unit-tested; this wrapper
+ * only adapts the session shape onto it. An undefined preset name, or a
+ * resolved kind/model pair that would be silently dropped at start, throws —
+ * `launchStep` renders that as a refusal line, never a silent fallback.
  */
-function resolveStepModel(
+function resolveStep(
 	session: LaunchSession,
 	agent: AgentConfig,
 	step: { model?: string; preset?: string },
@@ -864,37 +854,17 @@ function resolveStepModel(
 	agent: AgentConfig;
 } {
 	const { params, settings } = session;
-	const override = step.model ?? params.model;
-
-	const ref = resolvePresetName({
-		toolPreset: step.preset ?? params.preset,
+	const result = resolveStepModel({
 		agent,
-		settings,
-	});
-	let effective = agent;
-	let presetModel: string | undefined;
-	if (ref) {
-		const preset = requirePreset(ref.name, settings.presets);
-		effective = applyPreset(agent, ref.name, preset);
-		assertKindModelCoherent(effective.kind, effective.model, ref.name);
-		presetModel = preset.model;
-	}
-
-	const resolved = resolveModel({
-		agent: effective,
-		...(override ? { override } : {}),
-		...(presetModel ? { presetModel } : {}),
+		step,
+		params,
 		...(session.dispatchModel ? { dispatchModel: session.dispatchModel } : {}),
-		...(settings.defaultModel ? { defaultModel: settings.defaultModel } : {}),
-		...(session.dispatchModel
-			? { parentProvider: providerOf(session.dispatchModel) }
-			: {}),
 		settings,
 	});
 	return {
-		resolved,
+		resolved: result.resolved,
 		...(params.placement ? { placement: params.placement as Placement } : {}),
-		agent: effective,
+		agent: result.agent,
 	};
 }
 

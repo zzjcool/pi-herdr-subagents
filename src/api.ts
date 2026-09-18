@@ -64,10 +64,13 @@ export type {
 export {
 	applyPreset,
 	assertKindModelCoherent,
+	expandPreset,
 	parsePresets,
 	requirePreset,
 	resolvePresetName,
 } from "./agents/presets.ts";
+export { resolveStepModel } from "./agents/step-model.ts";
+export type { StepModelInput, StepModelResult } from "./agents/step-model.ts";
 export {
 	checkModelScope,
 	matchesScopePattern,

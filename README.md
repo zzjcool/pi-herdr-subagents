@@ -204,7 +204,7 @@ launch, `tasks[]`, and `chain[]` all accept it):
 Model precedence, strongest first:
 
 ```text
-per-run tool `model`            (still wins over everything)
+per-run tool `model`            (beats the preset's MODEL, but the preset's KIND still applies)
 → preset kind / model / thinking
 → agentOverridesByProvider.<provider>.<name>
 → agentOverrides.<name>
@@ -214,12 +214,16 @@ per-run tool `model`            (still wins over everything)
 ```
 
 A preset deliberately beats `agentOverrides` — that is the point of the level:
-profiles pin roles via `agentOverrides`, so a frontmatter-adjacent preset would
+profiles pin roles via `agentOverrides` (`loadCatalog` folds them into
+`agent.model` before anything resolves), so a frontmatter-adjacent preset would
 be unreachable. Two guarantees:
 
-- **Atomic.** `kind` and `model` come from the same preset object; a preset
-  whose model does not fit its kind (e.g. `kind: cursor` with a pi-shaped
-  `provider/id`) throws instead of silently dropping the model at start.
+- **Atomic.** The preset's `kind` and the model the child is *actually launched
+  with* are checked together. Whichever level supplied the model — the preset
+  itself, a per-run tool `model`, `agentOverrides`, `defaultModel`, the parent
+  session — a pair the kind cannot accept is refused loudly instead of being
+  silently dropped at start (`kind: cursor` with a pi-shaped `provider/id` is
+  the canonical case).
 - **Loud.** Referencing an undefined preset is an error naming the defined
   presets — never a silent fallback to the parent model.
 
