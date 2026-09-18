@@ -301,6 +301,12 @@ export interface ChildRecord {
 	/** Model actually started with (resolved + fallback). */
 	model?: string;
 	thinking?: string | false;
+	/**
+	 * Exact text sent with `herdr agent prompt`. Non-pi collect reads the pane,
+	 * which still contains this echo; strip it before extracting a verdict so a
+	 * template `{"ok": true}` in the system prompt cannot attest success.
+	 */
+	promptText?: string;
 }
 
 export interface RunRecord {

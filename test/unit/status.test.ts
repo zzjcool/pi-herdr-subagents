@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
 	applyStatus,
 	createStatusBoard,
@@ -20,7 +21,32 @@ const entries: StatusEntry[] = [
 	{ name: "reviewer-1", agent: "reviewer", state: "working", startedAt: 2_000 },
 ];
 
+/** Crash log replica: visible width 73 on a 66-column terminal. */
+const crashEntry: StatusEntry = {
+	name: "search-0",
+	agent: "search",
+	state: "working",
+	startedAt: 0,
+	kind: "cursor",
+	model: "auto-smart[optimize_for=balanced]:max",
+};
+
 const theme = { fg: (_color: string, text: string) => text };
+const ansiTheme = {
+	fg(color: string, text: string) {
+		const code = color === "accent" ? "36" : "90";
+		return `\x1b[${code}m${text}\x1b[0m`;
+	},
+};
+
+function assertLinesFit(lines: string[], width: number): void {
+	for (const line of lines) {
+		assert.ok(
+			visibleWidth(line) <= width,
+			`line exceeds width ${width}: visible=${visibleWidth(line)} raw=${JSON.stringify(line)}`,
+		);
+	}
+}
 
 test("formatElapsed rounds to seconds", () => {
 	assert.equal(formatElapsed(0), "0s");
@@ -201,4 +227,95 @@ test("status board registers a persistent factory and then requestRender", () =>
 	const cleared = widgets.at(-1) as { content: undefined };
 	assert.equal(cleared.content, undefined);
 	assert.deepEqual(statuses.at(-1), { key: STATUS_FOOTER_KEY, text: undefined });
+});
+
+test("formatWidgetLines crash replica exceeds a 66-column terminal before truncation", () => {
+	const [headline] = formatWidgetLines([crashEntry], 0);
+	assert.equal(
+		headline,
+		"● search-0 (search) · cursor · auto-smart[optimize_for=balanced]:max · 0s",
+	);
+	assert.equal(visibleWidth(headline ?? ""), 73);
+	assert.ok(visibleWidth(headline ?? "") > 66);
+});
+
+test("status board render truncates crash-replica titles to terminal width", () => {
+	let factory: WidgetFactory | undefined;
+	const tui = { requestRender() {} };
+	const ctx: StatusUi = {
+		hasUI: true,
+		ui: {
+			theme,
+			setStatus() {},
+			setWidget(_key, content) {
+				if (typeof content === "function") factory = content;
+			},
+		},
+	};
+	const board = createStatusBoard();
+	board.bind(ctx);
+	board.paint([crashEntry], 0);
+	assert.equal(typeof factory, "function");
+	const lines = factory!(tui, theme).render(66);
+	assertLinesFit(lines, 66);
+	assert.match(lines.join("\n"), /search-0/);
+});
+
+test("status board render truncates multi-child tree prefixes and ANSI colors", () => {
+	let factory: WidgetFactory | undefined;
+	const tui = { requestRender() {} };
+	const ctx: StatusUi = {
+		hasUI: true,
+		ui: {
+			theme: ansiTheme,
+			setStatus() {},
+			setWidget(_key, content) {
+				if (typeof content === "function") factory = content;
+			},
+		},
+	};
+	const board = createStatusBoard();
+	board.bind(ctx);
+	board.paint(
+		[
+			crashEntry,
+			{
+				name: "reviewer-1",
+				agent: "reviewer",
+				state: "working",
+				startedAt: 0,
+				kind: "cursor",
+				model: "auto-smart[optimize_for=balanced]:max",
+			},
+		],
+		0,
+	);
+	const lines = factory!(tui, ansiTheme).render(66);
+	assertLinesFit(lines, 66);
+	assert.match(lines.join("\n"), /search-0/);
+	assert.match(lines.join("\n"), /reviewer-1/);
+	assert.ok(lines.some((line) => line.includes("\x1b[")));
+});
+
+test("status board keeps short titles intact on a wide terminal", () => {
+	let factory: WidgetFactory | undefined;
+	const tui = { requestRender() {} };
+	const ctx: StatusUi = {
+		hasUI: true,
+		ui: {
+			theme,
+			setStatus() {},
+			setWidget(_key, content) {
+				if (typeof content === "function") factory = content;
+			},
+		},
+	};
+	const board = createStatusBoard();
+	board.bind(ctx);
+	board.paint(entries.slice(0, 1), 5_000);
+	const lines = factory!(tui, theme).render(120);
+	assertLinesFit(lines, 120);
+	assert.match(lines[0] ?? "", /^● worker-0 \(worker\) · \d+s$/);
+	assert.equal(lines[1], "  ⎿  working");
+	assert.ok(!(lines[0] ?? "").includes("…") && !(lines[0] ?? "").includes("..."));
 });

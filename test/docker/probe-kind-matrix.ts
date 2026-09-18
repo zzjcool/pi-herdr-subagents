@@ -53,7 +53,7 @@ const cases: Case[] = [
 		model: "grok-4.6",
 		thinking: "high",
 		expectNative: "cursor-grok-4.6-high",
-		expectStartHas: ["--model", "cursor-grok-4.6-high"],
+		expectStartHas: ["--model", "cursor-grok-4.6-high", "--trust"],
 		expectStartOmits: ["--session", "--extension", "@"],
 	},
 	{
@@ -61,7 +61,7 @@ const cases: Case[] = [
 		kind: "cursor",
 		model: "cb/glm-5.3-flash",
 		thinking: "medium",
-		expectStartHas: [],
+		expectStartHas: ["--trust"],
 		expectStartOmits: ["--model", "--session"],
 	},
 	{

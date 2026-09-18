@@ -1,7 +1,7 @@
 ---
 name: planner
 description: 规划员：把任务拆成可并行/可验收的实施计划，冻结接口，指定文件归属
-thinking: high
+thinking: max
 tools: read, grep, find, ls
 systemPromptMode: replace
 inheritProjectContext: true

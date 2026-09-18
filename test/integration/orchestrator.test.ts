@@ -457,8 +457,9 @@ test("steer forwards a prompt to a live child (F10)", async () => {
 		const prompts = h.fake.commands.filter(
 			(c) => c.args[0] === "agent" && c.args[1] === "prompt",
 		);
-		assert.equal(prompts.length, 1);
-		assert.match(prompts[0]?.args.join(" ") ?? "", /change of plan/);
+		assert.equal(prompts.length, 2, "launch delivers the task, steer adds a second prompt");
+		assert.match(prompts[0]?.args.join(" ") ?? "", /Task: t/);
+		assert.match(prompts[1]?.args.join(" ") ?? "", /change of plan/);
 	} finally {
 		h.cleanup();
 	}
@@ -976,6 +977,60 @@ test("every kind starts via herdr then gets the task as agent prompt", async () 
 		assert.equal(collected.execution.status, "unknown");
 		assert.match(collected.output, /CURSOR_OK/);
 		assert.equal(collected.acceptance.status, "accepted");
+		assert.match(startArgv, /--trust/);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("pane collect does not attest a system-prompt template verdict", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({
+				kind: "cursor",
+				onBlocked: "auto-approve",
+				systemPrompt: `You are search.\n\n\`\`\`json\n{"ok": true, "reason": "search complete, N sourced facts"}\n\`\`\``,
+			}),
+			task: "find hangzhou population",
+		});
+		const paneId = handle.paneId;
+		assert.ok(paneId);
+		const pane = h.fake.panes.get(paneId);
+		assert.ok(pane);
+		assert.ok(handle.child.promptText);
+		pane.screen.push(handle.child.promptText);
+
+		const collected = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+		assert.equal(collected.acceptance.status, "unknown");
+		assert.notEqual(collected.acceptance.reason, "search complete, N sourced facts");
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("cursor collect sends enter when the pane is still a paste preview", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
+			task: "t",
+		});
+		const paneId = handle.paneId;
+		assert.ok(paneId);
+		const pane = h.fake.panes.get(paneId);
+		assert.ok(pane);
+		pane.screen.push("[Pasted text #1 +55 lines]");
+
+		await h.orchestrator.collect(handle.name, { timeoutMs: 5_000 });
+		assert.ok(
+			h.fake.sentKeys.some(
+				(row) => row.target === handle.name && row.keys.includes("enter"),
+			),
+			"stuck cursor pane must be nudged with enter",
+		);
 	} finally {
 		h.cleanup();
 	}

@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: 审查员：只读对抗式审查代码改动，输出带路径与严重级别的具体发现
-thinking: high
+thinking: max
 tools: read, grep, find, ls
 systemPromptMode: replace
 inheritProjectContext: true

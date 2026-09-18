@@ -13,6 +13,7 @@ import {
 	findNearestProjectAgentsDir,
 	discoverAgents,
 	findAgent,
+	formatAgentRoster,
 	BUILTIN_AGENT_NAMES,
 	BUILTIN_AGENTS_DIR,
 } from "../../src/agents/agents.ts";
@@ -609,6 +610,48 @@ test("bundled roles do not pin a vendor model", () => {
 			`bundled role ${agent.name} must not pin model=${agent.model}`,
 		);
 	}
+});
+
+test("every bundled role thinks at max", () => {
+	for (const agent of loadBundledAgents()) {
+		assert.equal(
+			agent.thinking,
+			"max",
+			`bundled role ${agent.name} must think at max`,
+		);
+	}
+});
+
+test("formatAgentRoster lists user roles so the parent can pick search without list", () => {
+	const roster = formatAgentRoster([
+		{
+			name: "search",
+			description: "联网检索，只返回带出处的事实",
+			kind: "cursor",
+			source: "user",
+			model: "auto-smart[optimize_for=balanced]",
+			systemPrompt: "",
+			systemPromptMode: "replace",
+			inheritProjectContext: true,
+			inheritSkills: false,
+			filePath: "/f.md",
+		},
+		{
+			name: "worker",
+			description: "实现者",
+			kind: "pi",
+			source: "builtin",
+			systemPrompt: "",
+			systemPromptMode: "replace",
+			inheritProjectContext: true,
+			inheritSkills: false,
+			filePath: "/w.md",
+		},
+	]);
+	assert.match(roster, /Available subagent roles/);
+	assert.match(roster, /- search \[user\] \(kind=cursor, model=auto-smart\[optimize_for=balanced\]\)/);
+	assert.match(roster, /- worker \[builtin\] — 实现者/);
+	assert.doesNotMatch(roster, /kind=pi/);
 });
 
 test("every bundled role ships a non-empty system prompt", () => {

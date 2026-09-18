@@ -19,7 +19,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { createHerdrClient } from "./src/herdr/client.ts";
-import { discoverAgents, findAgent } from "./src/agents/agents.ts";
+import { discoverAgents, findAgent, formatAgentRoster } from "./src/agents/agents.ts";
 import {
 	applyAgentOverrides,
 	applyDefaultModel,
@@ -175,6 +175,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	const layout = createSessionLayout();
 	let lastModelRegistry: ExtensionContext["modelRegistry"] | undefined;
 	let lastConfirm: ((message: string) => Promise<boolean>) | undefined;
+	let lastCwd = process.cwd();
 	const runtime = createSessionRuntime({
 		sendMessage: (message, options) => pi.sendMessage(message, options),
 		emitBusy: (active, label) => {
@@ -272,12 +273,14 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("before_agent_start", (event) => {
+	pi.on("before_agent_start", (event, ctx) => {
 		if (isChild && !allowNested) return;
 		const tools = event.systemPromptOptions?.selectedTools;
 		if (Array.isArray(tools) && !tools.includes("subagent")) return;
+		if (ctx?.cwd) lastCwd = ctx.cwd;
+		const { agents } = loadCatalog(lastCwd, lastCwd, undefined);
 		return {
-			systemPrompt: `${event.systemPrompt}\n\n${PARENT_PLAYBOOK}`,
+			systemPrompt: `${event.systemPrompt}\n\n${PARENT_PLAYBOOK}\n\n${formatAgentRoster(agents)}`,
 		};
 	});
 
@@ -292,6 +295,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 
 	const bindUi = (_event: unknown, ctx: ExtensionContext): void => {
 		lastModelRegistry = ctx.modelRegistry;
+		if (ctx.cwd) lastCwd = ctx.cwd;
 		runtime.bind(ctx);
 		lastConfirm =
 			ctx.hasUI && typeof ctx.ui?.confirm === "function"

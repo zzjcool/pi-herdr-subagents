@@ -176,6 +176,93 @@ test("isLastTurnComplete distinguishes settled, mid-tool, and unanswered turns",
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// F15 tab close reaps the herdr agent, but collect used to keep polling jsonl /
+// agentWait until timeoutMs (worker default 30 min) because agent_not_found was
+// treated as "not blocked". REAL clock: fake sleep would hide the hang.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("regression: collect aborts immediately after tab close mid-toolUse (F15)", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-tabclose-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+		const client = createHerdrClient(createFakeRunner(fake));
+		const orchestrator = new Orchestrator({
+			client,
+			runDir,
+			cwd: "/tmp",
+		});
+
+		const handle = await orchestrator.launch({ agent: agent(), task: "t" });
+		writeFileSync(
+			handle.sessionFile,
+			[
+				sessionHeader(),
+				user("go"),
+				assistantMsg({ stopReason: "toolUse", tools: ["bash"] }),
+			].join("\n") + "\n",
+		);
+
+		const [child] = orchestrator.childrenSnapshot();
+		assert.ok(child);
+		const tabId = child.tabId;
+		assert.ok(tabId, "launch must place the child in a type tab");
+		const closed = await client.tabClose(tabId);
+		assert.ok(closed.ok);
+		assert.equal(fake.agents.has(handle.name), false);
+
+		const started = Date.now();
+		const result = await orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+		const elapsed = Date.now() - started;
+
+		assert.equal(result.execution.status, "aborted");
+		assert.ok(
+			elapsed < 1_000,
+			`collect took ${elapsed}ms after tab close; expected abort without waiting out timeoutMs`,
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("regression: collect aborts immediately when tab close happens before any reply (F15)", async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "regress-tabclose-empty-"));
+	try {
+		const fake = new FakeHerdr();
+		fake.addRootPane("w1");
+		const client = createHerdrClient(createFakeRunner(fake));
+		const orchestrator = new Orchestrator({
+			client,
+			runDir,
+			cwd: "/tmp",
+		});
+
+		const handle = await orchestrator.launch({ agent: agent(), task: "t" });
+		const [child] = orchestrator.childrenSnapshot();
+		assert.ok(child);
+		const tabId = child.tabId;
+		assert.ok(tabId);
+		await client.tabClose(tabId);
+
+		const started = Date.now();
+		const result = await orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+		const elapsed = Date.now() - started;
+
+		assert.equal(result.execution.status, "aborted");
+		assert.ok(
+			elapsed < 1_000,
+			`collect took ${elapsed}ms after tab close; expected abort without waiting out timeoutMs`,
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // BUG 4 (review: rev-simplicity): index.ts wrote a hardcoded placeholder string as
 // the child's owner token. Because the placeholder was truthy, RunStore kept it
 // verbatim, so every persisted child shared the same zero-entropy token —

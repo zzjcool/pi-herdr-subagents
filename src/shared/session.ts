@@ -449,6 +449,56 @@ export function extractVerdict(
 	return extractTextualFailure(text);
 }
 
+/**
+ * Remove the launch prompt from pane text once, so a later copy of the same
+ * JSON (the child's real verdict) can still be parsed.
+ */
+export function stripPromptEcho(output: string, prompt?: string): string {
+	if (!output) return "";
+	const needle = prompt?.trim();
+	if (!needle) return output;
+	let rest = stripOnce(output, needle);
+	if (rest === output) {
+		for (const fence of fencedBlocks(needle)) {
+			if (extractVerdict(fence)) rest = stripOnce(rest, fence);
+		}
+	}
+	return rest.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** Cursor TUI still sitting on trust / a paste preview, not a finished turn. */
+export function paneLooksStuck(output: string, prompt?: string): boolean {
+	if (STUCK_PANE.test(output)) return true;
+	if (!prompt?.trim()) return false;
+	return !paneHasLiveReply(stripPromptEcho(output, prompt));
+}
+
+const STUCK_PANE =
+	/Workspace Trust Required|Do you trust the contents of this directory|\[Pasted text #\d+/i;
+
+function stripOnce(haystack: string, needle: string): string {
+	if (!needle) return haystack;
+	const at = haystack.indexOf(needle);
+	if (at < 0) return haystack;
+	return haystack.slice(0, at) + haystack.slice(at + needle.length);
+}
+
+function fencedBlocks(text: string): string[] {
+	return text.match(/```(?:json)?\s*\n([\s\S]*?)```/g) ?? [];
+}
+
+function paneHasLiveReply(text: string): boolean {
+	const cleaned = text
+		.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
+		.replace(/\[Pasted text[^\]]*\]/gi, "")
+		.replace(/cursor-agent(?:[ \t]+--\S+)*/gi, "")
+		.replace(/^.*➜.*$/gm, "")
+		.trim();
+	if (!cleaned) return false;
+	if (extractVerdict(cleaned)) return true;
+	return cleaned.replace(/\s+/g, " ").length >= 24;
+}
+
 function extractJsonVerdict(
 	text: string,
 ): { ok: boolean; reason?: string } | null {

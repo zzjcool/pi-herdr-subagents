@@ -1,13 +1,18 @@
 ---
 name: herdr-subagents
-description: "Delegate work with the subagent tool: one call launches child Pi agents in Herdr panes. Use when the user asks for parallel/delegated subagent work. Do not run herdr CLI to launch agents."
+description: "Delegate with the subagent tool whenever a loaded role matches the job (search, scout, planner, worker, reviewer, oracle, or any user agent in ~/.pi/agent/agents). Prefer subagent over doing that work yourself. Do not run herdr CLI to launch agents."
 ---
 
 # Herdr Subagents
 
 The launch path is frozen. Do not invent herdr commands.
 
+The system prompt lists **every loaded role** each turn, including user agents
+such as `search`. Use the matching name. Do not curl the web yourself when a
+search/research role exists.
+
 ```text
+subagent({ agent: "search", task: "<query>" })
 subagent({ agent: "worker", task: "<task card>" })
 subagent({ agent: "worker", task: "<task card>", worktree: true })
 subagent({ tasks: [

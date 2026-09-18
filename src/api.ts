@@ -37,6 +37,7 @@ export {
 	findAgent,
 	findNearestProjectAgentsDir,
 	formatAgentList,
+	formatAgentRoster,
 	loadAgentsFromDir,
 	parseAgentDocument,
 } from "./agents/agents.ts";

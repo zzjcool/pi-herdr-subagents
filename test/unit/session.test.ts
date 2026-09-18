@@ -10,8 +10,10 @@ import * as path from "node:path";
 import {
 	deriveOutcome,
 	extractVerdict,
+	paneLooksStuck,
 	parseSessionFile,
 	parseSessionText,
+	stripPromptEcho,
 } from "../../src/shared/session.ts";
 import {
 	assistantMsg,
@@ -201,6 +203,34 @@ test("extractVerdict ignores non-verdict JSON objects", () => {
 	assert.equal(extractVerdict('{"result": 1, "ok": "yes"}'), null);
 	assert.equal(extractVerdict('[1,2,3]'), null);
 	assert.equal(extractVerdict(""), null);
+});
+
+const SEARCH_PROMPT = `你是 search。
+
+\`\`\`json
+{"ok": true, "reason": "search complete, N sourced facts"}
+\`\`\`
+`;
+
+test("stripPromptEcho drops the launch prompt once but keeps a later verdict", () => {
+	const reply = '杭州常住人口 1270 万\n{"ok": true, "reason": "search complete, 4 sourced facts"}';
+	assert.deepEqual(
+		extractVerdict(stripPromptEcho(`${SEARCH_PROMPT}\n${reply}`, SEARCH_PROMPT)),
+		extractVerdict(reply),
+	);
+	assert.equal(
+		extractVerdict(stripPromptEcho(SEARCH_PROMPT, SEARCH_PROMPT)),
+		null,
+	);
+});
+
+test("paneLooksStuck detects Cursor trust and paste-preview chrome", () => {
+	assert.equal(paneLooksStuck("Workspace Trust Required\nDo you trust", SEARCH_PROMPT), true);
+	assert.equal(paneLooksStuck("[Pasted text #1 +55 lines]\nWorking", SEARCH_PROMPT), true);
+	assert.equal(
+		paneLooksStuck(`${SEARCH_PROMPT}\n杭州 1270 万人，城镇化率 85%。\n{"ok": true, "reason": "done"}`, SEARCH_PROMPT),
+		false,
+	);
 });
 
 test("turn boundaries are split by user messages; per-turn stats are independent", () => {

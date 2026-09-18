@@ -1,7 +1,7 @@
 ---
 name: oracle
 description: 终审顾问：用更强模型对争议方案/计划做第二意见裁决
-thinking: xhigh
+thinking: max
 tools: read, grep, find, ls
 systemPromptMode: replace
 inheritProjectContext: true

@@ -39,6 +39,8 @@ import {
 	parseSessionFile,
 	emptyParsedSession,
 	extractVerdict,
+	paneLooksStuck,
+	stripPromptEcho,
 } from "../shared/session.ts";
 import {
 	type AgentConfig,
@@ -294,6 +296,12 @@ export class Orchestrator {
 	private readonly startTimeoutMs: number;
 	/** Poll interval while waiting for a turn to produce its first output. */
 	private readonly pollIntervalMs = 500;
+	/**
+	 * Slice length for `agent wait`. A single remaining-timeout wait can hang
+	 * after F15 `tab close` reaps the agent; slicing lets collect notice
+	 * `agent_not_found` and abort instead of sitting until timeoutMs.
+	 */
+	private readonly waitSliceMs = 2_000;
 	private readonly parentPath: NestedPathEntry[];
 	private readonly maxDepth: number;
 	private readonly maxSpawns: number | null;
@@ -705,6 +713,7 @@ export class Orchestrator {
 				...(thinking !== undefined ? { thinking } : {}),
 				...(worktreePath ? { worktreePath } : {}),
 				...(worktreeBranch ? { worktreeBranch } : {}),
+				promptText: started.promptText,
 			});
 			// Sidebar metadata is not on the launch critical path.
 			void this.announceChild(child, input.agent.name, usedModel).catch(
@@ -755,7 +764,12 @@ export class Orchestrator {
 		candidates: Array<string | undefined>;
 		worktreeBranch?: string;
 		reallocate: () => string;
-	}): Promise<{ name: string; sessionFile: string; model?: string }> {
+	}): Promise<{
+		name: string;
+		sessionFile: string;
+		model?: string;
+		promptText: string;
+	}> {
 		let name = input.name;
 		let sessionFile = input.sessionFile;
 		let lastError: unknown;
@@ -798,6 +812,7 @@ export class Orchestrator {
 				return {
 					name,
 					sessionFile,
+					promptText: plan.taskText,
 					...(plan.recordModel ? { model: plan.recordModel } : {}),
 				};
 			} catch (error) {
@@ -893,6 +908,7 @@ export class Orchestrator {
 		thinking?: string | false;
 		worktreePath?: string;
 		worktreeBranch?: string;
+		promptText?: string;
 	}): ChildRecord {
 		const { name, agent, sessionFile } = input;
 		const child: ChildRecord = {
@@ -920,6 +936,7 @@ export class Orchestrator {
 			...(input.thinking !== undefined ? { thinking: input.thinking } : {}),
 			...(input.worktreePath ? { worktreePath: input.worktreePath } : {}),
 			...(input.worktreeBranch ? { worktreeBranch: input.worktreeBranch } : {}),
+			...(input.promptText ? { promptText: input.promptText } : {}),
 		};
 		this.children.set(name, child);
 		this.spawned += 1;
@@ -1001,12 +1018,26 @@ export class Orchestrator {
 			);
 		}
 
+		if (wait === "gone") {
+			return this.finishCollect(
+				child,
+				parsed,
+				{
+					status: "aborted",
+					reason: "herdr agent gone (tab or pane closed)",
+					model: child.model ?? null,
+				},
+				deadline,
+				await this.readPaneOutput(child),
+			);
+		}
+
 		return this.finishCollect(
 			child,
 			parsed,
 			await this.executionFromPane(child, timedOut, timeoutMs),
 			deadline,
-			await this.readPaneOutput(child),
+			await this.readPaneForCollect(child, deadline),
 		);
 	}
 
@@ -1018,9 +1049,13 @@ export class Orchestrator {
 		paneOutput?: string,
 	): Promise<CollectResult> {
 		const output = paneOutput ?? parsed.output;
+		const lastTurnOutput =
+			paneOutput !== undefined
+				? stripPromptEcho(paneOutput, child.promptText)
+				: parsed.lastTurnOutput;
 		const forVerdict =
 			paneOutput !== undefined
-				? { ...parsed, lastTurnOutput: paneOutput, output: paneOutput }
+				? { ...parsed, lastTurnOutput, output: paneOutput }
 				: parsed;
 		const acceptance = await applyVerification(
 			deriveAcceptance(forVerdict, execution, child.pendingCriteria, {
@@ -1055,6 +1090,29 @@ export class Orchestrator {
 			lines: 200,
 		});
 		return read.ok ? read.value : "";
+	}
+
+	/**
+	 * Cursor's TUI can swallow a large `agent prompt` as `[Pasted text #N]`
+	 * or sit on workspace trust. If the pane still looks like that after
+	 * wait, send Enter once and wait again.
+	 */
+	private async readPaneForCollect(
+		child: ChildRecord,
+		deadline: number,
+	): Promise<string> {
+		let paneOutput = await this.readPaneOutput(child);
+		if (
+			child.kind !== "cursor" ||
+			!child.paneId ||
+			!paneLooksStuck(paneOutput, child.promptText)
+		) {
+			return paneOutput;
+		}
+		await bestEffort(this.client.agentSendKeys(child.name, "enter"));
+		if (await this.isAgentBlocked(child.name)) return paneOutput;
+		await this.awaitHerdrSettle(child, deadline);
+		return this.readPaneOutput(child);
 	}
 
 	private async executionFromPane(
@@ -1110,22 +1168,36 @@ export class Orchestrator {
 	}
 
 	/**
-	 * Herdr-native settle: `agent wait` then let a session file flush if it exists.
-	 * Used when jsonl has no turns yet (any kind, including pi before first write).
+	 * Herdr-native settle: sliced `agent wait` then a session-file quiet window.
+	 * Used when jsonl has no turns yet (any kind, including pi before first write)
+	 * and as phase 2 of `awaitTurn`.
+	 *
+	 * Slices rather than one remaining-timeout wait so F15 `tab close` surfaces
+	 * as `gone` instead of hanging until the worker timeout.
 	 */
 	private async awaitHerdrSettle(
 		child: ChildRecord,
 		deadline: number,
-	): Promise<"settled" | "timeout" | "blocked"> {
-		if (await this.isAgentBlocked(child.name)) return "blocked";
-		const remaining = Math.max(1, deadline - this.now());
-		const waited = await this.client.agentWait(child.name, {
-			timeoutMs: remaining,
-		});
-		await this.waitForQuiet(child.sessionFile, deadline);
-		if (await this.isAgentBlocked(child.name)) return "blocked";
-		if (!waited.ok && this.now() >= deadline) return "timeout";
-		return "settled";
+	): Promise<"settled" | "timeout" | "blocked" | "gone"> {
+		while (this.now() < deadline) {
+			const presence = await this.agentPresence(child.name);
+			if (presence === "blocked") return "blocked";
+			if (presence === "gone") return "gone";
+			const remaining = Math.max(1, deadline - this.now());
+			const waited = await this.client.agentWait(child.name, {
+				timeoutMs: Math.min(remaining, this.waitSliceMs),
+			});
+			if (waited.ok) {
+				await this.waitForQuiet(child.sessionFile, deadline);
+				const after = await this.agentPresence(child.name);
+				if (after === "blocked") return "blocked";
+				if (after === "gone") return "gone";
+				return "settled";
+			}
+			if (await this.isAgentGone(child.name)) return "gone";
+			if (await this.isAgentBlocked(child.name)) return "blocked";
+		}
+		return "timeout";
 	}
 
 	/**
@@ -1139,21 +1211,23 @@ export class Orchestrator {
 	 * Bounded by BOTH the deadline and an iteration cap: if an injected clock does
 	 * not advance with `sleep`, the deadline alone would spin forever.
 	 *
-	 * @returns whether the turn settled, timed out, or hit a tool approval.
+	 * @returns whether the turn settled, timed out, hit a tool approval, or the
+	 *   herdr agent disappeared (tab/pane close).
 	 */
 	private async awaitTurn(
 		child: ChildRecord,
 		initial: ReturnType<typeof parseSessionFile>,
 		deadline: number,
-	): Promise<"settled" | "timeout" | "blocked"> {
-		if (await this.isAgentBlocked(child.name)) return "blocked";
+	): Promise<"settled" | "timeout" | "blocked" | "gone"> {
 		const before = countAssistantMessages(initial);
 		const timeoutMs = deadline - this.now();
 		const maxPolls = Math.max(1, Math.ceil(timeoutMs / this.pollIntervalMs)) + 10;
 
 		let progressed = false;
 		for (let poll = 0; poll < maxPolls; poll += 1) {
-			if (await this.isAgentBlocked(child.name)) return "blocked";
+			const presence = await this.agentPresence(child.name);
+			if (presence === "blocked") return "blocked";
+			if (presence === "gone") return "gone";
 			const parsed = parseSessionFile(child.sessionFile);
 			if (countAssistantMessages(parsed) > before) {
 				progressed = true;
@@ -1163,20 +1237,31 @@ export class Orchestrator {
 			await this.sleep(this.pollIntervalMs);
 		}
 
-		// Nothing ever appeared: the caller gave up rather than the turn aborting.
-		if (!progressed) return "timeout";
+		// Nothing ever appeared: gone is an abort; otherwise the caller gave up.
+		if (!progressed) {
+			if (await this.isAgentGone(child.name)) return "gone";
+			return "timeout";
+		}
 
-		const remaining = Math.max(1_000, deadline - this.now());
-		await this.client.agentWait(child.name, { timeoutMs: remaining });
-		await this.waitForQuiet(child.sessionFile, deadline);
-		if (await this.isAgentBlocked(child.name)) return "blocked";
-		return "settled";
+		return this.awaitHerdrSettle(child, deadline);
+	}
+
+	private async agentPresence(
+		name: string,
+	): Promise<"blocked" | "gone" | "live"> {
+		const agentState = await this.client.agentGet(name);
+		if (!agentState.ok) {
+			return agentState.error.code === ErrorCodes.NOT_FOUND ? "gone" : "live";
+		}
+		return agentState.value.agent_status === "blocked" ? "blocked" : "live";
 	}
 
 	private async isAgentBlocked(name: string): Promise<boolean> {
-		const agentState = await this.client.agentGet(name);
-		if (!agentState.ok) return false;
-		return agentState.value.agent_status === "blocked";
+		return (await this.agentPresence(name)) === "blocked";
+	}
+
+	private async isAgentGone(name: string): Promise<boolean> {
+		return (await this.agentPresence(name)) === "gone";
 	}
 
 	private blockedResult(child: ChildRecord): CollectResult {

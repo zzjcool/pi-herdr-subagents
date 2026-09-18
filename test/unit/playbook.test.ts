@@ -9,10 +9,13 @@ import {
 
 test("playbook text is the frozen launch recipe", () => {
 	assert.match(PARENT_PLAYBOOK, /subagent\(\{ agent:/);
+	assert.match(PARENT_PLAYBOOK, /matching role/);
 	assert.match(PARENT_PLAYBOOK, /Forbidden/);
 	assert.match(PARENT_PLAYBOOK, /Isolation is YOUR call/);
 	assert.match(PARENT_PLAYBOOK, /worktree: true/);
 	assert.match(TOOL_DESCRIPTION, /async by default/);
+	assert.match(TOOL_DESCRIPTION, /scout\/planner\/worker\/reviewer\/oracle/);
+	assert.doesNotMatch(PARENT_PLAYBOOK, /agent: "worker"/);
 });
 
 test("shellChunks splits compound commands", () => {

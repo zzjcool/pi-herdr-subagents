@@ -90,8 +90,12 @@ function nativeStartArgs(
 ): string[] {
 	const args: string[] = [];
 	if (nativeModel) args.push("--model", nativeModel);
-	if (agent.kind === "cursor" && agent.onBlocked === "auto-approve") {
-		args.push("--force");
+	if (agent.kind === "cursor") {
+		// `--force` skips command approval. Workspace trust is a different
+		// dialog; without `--trust` the TUI sits on "Workspace Trust Required"
+		// and `herdr agent prompt` never starts a turn.
+		args.push("--trust");
+		if (agent.onBlocked === "auto-approve") args.push("--force");
 	}
 	return args;
 }

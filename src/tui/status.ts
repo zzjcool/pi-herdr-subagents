@@ -7,6 +7,7 @@
  * plus `requestRender`, not a one-shot `string[]` on a dying context.
  */
 
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isThinkingLevel } from "../shared/types.ts";
 
 export const STATUS_WIDGET_KEY = "herdr-subagent-status";
@@ -188,6 +189,16 @@ function themeLines(lines: string[], theme: Theme): string[] {
 	return out;
 }
 
+/** Pi TUI asserts every rendered line's visibleWidth <= columns. */
+function fitLines(lines: string[], width?: number): string[] {
+	if (width === undefined || !Number.isFinite(width) || width <= 0) {
+		return lines;
+	}
+	return lines.map((line) =>
+		visibleWidth(line) <= width ? line : truncateToWidth(line, width),
+	);
+}
+
 export interface StatusBoard {
 	bind(ctx: StatusUi): void;
 	paint(entries: StatusEntry[], now: number): void;
@@ -244,7 +255,7 @@ export function createStatusBoard(): StatusBoard {
 				(nextTui, theme) => {
 					tui = nextTui;
 					return {
-						render: () => renderLines(Date.now(), theme),
+						render: (width) => fitLines(renderLines(Date.now(), theme), width),
 						dispose: () => {
 							if (tui === nextTui) {
 								tui = undefined;

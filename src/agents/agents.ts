@@ -709,3 +709,26 @@ export function formatAgentList(agents: AgentConfig[], maxItems = 50): string {
 		.map((a) => `${a.name} (${a.source}): ${a.description}`)
 		.join("; ");
 }
+
+/**
+ * Roster injected into the parent system prompt so the model can pick a role
+ * without calling `action=list` first. Custom user/project agents (search, …)
+ * only exist here — they are not hardcoded in the playbook.
+ */
+export function formatAgentRoster(agents: AgentConfig[]): string {
+	if (agents.length === 0) {
+		return "No subagent roles loaded. Add ~/.pi/agent/agents/*.md or .pi/agents/*.md.";
+	}
+	const lines = agents.map((a) => {
+		const extras = [
+			a.kind && a.kind !== "pi" ? `kind=${a.kind}` : undefined,
+			a.model ? `model=${a.model}` : undefined,
+		].filter((part): part is string => Boolean(part));
+		const meta = extras.length ? ` (${extras.join(", ")})` : "";
+		return `- ${a.name} [${a.source}]${meta} — ${a.description}`;
+	});
+	return [
+		"Available subagent roles (call the matching name immediately; do not DIY that job with bash/curl):",
+		...lines,
+	].join("\n");
+}

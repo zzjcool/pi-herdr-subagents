@@ -84,11 +84,21 @@ test("planKindStart: every kind omits the task from start argv", () => {
 		assert.deepEqual(cursor.args, [
 			"--model",
 			"cursor-grok-4.6-high",
+			"--trust",
 			"--force",
 		]);
 		assert.equal(cursor.recordModel, "cursor-grok-4.6-high");
 		assert.match(cursor.taskText, /You are a test agent/);
 		assert.match(cursor.taskText, /do the thing/);
+
+		const trusted = planKindStart({
+			agent: agent({ kind: "cursor" }),
+			task: "do the thing",
+			sessionFile: "/tmp/s.jsonl",
+			tempDir: dir,
+			model: "grok-4.6",
+		});
+		assert.deepEqual(trusted.args, ["--model", "cursor-grok-4.6-high", "--trust"]);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

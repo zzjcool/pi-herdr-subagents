@@ -156,8 +156,10 @@ Useful launch fields: `model`, `cwd`, `placement` (`split-down` / `split-right` 
 edit the current checkout; omit = role default), `agentScope` (`user` /
 `project` / `both`), `async`.
 
-Handles look like `reviewer-0`. `subagent({ action: "list" })` is the way to
-see roles; `status` / `collect` take `name`.
+Handles look like `reviewer-0`. Every loaded role (builtin plus
+`~/.pi/agent/agents` and project `.pi/agents`) is injected into the parent
+system prompt each turn — that is how the model knows to call `search` without
+`action=list` first. `status` / `collect` take `name`.
 
 ## Bundled roles
 
@@ -468,7 +470,7 @@ the runtime table above — trust this README and `action=list`’s
 - **Not a sandbox** (F23–F25): child-guard covers bash/herdr dispatch and
   read-only writes; it does not give you process isolation.
 - **`agent_status` has no success/failure semantics** (F26).
-- **Non-pi kinds degrade** (F7): same Herdr control plane (`start` → `prompt` → `wait`), but no usage and outcome is `unknown` unless the pane text includes a verdict JSON. Resume depends on each CLI.
+- **Non-pi kinds degrade** (F7): same Herdr control plane (`start` → `prompt` → `wait`), but no usage and outcome is `unknown` unless the pane text includes a verdict JSON that is not just the echoed launch prompt. Cursor starts with `--trust` (and `--force` when `onBlocked: auto-approve`) so workspace-trust does not block the first prompt. Resume depends on each CLI.
 - **`blocked` is screen-heuristic**: false positives exist; the confirm is
   paired with the collect timeout as a backstop.
 - **Verification** runs `criterion.command` when a required criterion asks
