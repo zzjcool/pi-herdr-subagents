@@ -1,6 +1,6 @@
 {
   "name": "@zzjcool/pi-herdr-subagents",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Herdr-backed subagents for Pi: visible, steerable, resumable child agents in Herdr panes",
   "type": "module",
   "license": "MIT",
