@@ -167,13 +167,17 @@ export {
 	deliverCompletion,
 	formatCollectFailure,
 	formatCompletionNotice,
+	formatNoticeHeadline,
+	formatSize,
 	SUBAGENT_NOTIFY_TYPE,
 } from "./extension/notify.ts";
 export type {
+	CompletionDetails,
 	CompletionInput,
 	CompletionNotice,
 	SendMessageOptions,
 } from "./extension/notify.ts";
+export { renderSubagentNotice } from "./extension/notice-renderer.ts";
 export {
 	applyOnBlockedPolicy,
 	followUpFor,

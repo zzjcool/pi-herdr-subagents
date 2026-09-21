@@ -5,8 +5,12 @@
  * the child, then injects a custom message into the parent session with
  * `triggerTurn` so the parent wakes up and reads the result.
  *
- * `display` is false on success (the LLM still sees it; the transcript stays
- * quiet) and true on failure/stop, matching pi-subagents' notify.ts.
+ * Every notice is `display: true` so the transcript records the completion.
+ * pi-subagents kept success quiet (`display: false`) to avoid a 4 KB purple
+ * block per child; we render instead of hiding: `notice-renderer.ts` collapses
+ * a completed notice to one line (`ctrl+o` expands it), and failures fall
+ * through to Pi's default Markdown block. The payload the LLM sees is the same
+ * either way — `display` only steers the TUI.
  *
  * Delivery is `followUp`, not the default `steer`. Steer would hijack the
  * parent's next LLM call while it is still in a tool loop. Follow-up waits
@@ -32,6 +36,75 @@ export interface CompletionNotice {
 	content: string;
 	display: boolean;
 	status: CompletionStatus;
+	/** TUI-only metadata; persisted with the entry, never sent to the LLM. */
+	details: CompletionDetails;
+}
+
+/**
+ * Structured copy of a notice for the TUI renderer.
+ *
+ * Kept free of the (up to 4 KB) output preview so the collapsed line can be
+ * laid out without parsing `content` back apart.
+ */
+export interface CompletionDetails {
+	status: CompletionStatus;
+	name: string;
+	agent?: string;
+	execution: { status: string; reason?: string };
+	acceptance?: { status: string; level?: string };
+	sessionFile?: string;
+	outputBytes: number;
+	recycled?: boolean;
+}
+
+/** `1234` -> `1.2 KB`, so the collapsed line says how much landed. */
+export function formatSize(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+/**
+ * Strip what would break a one-row TUI line: control characters (newline,
+ * ESC included) and any escape sequence they could have introduced.
+ *
+ * Child names are usually sanitized in `src/shared/name.ts`, but `agent`
+ * labels and labels from non-pi kinds come from pane titles and frontmatter
+ * the extension does not control. Everything the headline interpolates
+ * passes through here.
+ */
+export function sanitizeNoticeField(value: string): string {
+	return value.replace(/[\x00-\x1f\x7f]/g, "");
+}
+
+/** `✓ worker-0 (worker) · success · acceptance accepted (verified) · 1.2 KB`. */
+export function formatNoticeHeadline(details: CompletionDetails): string {
+	const glyph =
+		details.status === "completed"
+			? "✓"
+			: details.status === "stopped"
+				? "■"
+				: "✗";
+	const label = sanitizeNoticeField(
+		details.agent
+			? `${details.name} (${details.agent})`
+			: details.name,
+	);
+	const reason = details.execution.reason
+		? sanitizeNoticeField(details.execution.reason)
+		: "";
+	const bits = [
+		`${sanitizeNoticeField(details.execution.status)}${reason ? ` (${reason})` : ""}`,
+	];
+	if (details.acceptance) {
+		const level = details.acceptance.level
+			? ` (${sanitizeNoticeField(details.acceptance.level)})`
+			: "";
+		bits.push(
+			`acceptance ${sanitizeNoticeField(details.acceptance.status)}${level}`,
+		);
+	}
+	bits.push(formatSize(details.outputBytes));
+	return `${glyph} ${label} · ${bits.join(" · ")}`;
 }
 
 const PREVIEW_CHARS = 4_000;
@@ -80,13 +153,14 @@ export function formatCompletionNotice(input: CompletionInput): CompletionNotice
 	const acceptance = input.acceptance
 		? `acceptance: ${input.acceptance.status}${input.acceptance.level ? ` (${input.acceptance.level})` : ""}`
 		: undefined;
+	const preview = previewOutput(input.output);
 	const content = [
 		`Background task ${status}: **${label}**`,
 		"",
 		`execution: ${input.execution.status}${reason}`,
 		acceptance,
 		"",
-		previewOutput(input.output),
+		preview,
 		input.sessionFile ? "" : undefined,
 		input.sessionFile ? `Session file: ${input.sessionFile}` : undefined,
 		input.recycled === false
@@ -97,8 +171,26 @@ export function formatCompletionNotice(input: CompletionInput): CompletionNotice
 		.join("\n");
 	return {
 		content,
-		display: status !== "completed",
+		display: true,
 		status,
+		details: {
+			status,
+			name: input.name,
+			agent: input.agent,
+			execution: {
+				status: input.execution.status,
+				reason: input.execution.reason,
+			},
+			acceptance: input.acceptance
+				? {
+						status: input.acceptance.status,
+						level: input.acceptance.level,
+					}
+				: undefined,
+			sessionFile: input.sessionFile,
+			outputBytes: Buffer.byteLength(preview),
+			recycled: input.recycled,
+		},
 	};
 }
 
@@ -122,6 +214,7 @@ export interface SendMessageApi {
 			customType: string;
 			content: string;
 			display: boolean;
+			details?: unknown;
 		},
 		options?: SendMessageOptions,
 	): void;
@@ -157,6 +250,7 @@ export function deliverCompletion(
 				customType: SUBAGENT_NOTIFY_TYPE,
 				content: notice.content,
 				display: notice.display,
+				details: notice.details,
 			},
 			completionDeliveryOptions(triggerTurn),
 		);

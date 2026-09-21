@@ -37,6 +37,7 @@ const FAKE_HERDR_BIN = fileURLToPath(
 function fakePi(): {
 	tools: Array<Record<string, unknown>>;
 	registerTool: (tool: unknown) => void;
+	registerMessageRenderer: () => void;
 	on: () => void;
 	registerCommand: () => void;
 	sendMessage: () => void;
@@ -48,6 +49,7 @@ function fakePi(): {
 		registerTool(tool: unknown) {
 			tools.push(tool as Record<string, unknown>);
 		},
+		registerMessageRenderer() {},
 		on() {},
 		registerCommand() {},
 		sendMessage() {},

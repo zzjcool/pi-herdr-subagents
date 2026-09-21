@@ -66,7 +66,8 @@ test("runtime: async watch notifies the parent once and drops the widget entry",
 		options: { triggerTurn: boolean; deliverAs: string };
 	};
 	assert.equal(sent.message.customType, SUBAGENT_NOTIFY_TYPE);
-	assert.equal(sent.message.display, false);
+	// display: true — the transcript records every finish, not just failures.
+	assert.equal(sent.message.display, true);
 	assert.equal(sent.options.triggerTurn, true);
 	assert.equal(sent.options.deliverAs, "followUp");
 	assert.match(sent.message.content, /Background task completed: \*\*worker-0 \(worker\)\*\*/);
