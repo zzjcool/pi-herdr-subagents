@@ -14,9 +14,9 @@ export type RecommendedRoleTier = "cheap" | "medium" | "strong";
 export type ClassificationSource = "official-metadata" | "heuristic-name";
 
 export const TIER_AGENTS = {
-	cheap: ["scout"],
+	cheap: ["scout", "prototype"],
 	medium: ["planner"],
-	strong: ["worker", "reviewer", "oracle"],
+	strong: ["worker", "reviewer", "designer"],
 } as const;
 
 export type BuiltinProfileAgent =

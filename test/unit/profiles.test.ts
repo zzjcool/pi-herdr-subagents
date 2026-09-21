@@ -52,14 +52,13 @@ test("every bundled role is assigned a cheap/medium/strong tier", () => {
 		...TIER_AGENTS.medium,
 		...TIER_AGENTS.strong,
 	]);
-	assert.deepEqual([...assigned].sort(), [...BUILTIN_AGENT_NAMES].sort());
-	assert.deepEqual(agentsForRoleTier("cheap"), ["scout"]);
-	assert.deepEqual(agentsForRoleTier("medium"), ["planner"]);
-	assert.deepEqual(agentsForRoleTier("strong"), [
-		"worker",
-		"reviewer",
-		"oracle",
-	]);
+	// advisor is a cursor-kind role: it carries its own model and never takes
+	// a pi-tier override, so the tier system must cover every PI role exactly.
+	const piRoles = BUILTIN_AGENT_NAMES.filter((n) => n !== "advisor");
+	assert.deepEqual([...assigned].sort(), [...piRoles].sort());
+	assert.deepEqual(agentsForRoleTier("cheap"), [...TIER_AGENTS.cheap]);
+	assert.deepEqual(agentsForRoleTier("medium"), [...TIER_AGENTS.medium]);
+	assert.deepEqual(agentsForRoleTier("strong"), [...TIER_AGENTS.strong]);
 });
 
 test("name heuristics: flash/haiku/sonnet/opus bands", () => {
@@ -154,13 +153,15 @@ test("buildProfileFile maps our five roles onto the three tiers", () => {
 		strong: "cb/opus",
 	});
 	assert.equal(file.subagents.agentOverrides.scout?.model, "cb/flash");
+	assert.equal(file.subagents.agentOverrides.prototype?.model, "cb/flash");
 	assert.equal(file.subagents.agentOverrides.planner?.model, "cb/sonnet");
 	assert.equal(file.subagents.agentOverrides.worker?.model, "cb/opus");
 	assert.equal(file.subagents.agentOverrides.reviewer?.model, "cb/opus");
-	assert.equal(file.subagents.agentOverrides.oracle?.model, "cb/opus");
+	assert.equal(file.subagents.agentOverrides.designer?.model, "cb/opus");
 	assert.equal(
 		Object.keys(file.subagents.agentOverrides).length,
-		BUILTIN_AGENT_NAMES.length,
+		[...TIER_AGENTS.cheap, ...TIER_AGENTS.medium, ...TIER_AGENTS.strong]
+			.length,
 	);
 });
 
@@ -214,11 +215,11 @@ test("applySubagentProfile writes agentOverrides and keeps other settings", asyn
 		assert.equal(saved.subagents.modelScope.enforce, true);
 		assert.equal(saved.subagents.herdr.maxConcurrentAgents, 3);
 		const scout = saved.subagents.agentOverrides.scout;
-		const oracle = saved.subagents.agentOverrides.oracle;
+		const reviewer = saved.subagents.agentOverrides.reviewer;
 		assert.ok(scout);
-		assert.ok(oracle);
+		assert.ok(reviewer);
 		assert.equal(scout.model, "cb/flash");
-		assert.equal(oracle.model, "cb/opus");
+		assert.equal(reviewer.model, "cb/opus");
 	});
 });
 

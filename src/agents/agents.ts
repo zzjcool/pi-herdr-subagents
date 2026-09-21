@@ -35,7 +35,9 @@ export const BUILTIN_AGENT_NAMES = [
 	"planner",
 	"reviewer",
 	"worker",
-	"oracle",
+	"advisor",
+	"designer",
+	"prototype",
 ] as const;
 
 /**

@@ -66,7 +66,8 @@ test("runtime: async watch notifies the parent once and drops the widget entry",
 		options: { triggerTurn: boolean; deliverAs: string };
 	};
 	assert.equal(sent.message.customType, SUBAGENT_NOTIFY_TYPE);
-	assert.equal(sent.message.display, false);
+	// display: true — the transcript records every finish, not just failures.
+	assert.equal(sent.message.display, true);
 	assert.equal(sent.options.triggerTurn, true);
 	assert.equal(sent.options.deliverAs, "followUp");
 	assert.match(sent.message.content, /Background task completed: \*\*worker-0 \(worker\)\*\*/);
@@ -426,7 +427,8 @@ test("runtime: same-run children batch into exactly one grouped notice", async (
 	assert.match(sent.content, /worker-1 \(worker\): completed — acceptance: accepted \(attested\)/);
 	assert.match(sent.content, /first done/);
 	assert.match(sent.content, /second done/);
-	assert.equal(sent.display, false);
+	// display:true since master f966088 (renderer collapses the row).
+	assert.equal(sent.display, true);
 	await waitFor(() => runtime.activeJobs().length === 0, "both released");
 });
 

@@ -43,6 +43,7 @@ import { formatAlreadyRecycled } from "./src/extension/recycle.ts";
 import {
 	SUBAGENT_NOTIFY_TYPE,
 } from "./src/extension/notify.ts";
+import { renderSubagentNotice } from "./src/extension/notice-renderer.ts";
 import { registerProfileCommands } from "./src/extension/slash.ts";
 import {
 	blockMessage,
@@ -191,6 +192,10 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 		registerChildGuard(pi);
 		if (!allowNested) return;
 	}
+
+	// The parent transcript records every finish; the renderer keeps a
+	// completed child to one line so visibility does not cost a screen.
+	pi.registerMessageRenderer(SUBAGENT_NOTIFY_TYPE, renderSubagentNotice);
 
 	const layout = createSessionLayout();
 	let lastModelRegistry: ExtensionContext["modelRegistry"] | undefined;

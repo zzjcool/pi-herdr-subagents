@@ -221,7 +221,10 @@ launch (async) ──→ 子 pane 跑
                     { triggerTurn: true, deliverAs: "followUp" })
                  父会话空闲则立刻唤醒；若父会话还在跑当前 turn（工具循环），
                  等这一轮结束后再投递，避免 steer 打断正在干的事。
-                 成功默认 display:false（不刷屏），失败才显示。
+                 所有状态都 display:true（transcript 留下完成/失败记录）；
+                 成功由 notice-renderer 压成单行并按 pane 宽度硬截断
+                 （控制字符已消毒，ctrl+o 展开），
+                 失败/中止保留完整块，details 只供 TUI 不进 LLM 上下文。
 ```
 
 父 agent 的正确用法：`subagent` 工具 launch 之后把控制权交回用户，等 completion
@@ -598,7 +601,7 @@ preset 规则：
   "subagents": {
     "defaultModel": "cb/glm-5.3-flash",
     "defaultProvider": "cb",
-    "agentOverrides": { "oracle": { "model": "cb/claude-opus-5" } },
+    "agentOverrides": { "reviewer": { "model": "cb/claude-opus-5" } },
     "agentOverridesByProvider": { "cb": { "worker": { "model": "cb/glm-5.3-flash" } } },
     "presets": {
       "cheap": { "kind": "pi", "model": "cb/deepseek-v4.1-flash", "thinking": "low" },
@@ -626,9 +629,11 @@ preset 规则：
 
 | 档 | 角色 |
 | --- | --- |
-| cheap | scout |
+| cheap | scout, prototype |
 | medium | planner |
-| strong | worker, reviewer, oracle |
+| strong | worker, reviewer, designer |
+
+（advisor 为 cursor kind 自带模型，不参与 pi 档位。）
 
 流程：`/subagents-refresh-provider-models` 拉供应商目录 →
 `/subagents-generate-profiles` 写出 `<provider>.quota`（偏省）和
