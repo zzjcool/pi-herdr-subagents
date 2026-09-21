@@ -23,7 +23,7 @@ export const PARENT_PLAYBOOK = [
 
 export const TOOL_DESCRIPTION = [
 	PARENT_PLAYBOOK,
-	"Roles: the system prompt lists every loaded role each turn (bundled scout/planner/worker/reviewer/oracle plus ~/.pi/agent/agents and project .pi/agents). Prefer the matching role over doing that work yourself.",
+	"Roles: the system prompt lists every loaded role each turn (bundled scout/planner/worker/reviewer/advisor/designer/prototype plus ~/.pi/agent/agents and project .pi/agents). Prefer the matching role over doing that work yourself.",
 	"Launch is async by default. Outcomes come from the child session JSONL, not herdr's agent_status.",
 	"Actions: launch (default), continue, steer, resume, status, collect, list. Panes recycle automatically when a turn finishes.",
 ].join(" ");

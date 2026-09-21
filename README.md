@@ -68,7 +68,8 @@ pi install /path/to/herdr-subagents
 ```
 
 Then **reload the parent session** (`/reload`, or restart Pi). After install,
-five roles (`scout`, `planner`, `worker`, `reviewer`, `oracle`) are available
+seven roles (`scout`, `planner`, `worker`, `reviewer`, `advisor`, `designer`,
+`prototype`) are available
 with no extra files to copy — see [Bundled roles](#bundled-roles).
 
 To update a git install: `pi update`. To switch from a path/git install to npm
@@ -175,7 +176,9 @@ alone would be silently ignored.
 | `planner` | Turn a task into a parallelisable, verifiable plan; freeze interfaces. | attested |
 | `worker` | Implement a frozen plan on an isolated worktree; open an MR; run tests; self-report a verdict. | **verified** via `npm run typecheck && npm test` |
 | `reviewer` | Read-only adversarial review; findings with path + severity. | attested, **read-only** bash |
-| `oracle` | Final arbitration on a contested plan. | attested |
+| `advisor` | Decision counsel and final arbitration on contested options (A-vs-B rulings). Grok via cursor. | attested |
+| `designer` | Front-end UI/visual/interaction design: design tokens, full-state matrices, and the component implementation. UI layer only — business logic stays with `worker`. | **verified** via build |
+| `prototype` | Single-file clickable HTML prototypes to validate an interaction flow before real implementation. | attested, writer |
 
 Bundled roles do **not** pin a vendor model. A child uses the parent session’s
 model unless you set `subagents.defaultModel`,
@@ -194,12 +197,21 @@ launch, `tasks[]`, and `chain[]` all accept it):
   "subagents": {
     "presets": {
       "cheap":  { "kind": "pi", "model": "cb/deepseek-v4.1-flash", "thinking": "low" },
-      "strong": { "kind": "pi", "model": "cb/kimi-k3", "thinking": "high" },
-      "visual": { "kind": "cursor", "model": "grok-4.6" }
+      "coder":  { "kind": "pi", "model": "cb/deepseek-v4.1-flash", "thinking": "max" },
+      "medium": { "kind": "pi", "model": "cb/glm-5.3", "thinking": "high" },
+      "strong": { "kind": "pi", "model": "cb/kimi-k3", "thinking": "max" },
+      "strongest": { "kind": "cursor", "model": "grok-4.6", "thinking": "xhigh" }
     }
   }
 }
 ```
+
+One calibrated mapping (2026-09 snapshot — re-verify against current
+benchmarks before adopting) aligns each role with what its model is measured
+best at, not with price-tier folklore: cheap flash for scouting, a coder-tier
+flash for implementation (same-card benchmarks had it out-coding flagships at
+1/20 the price), a reasoning-strong model for adversarial review, and grok for
+decision arbitration.
 
 Model precedence, strongest first:
 
@@ -251,9 +263,11 @@ the parent session model every time.
 
 | Tier | Roles |
 | --- | --- |
-| cheap | `scout` |
+| cheap | `scout`, `prototype` |
 | medium | `planner` |
-| strong | `worker`, `reviewer`, `oracle` |
+| strong | `worker`, `reviewer`, `designer` |
+
+(`advisor` is cursor-kind and carries its own model, so it never takes a pi-tier override.)
 
 ```text
 /subagents-refresh-provider-models <provider>
@@ -280,9 +294,9 @@ You can still hand-write the same mapping:
     "agentOverrides": {
       "scout": { "model": "your-provider/fast-model" },
       "planner": { "model": "your-provider/mid-model" },
-      "worker": { "model": "your-provider/strong-model" },
-      "reviewer": { "model": "your-provider/strong-model" },
-      "oracle": { "model": "your-provider/strong-model" }
+      "worker": { "model": "your-provider/strong-coder" },
+      "reviewer": { "model": "your-provider/strong-reasoner" },
+      "designer": { "model": "your-provider/strong-model" }
     }
   }
 }

@@ -601,7 +601,7 @@ preset 规则：
   "subagents": {
     "defaultModel": "cb/glm-5.3-flash",
     "defaultProvider": "cb",
-    "agentOverrides": { "oracle": { "model": "cb/claude-opus-5" } },
+    "agentOverrides": { "reviewer": { "model": "cb/claude-opus-5" } },
     "agentOverridesByProvider": { "cb": { "worker": { "model": "cb/glm-5.3-flash" } } },
     "presets": {
       "cheap": { "kind": "pi", "model": "cb/deepseek-v4.1-flash", "thinking": "low" },
@@ -629,9 +629,11 @@ preset 规则：
 
 | 档 | 角色 |
 | --- | --- |
-| cheap | scout |
+| cheap | scout, prototype |
 | medium | planner |
-| strong | worker, reviewer, oracle |
+| strong | worker, reviewer, designer |
+
+（advisor 为 cursor kind 自带模型，不参与 pi 档位。）
 
 流程：`/subagents-refresh-provider-models` 拉供应商目录 →
 `/subagents-generate-profiles` 写出 `<provider>.quota`（偏省）和
