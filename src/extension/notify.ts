@@ -102,13 +102,105 @@ export function formatCompletionNotice(input: CompletionInput): CompletionNotice
 	};
 }
 
-export function formatCollectFailure(name: string, error: unknown): CompletionNotice {
-	return formatCompletionNotice({
+export function collectFailureInput(
+	name: string,
+	error: unknown,
+): CompletionInput {
+	return {
 		name,
 		execution: { status: "failed", reason: String(error) },
 		output: String(error),
 		recycled: false,
-	});
+	};
+}
+
+export function formatCollectFailure(name: string, error: unknown): CompletionNotice {
+	return formatCompletionNotice(collectFailureInput(name, error));
+}
+
+// ---------------------------------------------------------------------------
+// Grouped (smart-join) delivery
+// ---------------------------------------------------------------------------
+
+export interface GroupedEntry extends CompletionInput {
+	status: CompletionStatus;
+}
+
+export interface GroupedCompletionInput {
+	/** Omitted run header when absent. */
+	runId?: string;
+	entries: GroupedEntry[];
+	/** Members still running at flush time (partial flush). */
+	stillRunning?: string[];
+}
+
+/**
+ * Merge several terminal children into ONE notice so a fan-out wakes the
+ * parent once, not once per child:
+ *
+ *   Background tasks completed (2 of 3):
+ *   - worker-0 (worker): completed — acceptance: accepted (attested)
+ *     <previewOutput, per-entry cap max(500, PREVIEW_CHARS/entries.length)>
+ *   - reviewer-1: failed (model error)
+ *   Still running: slow-2 (notifies separately when it finishes)
+ *
+ * Recycle is per-entry (a wait()-released sibling can race the flush, so a
+ * blanket "Pane recycled" footer could lie): entries whose pane was actually
+ * recycled carry an inline "(pane recycled)" marker.
+ * Aggregate status: any failed → "failed"; else any stopped → "stopped";
+ * else "completed". `display` follows the single-notice rule.
+ */
+export function formatGroupedNotice(
+	input: GroupedCompletionInput,
+): CompletionNotice {
+	const entries = input.entries;
+	const stillRunning = input.stillRunning ?? [];
+	const perEntryMax = Math.max(
+		500,
+		Math.floor(PREVIEW_CHARS / Math.max(1, entries.length)),
+	);
+	const header =
+		stillRunning.length > 0
+			? `Background tasks completed (${entries.length} of ${entries.length + stillRunning.length}):`
+			: `Background tasks completed (${entries.length}):`;
+	const lines: string[] = [];
+	if (input.runId) lines.push(`Run: ${input.runId}`);
+	lines.push(header);
+	let anyFailed = false;
+	let anyStopped = false;
+	for (const entry of entries) {
+		if (entry.status === "failed") anyFailed = true;
+		if (entry.status === "stopped") anyStopped = true;
+		const label = entry.agent
+			? `${entry.name} (${entry.agent})`
+			: entry.name;
+		const reason = entry.execution.reason
+			? ` (${entry.execution.reason})`
+			: "";
+		const acceptance = entry.acceptance
+			? ` — acceptance: ${entry.acceptance.status}${entry.acceptance.level ? ` (${entry.acceptance.level})` : ""}`
+			: "";
+		// recycled is per-entry truth: a wait()-consumed sibling may already
+		// be released while this pane is still open, so no blanket footer.
+		const recycled = entry.recycled === false ? "" : " (pane recycled)";
+		lines.push(`- ${label}: ${entry.status}${reason}${acceptance}${recycled}`);
+		lines.push(`  ${previewOutput(entry.output, perEntryMax)}`);
+	}
+	if (stillRunning.length > 0) {
+		lines.push(
+			`Still running: ${stillRunning.join(", ")} (notifies separately when it finishes)`,
+		);
+	}
+	const status: CompletionStatus = anyFailed
+		? "failed"
+		: anyStopped
+			? "stopped"
+			: "completed";
+	return {
+		content: lines.join("\n"),
+		display: status !== "completed",
+		status,
+	};
 }
 
 export interface SendMessageOptions {

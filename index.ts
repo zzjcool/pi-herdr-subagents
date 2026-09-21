@@ -31,7 +31,8 @@ import {
 	loadSubagentSettings,
 	resolveSubagentSettings,
 } from "./src/agents/settings.ts";
-import { createSessionRuntime, type SessionRuntime, shouldRecycleAfterCollect } from "./src/extension/runtime.ts";
+import { createSessionRuntime, type SessionRuntime, shouldRecycleAfterCollect, type WaitResult } from "./src/extension/runtime.ts";
+import { DEFAULT_FLUSH_MS, DEFAULT_JOIN_MODE } from "./src/extension/join.ts";
 import { registerChildGuard } from "./src/extension/child-guard.ts";
 import { ALLOW_NESTED_ENV } from "./src/extension/budget.ts";
 import {
@@ -106,6 +107,7 @@ const SubagentParams = Type.Object({
 				Type.Literal("status"),
 				Type.Literal("collect"),
 				Type.Literal("list"),
+				Type.Literal("wait"),
 			],
 			{ description: "Defaults to launch." },
 		),
@@ -152,6 +154,16 @@ const SubagentParams = Type.Object({
 	name: Type.Optional(
 		Type.String({ description: "Child handle name (control actions)" }),
 	),
+	all: Type.Optional(
+		Type.Boolean({
+			description: "wait: wait for every currently-running child in this session",
+		}),
+	),
+	timeoutMs: Type.Optional(
+		Type.Number({
+			description: "wait: per-child timeout in ms (default: role turnTimeoutMs)",
+		}),
+	),
 	message: Type.Optional(
 		Type.String({ description: "Text for steer/continue" }),
 	),
@@ -184,6 +196,10 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	let lastModelRegistry: ExtensionContext["modelRegistry"] | undefined;
 	let lastConfirm: ((message: string) => Promise<boolean>) | undefined;
 	let lastCwd = process.cwd();
+	// turn_start/turn_end maintain this so a flush window can wait out a
+	// busy parent instead of queueing behind the whole turn (join extends
+	// the window at most MAX_BUSY_EXTENSIONS times).
+	let parentTurnActive = false;
 	const runtime = createSessionRuntime({
 		sendMessage: (message, options) => pi.sendMessage(message, options),
 		emitBusy: (active, label) => {
@@ -248,6 +264,11 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 			const cwd = params.cwd ?? ctx.cwd;
 			const store = new RunStore({ rootDir: path.join(cwd, ".pi-subagents") });
 			const { agents, settings } = loadCatalog(ctx.cwd, cwd, params.agentScope);
+			runtime.setJoinConfig({
+				mode: settings.joinMode ?? DEFAULT_JOIN_MODE,
+				flushMs: settings.joinFlushMs ?? DEFAULT_FLUSH_MS,
+				parentBusy: () => parentTurnActive,
+			});
 
 			if (action === "list") return listAgents(agents);
 
@@ -313,8 +334,14 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 
 	pi.on("session_start", bindUi);
 	pi.on("session_info_changed", bindUi);
-	pi.on("turn_start", bindUi);
-	pi.on("turn_end", bindUi);
+	pi.on("turn_start", (event, ctx) => {
+		parentTurnActive = true;
+		bindUi(event, ctx);
+	});
+	pi.on("turn_end", (event, ctx) => {
+		parentTurnActive = false;
+		bindUi(event, ctx);
+	});
 	pi.on("agent_start", bindUi);
 	pi.on("agent_end", bindUi);
 	pi.on("input", bindUi);
@@ -378,6 +405,28 @@ async function controlAction(input: {
 	layout: SessionLayout;
 }): Promise<AgentToolResult<unknown>> {
 	const { action, params, store, cwd } = input;
+
+	if (action === "wait") {
+		if (params.name && params.all) {
+			return fail(
+				"`name` and `all` are mutually exclusive for wait.",
+				ErrorCodes.INVALID_PARAMS,
+			);
+		}
+		if (!params.name && !params.all) {
+			return fail(
+				"`name` or `all` is required for wait",
+				ErrorCodes.INVALID_PARAMS,
+			);
+		}
+		return waitAction({
+			params,
+			runtime: input.runtime,
+			agents: input.agents,
+			store,
+			cwd,
+		});
+	}
 
 	if (!params.name) {
 		return fail(
@@ -1159,6 +1208,107 @@ async function persistChild(
 	} catch {
 		// Not persisted yet (or already removed) — the caller's own addChild wins.
 	}
+}
+
+// ---------------------------------------------------------------------------
+// wait (§1.5): block for results instead of relying on async notices
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve which children a wait targets.
+ *
+ * `all` covers every LIVE child of this session runtime (working or blocked);
+ * `name` targets one. Both pre-check against the runtime so an untracked name
+ * fails loudly instead of hanging on a wait that can never resolve.
+ */
+export function resolveWaitTargets(
+	params: { name?: string; all?: boolean },
+	jobs: Array<{ name: string; state: string }>,
+): { ok: true; names: string[] } | { ok: false; message: string } {
+	const live = jobs.filter(
+		(job) => job.state === "working" || job.state === "blocked",
+	);
+	if (params.all) {
+		if (live.length === 0) {
+			return { ok: false, message: "no running children to wait for." };
+		}
+		return { ok: true, names: live.map((job) => job.name) };
+	}
+	const name = params.name;
+	if (!name) return { ok: false, message: "`name` or `all` is required for wait" };
+	if (live.some((job) => job.name === name)) {
+		return { ok: true, names: [name] };
+	}
+	return {
+		ok: false,
+		message: `unknown child: ${name} (not a live child of this session).`,
+	};
+}
+
+/** Render one wait result, reusing the collect shape for finished children. */
+export function renderWait(results: WaitResult[]): string {
+	let done = 0;
+	let running = 0;
+	const parts: string[] = [];
+	for (const result of results) {
+		if (result.snapshot) {
+			done += 1;
+			parts.push(renderCollect(result.name, result.snapshot));
+		} else if (result.stillRunning) {
+			running += 1;
+			parts.push(`── ${result.name} ──\nstill running`);
+		} else {
+			parts.push(`── ${result.name} ──\nnot tracked (no live job, no finished cache)`);
+		}
+	}
+	parts.push(`${done} done, ${running} still running`);
+	return parts.join("\n");
+}
+
+export async function waitAction(input: {
+	params: SubagentParams;
+	runtime: SessionRuntime;
+	agents: AgentConfig[];
+	store: RunStore;
+	cwd: string;
+}): Promise<AgentToolResult<unknown>> {
+	const { params, runtime, agents, store, cwd } = input;
+	const jobs = runtime.activeJobs();
+	let targets = resolveWaitTargets(
+		{ name: params.name, all: params.all },
+		jobs,
+	);
+	if (!targets.ok) {
+		// A name that is merely finished (not live) is still waitable via the
+		// runtime's finished cache — probe it with consumeCollect, which is
+		// side-effect free for a job that is not in the live set.
+		if (params.name && !params.all) {
+			const cached = runtime.consumeCollect(params.name);
+			if (cached) {
+				targets = { ok: true, names: [params.name] };
+			} else {
+				return unknownChild(params.name, store, cwd);
+			}
+		} else {
+			return fail(targets.message, ErrorCodes.INVALID_PARAMS);
+		}
+	}
+	// Default timeout: the strictest (smallest) role timeout among the
+	// targets. Each child's own collect gives up at its role timeout, so a
+	// wait that outlasts it only suppresses the notice without buying data.
+	const timeoutMs =
+		params.timeoutMs ??
+		Math.min(
+			...targets.names.map((name) => {
+				const role = jobs.find((job) => job.name === name)?.agent;
+				return (
+					agents.find((a) => a.name === role)?.timeoutMs ??
+					DEFAULTS.turnTimeoutMs
+				);
+			}),
+		);
+	const results = await runtime.wait(targets.names, { timeoutMs });
+	return ok(renderWait(results));
 }
 
 function listAgents(agents: AgentConfig[]): AgentToolResult<unknown> {

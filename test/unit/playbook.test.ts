@@ -87,3 +87,11 @@ test("forbiddenDispatchReason: inspection commands stay allowed", () => {
 		);
 	}
 });
+
+test("playbook explains merged completion notices and the wait action", () => {
+	// §1.6 frozen copy: grouped delivery + the wait escape hatch.
+	assert.match(PARENT_PLAYBOOK, /merged and delivered as one grouped message/);
+	assert.match(PARENT_PLAYBOOK, /subagent\(\{ action: "wait", all: true, timeoutMs \}\)/);
+	assert.match(PARENT_PLAYBOOK, /\(or `wait` with `name`\)/);
+	assert.match(TOOL_DESCRIPTION, /collect, wait, list/);
+});

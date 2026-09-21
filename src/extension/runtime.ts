@@ -11,10 +11,17 @@
 
 import {
 	deliverCompletion,
-	formatCollectFailure,
 	formatCompletionNotice,
+	formatGroupedNotice,
+	collectFailureInput,
 	type SendMessageApi,
 } from "./notify.ts";
+import {
+	DEFAULT_FLUSH_MS,
+	DEFAULT_JOIN_MODE,
+	JoinCoordinator,
+	type JoinConfig,
+} from "./join.ts";
 import {
 	createStatusBoard,
 	formatBusyLabel,
@@ -26,7 +33,7 @@ import {
 	progressFromSessionFile,
 	type LiveProgress,
 } from "../shared/progress.ts";
-import type { AgentKind } from "../shared/types.ts";
+import { DEFAULTS, type AgentKind } from "../shared/types.ts";
 
 export interface CollectSnapshot {
 	execution: { status: string; reason?: string };
@@ -93,16 +100,33 @@ export interface SessionRuntimeDeps {
 	refreshMs?: number;
 	/** How often to call `probe` (non-pi live fields). */
 	probeMs?: number;
+	/** Batching config; applied via setJoinConfig right after construction. */
+	joinConfig?: JoinConfig;
 }
 
 const DEFAULT_REFRESH_MS = 500;
 const DEFAULT_PROBE_MS = 2_000;
+/** Fallback per-child timeout for wait(); index.ts passes the role value. */
+const DEFAULT_WAIT_TIMEOUT_MS = DEFAULTS.turnTimeoutMs;
+
+/** A wait() promise that must settle by the deadline. */
+class WaitTimeoutError extends Error {}
 
 /** Recycle after collect unless the child is still waiting on the user. */
 export function shouldRecycleAfterCollect(status: string): boolean {
 	// `unknown` is terminal for non-pi kinds (F7: no jsonl). `running` means
 	// collect gave up while the agent is still alive — keep the pane.
 	return status !== "blocked" && status !== "running";
+}
+
+export interface WaitResult {
+	name: string;
+	/** Terminal snapshot (wait hit, or completed before the timeout). */
+	snapshot?: CollectSnapshot;
+	/** Still running when the timeout fired. */
+	stillRunning?: boolean;
+	/** Not tracked live and no finished cache (pre-validated upstream). */
+	missing?: boolean;
 }
 
 export interface SessionRuntime {
@@ -120,6 +144,16 @@ export interface SessionRuntime {
 	get(name: string): TrackedJob | undefined;
 	activeJobs(): TrackedJob[];
 	refreshUi(): void;
+	/** Forward join config to the internal coordinator (settings wiring). */
+	setJoinConfig(config: JoinConfig): void;
+	/**
+	 * Explicit wait: suppress auto-notify on the targets via consumedByTool
+	 * and aggregate their results. A timeout restores auto-notify.
+	 */
+	wait(
+		names: string[],
+		opts?: { timeoutMs?: number },
+	): Promise<WaitResult[]>;
 	dispose(): void;
 }
 
@@ -134,6 +168,62 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let disposed = false;
 	let busyRaised = false;
+
+	// Smart join: batch completion notices per runId. The deliver sink merges
+	// the buffered entries into ONE grouped message; an unbatched single-child
+	// notice keeps the legacy "Background task …" format byte-for-byte (that
+	// shape is asserted by pre-existing tests and muscle memory alike).
+	let joinConfig: JoinConfig = deps.joinConfig ?? {
+		mode: DEFAULT_JOIN_MODE,
+		flushMs: DEFAULT_FLUSH_MS,
+	};
+	const join = new JoinCoordinator({
+		deliver: (batch) => {
+			if (disposed) return;
+			const first = batch[0];
+			if (!first) return;
+			// A settled single-entry batch keeps the legacy "Background task …"
+			// shape (asserted by pre-existing tests); a single entry flushed by
+			// the WINDOW while stragglers are pending is a partial batch and
+			// must use the grouped shape so the header can say "1 of N".
+			// (mode "each" delivers immediately per member, so its single-entry
+			// batches are never partial.)
+			if (
+				batch.length === 1 &&
+				(joinConfig.mode === "each" || join.allSettled(first.runId))
+			) {
+				deliverCompletion(
+					{ sendMessage: deps.sendMessage },
+					formatCompletionNotice(first.input),
+					first.triggerTurn,
+				);
+				return;
+			}
+			const triggerTurn = batch.some((e) => e.triggerTurn);
+			// Partial flush: members of the same run still alive notify later.
+			// consumedByTool members were just claimed by an explicit wait() —
+			// the tool result carries them, so they are not "still running".
+			const stillRunning = [...jobs.values()]
+				.filter(
+					(job) =>
+						job.runId === first.runId &&
+						job.state !== "retired" &&
+						!job.consumedByTool &&
+						!batch.some((e) => e.name === job.name),
+				)
+				.map((job) => job.name);
+			deliverCompletion(
+				{ sendMessage: deps.sendMessage },
+				formatGroupedNotice({
+					runId: first.runId,
+					entries: batch.map((e) => ({ ...e.input, status: e.status })),
+					...(stillRunning.length > 0 ? { stillRunning } : {}),
+				}),
+				triggerTurn,
+			);
+		},
+	});
+	join.setConfig(joinConfig);
 
 	const entries = (): StatusEntry[] =>
 		[...jobs.values()]
@@ -217,6 +307,78 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 		return job.collectPromise;
 	};
 
+	/**
+	 * Wait for one child. Shares the in-flight watch's collect promise, so a
+	 * hit suppresses the auto-notify (consumedByTool stays set); a TIMEOUT
+	 * restores consumedByTool so the watch notifies normally when it lands.
+	 */
+	const waitOne = async (
+		name: string,
+		timeoutMs: number,
+	): Promise<WaitResult> => {
+		const job = jobs.get(name);
+		if (!job) {
+			const cached = finished.get(name);
+			if (cached) return { name, snapshot: cached };
+			return { name, missing: true };
+		}
+		job.consumedByTool = true;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const snapshot = await Promise.race([
+				ensureCollect(job),
+				new Promise<never>((_resolve, reject) => {
+					// NOT unref'd: this timer may be the only thing driving the
+					// caller's await; unref'd it could let the event loop drain
+					// (and node:test abort the test) before the timeout fires.
+					timer = setTimeout(
+						() => reject(new WaitTimeoutError("wait timed out")),
+						timeoutMs,
+					);
+				}),
+			]);
+			if (
+				snapshot.blocked ||
+				!shouldRecycleAfterCollect(snapshot.execution.status)
+			) {
+				// Not terminal: keep the pane and let the watch flow handle it.
+				job.consumedByTool = false;
+				if (snapshot.blocked && !job.watching) {
+					// Nobody is collecting anymore: the previous watch consumed
+					// this blocked snapshot and went hold. Without a rewatch the
+					// eventual completion would never surface. Skip this branch
+					// for a merely-running snapshot — a fresh watch would
+					// re-collect the SAME running snapshot and treat it as a
+					// terminal failure. Resume keeps the flag cleared on its own
+					// branch, so no double-reset.
+					job.collectPromise = undefined;
+					job.notified = false;
+					runtime.watch(name);
+				}
+				return { name, stillRunning: true };
+			}
+			if (jobs.get(name) === job) {
+				try {
+					await job.retire?.();
+				} catch {
+					// Recycle is best-effort; the snapshot is already in hand.
+				}
+				runtime.release(name);
+			}
+			return { name, snapshot };
+		} catch (error) {
+			if (error instanceof WaitTimeoutError) {
+				// The watch is still in flight and shares this collect promise —
+				// restore auto-notify or the result would never surface.
+				job.consumedByTool = false;
+				return { name, stillRunning: true };
+			}
+			throw error;
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
+	};
+
 	const runtime: SessionRuntime = {
 		bind(next) {
 			ctx = next;
@@ -240,6 +402,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 				existing.worktreeBranch = input.worktreeBranch;
 				existing.probe = input.probe;
 				existing.state = "working";
+				join.addPending(input.runId, input.name);
 				ensureTimer();
 				refreshUi();
 				return existing;
@@ -254,6 +417,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 				generation: 0,
 			};
 			jobs.set(job.name, job);
+			join.addPending(job.runId, job.name);
 			ensureTimer();
 			refreshUi();
 			return job;
@@ -284,6 +448,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 							job.notified = false;
 							job.consumedByTool = false;
 							job.state = "working";
+							join.addPending(job.runId, job.name);
 							runtime.watch(name, opts);
 							return;
 						}
@@ -294,9 +459,10 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 					job.state = "awaiting";
 					if (!job.consumedByTool && !job.notified) {
 						job.notified = true;
-						deliverCompletion(
-							{ sendMessage: deps.sendMessage },
-							formatCompletionNotice({
+						join.onTerminal({
+							runId: job.runId,
+							name: job.name,
+							input: {
 								name: job.name,
 								agent: job.agent,
 								execution: snapshot.execution,
@@ -306,20 +472,22 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 								recycled: shouldRecycleAfterCollect(
 									snapshot.execution.status,
 								),
-							}),
+							},
 							triggerTurn,
-						);
+						});
 					}
 				} catch (error) {
 					if (disposed || job.generation !== gen) return;
 					job.state = "awaiting";
 					if (!job.consumedByTool && !job.notified) {
 						job.notified = true;
-						deliverCompletion(
-							{ sendMessage: deps.sendMessage },
-							formatCollectFailure(job.name, error),
+						// Collect failures join the batch too, as a failed entry.
+						join.onTerminal({
+							runId: job.runId,
+							name: job.name,
+							input: collectFailureInput(job.name, error),
 							triggerTurn,
-						);
+						});
 					}
 				} finally {
 					if (job.generation === gen && !hold) {
@@ -360,11 +528,13 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 			job.collectPromise = undefined;
 			job.state = "working";
 			finished.delete(name);
+			join.addPending(job.runId, job.name);
 			runtime.watch(name, opts);
 		},
 
 		release(name) {
 			if (!jobs.delete(name)) return;
+			join.remove(name);
 			stopTimerIfIdle();
 			refreshUi();
 		},
@@ -379,11 +549,25 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 
 		refreshUi,
 
+		setJoinConfig(config) {
+			joinConfig = config;
+			join.setConfig(config);
+		},
+
+		async wait(names, opts = {}) {
+			return Promise.all(
+				names.map((name) =>
+					waitOne(name, opts.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
+				),
+			);
+		},
+
 		dispose() {
 			if (disposed) return;
 			disposed = true;
 			jobs.clear();
 			finished.clear();
+			join.dispose();
 			if (timer) clearInterval(timer);
 			timer = undefined;
 			board.clear();

@@ -374,3 +374,426 @@ test("shouldRecycleAfterCollect keeps running/blocked panes, recycles unknown", 
 	assert.equal(shouldRecycleAfterCollect("success"), true);
 	assert.equal(shouldRecycleAfterCollect("aborted"), true);
 });
+
+// ───────────────────── smart join integration (T4/T5) ─────────────────────
+
+type SentMessage = {
+	customType: string;
+	content: string;
+	display: boolean;
+};
+
+function joinSnapshot(over: Partial<CollectSnapshot> = {}): CollectSnapshot {
+	return {
+		execution: { status: "success" },
+		output: "ok",
+		acceptance: { status: "accepted", level: "attested" },
+		...over,
+	};
+}
+
+test("runtime: same-run children batch into exactly one grouped notice", async () => {
+	const messages: SentMessage[] = [];
+	const resolvers = new Map<string, (s: CollectSnapshot) => void>();
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message as SentMessage);
+		},
+	});
+	for (const name of ["worker-0", "worker-1"]) {
+		runtime.track({
+			name,
+			runId: "r-1",
+			agent: "worker",
+			sessionFile: `/tmp/${name}.jsonl`,
+			timeoutMs: 1_000,
+			collect: () =>
+				new Promise<CollectSnapshot>((resolve) => {
+					resolvers.set(name, resolve);
+				}),
+		});
+	}
+	runtime.watch("worker-0");
+	runtime.watch("worker-1");
+	resolvers.get("worker-0")!(joinSnapshot({ output: "first done" }));
+	await new Promise((r) => setTimeout(r, 20));
+	assert.equal(messages.length, 0, "first finisher waits for the group");
+	resolvers.get("worker-1")!(joinSnapshot({ output: "second done" }));
+	await waitFor(() => messages.length === 1, "grouped notify");
+	const sent = messages[0]!;
+	assert.match(sent.content, /Background tasks completed \(2\):/);
+	assert.match(sent.content, /worker-0 \(worker\): completed — acceptance: accepted \(attested\)/);
+	assert.match(sent.content, /worker-1 \(worker\): completed — acceptance: accepted \(attested\)/);
+	assert.match(sent.content, /first done/);
+	assert.match(sent.content, /second done/);
+	assert.equal(sent.display, false);
+	await waitFor(() => runtime.activeJobs().length === 0, "both released");
+});
+
+test("runtime: flush window expiry delivers a partial batch; the straggler flushes alone", async () => {
+	const messages: SentMessage[] = [];
+	const resolvers = new Map<string, (s: CollectSnapshot) => void>();
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message as SentMessage);
+		},
+	});
+	runtime.setJoinConfig({ mode: "smart", flushMs: 50 });
+	for (const name of ["fast", "slow"]) {
+		runtime.track({
+			name,
+			runId: "r-1",
+			agent: "worker",
+			sessionFile: `/tmp/${name}.jsonl`,
+			timeoutMs: 1_000,
+			collect: () =>
+				new Promise<CollectSnapshot>((resolve) => {
+					resolvers.set(name, resolve);
+				}),
+		});
+	}
+	runtime.watch("fast");
+	runtime.watch("slow");
+	resolvers.get("fast")!(joinSnapshot({ output: "fast-out" }));
+	await waitFor(() => messages.length === 1, "window flush");
+	assert.match(messages[0]!.content, /Background tasks completed \(1 of 2\):/);
+	assert.match(messages[0]!.content, /fast/);
+	assert.match(messages[0]!.content, /Still running: slow/);
+	resolvers.get("slow")!(joinSnapshot({ output: "slow-out" }));
+	await waitFor(() => messages.length === 2, "straggler notify");
+	assert.match(messages[1]!.content, /Background task completed: \*\*slow \(worker\)\*\*/);
+	assert.match(messages[1]!.content, /slow-out/);
+});
+
+test("runtime: joinMode each sends one notice per child", async () => {
+	const messages: SentMessage[] = [];
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message as SentMessage);
+		},
+	});
+	runtime.setJoinConfig({ mode: "each", flushMs: 10_000 });
+	for (const name of ["a", "b"]) {
+		runtime.track({
+			name,
+			runId: "r-1",
+			agent: "worker",
+			sessionFile: `/tmp/${name}.jsonl`,
+			timeoutMs: 1_000,
+			collect: async () => joinSnapshot(),
+		});
+	}
+	runtime.watch("a");
+	runtime.watch("b");
+	await waitFor(() => messages.length === 2, "two individual notices");
+	assert.match(messages[0]!.content, /Background task completed: \*\*a/);
+	assert.match(messages[1]!.content, /Background task completed: \*\*b/);
+});
+
+test("runtime: a blocked sibling does not block the group's flush; resume rejoins it", async () => {
+	const messages: SentMessage[] = [];
+	let blockedCollects = 0;
+	const resolvers = new Map<string, (s: CollectSnapshot) => void>();
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message as SentMessage);
+		},
+	});
+	runtime.setJoinConfig({ mode: "smart", flushMs: 50 });
+	runtime.track({
+		name: "ok-child",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/ok.jsonl",
+		timeoutMs: 1_000,
+		collect: async () => joinSnapshot({ output: "ok-out" }),
+	});
+	runtime.track({
+		name: "blocked-child",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/blocked.jsonl",
+		timeoutMs: 1_000,
+		collect: async () => {
+			blockedCollects += 1;
+			if (blockedCollects === 1) {
+				return joinSnapshot({
+					execution: { status: "running", reason: "blocked" },
+					blocked: true,
+				});
+			}
+			return joinSnapshot({ output: "blocked-later" });
+		},
+		handleBlocked: async () => "hold",
+	});
+	runtime.watch("ok-child");
+	runtime.watch("blocked-child");
+	await waitFor(() => blockedCollects === 1, "blocked collect");
+	await waitFor(() => messages.length === 1, "group flush excludes blocked");
+	assert.match(messages[0]!.content, /ok-child/);
+	assert.doesNotMatch(messages[0]!.content, /blocked-child:/);
+
+	// The approved child rewatches and rejoins the group bookkeeping.
+	runtime.rewatch("blocked-child");
+	await waitFor(() => messages.length === 2, "resumed child notifies alone");
+	// The resumed child is its own settled group → legacy single shape, and
+	// no stale "Still running: ok-child" row (it was retired at flush time).
+	assert.match(messages[1]!.content, /Background task completed: \*\*blocked-child \(worker\)\*\*/);
+	assert.doesNotMatch(messages[1]!.content, /Background tasks completed \(/);
+	assert.doesNotMatch(messages[1]!.content, /Still running:/);
+	assert.match(messages[1]!.content, /blocked-later/);
+	assert.equal(resolvers.size, 0);
+});
+
+test("runtime: retire runs during the batch window, not after the flush", async () => {
+	const messages: SentMessage[] = [];
+	let retired = 0;
+	const resolvers = new Map<string, (s: CollectSnapshot) => void>();
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message as SentMessage);
+		},
+	});
+	runtime.setJoinConfig({ mode: "smart", flushMs: 200 });
+	for (const name of ["a", "b"]) {
+		runtime.track({
+			name,
+			runId: "r-1",
+			agent: "worker",
+			sessionFile: `/tmp/${name}.jsonl`,
+			timeoutMs: 1_000,
+			collect: () =>
+				new Promise<CollectSnapshot>((resolve) => {
+					resolvers.set(name, resolve);
+				}),
+			retire: async () => {
+				retired += 1;
+			},
+		});
+	}
+	runtime.watch("a");
+	runtime.watch("b");
+	resolvers.get("a")!(joinSnapshot());
+	await waitFor(() => retired === 1, "a recycled immediately");
+	assert.equal(messages.length, 0, "notice still buffered, pane already gone");
+	assert.equal(runtime.activeJobs().length, 1, "a released before the flush");
+	resolvers.get("b")!(joinSnapshot());
+	await waitFor(() => messages.length === 1, "grouped notify");
+	await waitFor(() => retired === 2, "b recycled");
+});
+
+// ─────────────────────────── runtime.wait (T5) ───────────────────────────
+
+test("runtime.wait: aggregates both children, recycles panes, suppresses notify", async () => {
+	const messages: SentMessage[] = [];
+	let retired = 0;
+	const resolvers = new Map<string, (s: CollectSnapshot) => void>();
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message as SentMessage);
+		},
+	});
+	for (const name of ["a", "b"]) {
+		runtime.track({
+			name,
+			runId: "r-1",
+			agent: "worker",
+			sessionFile: `/tmp/${name}.jsonl`,
+			timeoutMs: 1_000,
+			collect: () =>
+				new Promise<CollectSnapshot>((resolve) => {
+					resolvers.set(name, resolve);
+				}),
+			retire: async () => {
+				retired += 1;
+			},
+		});
+	}
+	runtime.watch("a");
+	runtime.watch("b");
+	const pending = runtime.wait(["a", "b"], { timeoutMs: 5_000 });
+	resolvers.get("a")!(joinSnapshot({ output: "A-done" }));
+	resolvers.get("b")!(joinSnapshot({ output: "B-done" }));
+	const results = await pending;
+	assert.deepEqual(
+		results.map((r) => ({ name: r.name, output: r.snapshot?.output })),
+		[
+			{ name: "a", output: "A-done" },
+			{ name: "b", output: "B-done" },
+		],
+	);
+	await waitFor(() => retired === 2, "both panes recycled");
+	assert.equal(runtime.activeJobs().length, 0, "both released");
+	await new Promise((r) => setTimeout(r, 20));
+	assert.equal(messages.length, 0, "wait consumes the results; no notify");
+
+	// The wait-consumed pair left no join bookkeeping behind: a new child on
+	// the same runId starts a clean group and notifies as a settled single.
+	runtime.track({
+		name: "c",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/c.jsonl",
+		timeoutMs: 1_000,
+		collect: async () => joinSnapshot({ output: "C-done" }),
+	});
+	runtime.watch("c");
+	await waitFor(() => messages.length === 1, "clean group after wait");
+	assert.match(messages[0]!.content, /Background task completed: \*\*c \(worker\)\*\*/);
+	assert.doesNotMatch(messages[0]!.content, /Still running:/);
+});
+
+test("runtime.wait: the hit path itself releases the job (no watch finally to hide it)", async () => {
+	// No watch(): only wait() holds a collect. Deleting waitOne's
+	// release(name) must be visible here — nothing else would free the job.
+	let retired = 0;
+	const runtime = createSessionRuntime({ sendMessage() {} });
+	runtime.track({
+		name: "solo",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/solo.jsonl",
+		timeoutMs: 1_000,
+		collect: async () => joinSnapshot({ output: "solo-done" }),
+		retire: async () => {
+			retired += 1;
+		},
+	});
+	const results = await runtime.wait(["solo"], { timeoutMs: 5_000 });
+	assert.equal(results[0]?.snapshot?.output, "solo-done");
+	await waitFor(() => retired === 1, "pane recycled by the wait hit");
+	assert.equal(runtime.activeJobs().length, 0, "released by the wait hit");
+	runtime.dispose();
+});
+
+test("runtime.wait: timeout yields stillRunning, resets consumedByTool, auto-notify lands", async () => {
+	const messages: SentMessage[] = [];
+	let resolveCollect!: (s: CollectSnapshot) => void;
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message as SentMessage);
+		},
+	});
+	runtime.track({
+		name: "slow",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/slow.jsonl",
+		timeoutMs: 1_000,
+		collect: () =>
+			new Promise<CollectSnapshot>((resolve) => {
+				resolveCollect = resolve;
+			}),
+	});
+	runtime.watch("slow");
+	const results = await runtime.wait(["slow"], { timeoutMs: 50 });
+	assert.deepEqual(results, [{ name: "slow", stillRunning: true }]);
+	assert.equal(runtime.get("slow")?.consumedByTool, false, "timeout resets the flag");
+	// The in-flight watch completes later and the notice is delivered as usual.
+	resolveCollect(joinSnapshot({ output: "finally" }));
+	await waitFor(() => messages.length === 1, "auto-notify after timeout");
+	assert.match(messages[0]!.content, /Background task completed: \*\*slow/);
+});
+
+test("runtime.wait: finished-cache hits return instantly; unknown names are missing", async () => {
+	const runtime = createSessionRuntime({ sendMessage() {} });
+	runtime.track({
+		name: "done",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/done.jsonl",
+		timeoutMs: 1_000,
+		collect: async () => joinSnapshot({ output: "cached" }),
+	});
+	runtime.watch("done");
+	await waitFor(() => runtime.activeJobs().length === 0, "watch finished");
+	const results = await runtime.wait(["done", "ghost"], { timeoutMs: 50 });
+	assert.equal(results[0]?.snapshot?.output, "cached");
+	assert.equal(results[1]?.missing, true);
+});
+
+test("runtime.wait: a blocked snapshot yields stillRunning, keeps the job, and restarts the orphan watch", async () => {
+	const messages: SentMessage[] = [];
+	let collectCalls = 0;
+	const resolvers: Array<(s: CollectSnapshot) => void> = [];
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message as SentMessage);
+		},
+	});
+	let retired = 0;
+	runtime.track({
+		name: "b",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/b.jsonl",
+		timeoutMs: 1_000,
+		collect: () =>
+			new Promise<CollectSnapshot>((resolve) => {
+				collectCalls += 1;
+				resolvers.push(resolve);
+			}),
+		retire: async () => {
+			retired += 1;
+		},
+		handleBlocked: async () => "hold",
+	});
+	runtime.watch("b");
+	await waitFor(() => collectCalls === 1, "first collect in flight");
+	// The watch resolves to a blocked snapshot and goes hold: nobody watches.
+	resolvers[0]!(joinSnapshot({ execution: { status: "running" }, blocked: true }));
+	await waitFor(
+		() => runtime.get("b")?.watching === false,
+		"watch went hold",
+	);
+
+	// wait() reuses the resolved blocked snapshot → stillRunning, and because
+	// no watch is in flight it restarts one (fresh collect) instead of
+	// orphaning the child.
+	const results = await runtime.wait(["b"], { timeoutMs: 5_000 });
+	assert.deepEqual(results, [{ name: "b", stillRunning: true }]);
+	const job = runtime.get("b");
+	assert.ok(job, "job still tracked");
+	assert.equal(job.consumedByTool, false, "consumedByTool reset");
+	assert.equal(retired, 0, "blocked pane is not retired");
+	await waitFor(() => collectCalls === 2, "orphaned watch restarted");
+
+	// Once the child unblocks, the restarted watch collects and notifies.
+	resolvers[1]!(joinSnapshot({ output: "unblocked" }));
+	await waitFor(() => messages.length === 1, "notify after unblock");
+	assert.match(messages[0]!.content, /Background task completed: \*\*b/);
+	assert.match(messages[0]!.content, /unblocked/);
+	await waitFor(() => runtime.activeJobs().length === 0, "released");
+});
+
+test("runtime.wait: a non-terminal (running) snapshot keeps the job active and unretired", async () => {
+	const messages: SentMessage[] = [];
+	let retired = 0;
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message as SentMessage);
+		},
+	});
+	runtime.track({
+		name: "r",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/r.jsonl",
+		timeoutMs: 1_000,
+		// collect gives up while the agent is alive: not terminal, not blocked.
+		collect: async () =>
+			joinSnapshot({ execution: { status: "running", reason: "timed out" } }),
+		retire: async () => {
+			retired += 1;
+		},
+	});
+	// No watch(): the only collect is the one wait() itself shares.
+	const results = await runtime.wait(["r"], { timeoutMs: 5_000 });
+	assert.deepEqual(results, [{ name: "r", stillRunning: true }]);
+	const job = runtime.get("r");
+	assert.ok(job, "job still tracked");
+	assert.equal(job.consumedByTool, false, "consumedByTool reset");
+	assert.equal(retired, 0, "non-terminal pane is not retired");
+	assert.equal(messages.length, 0, "a running snapshot never notifies");
+	runtime.dispose();
+});

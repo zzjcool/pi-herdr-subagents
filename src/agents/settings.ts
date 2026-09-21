@@ -74,6 +74,27 @@ function nonNegativeInt(
 	return value;
 }
 
+const VALID_JOIN_MODES: ReadonlySet<string> = new Set(["each", "smart"]);
+
+function readJoinFields(
+	input: Record<string, unknown>,
+	out: SubagentsSettings,
+	filePath: string,
+): void {
+	const mode = input.joinMode;
+	if (mode !== undefined) {
+		if (typeof mode !== "string" || !VALID_JOIN_MODES.has(mode)) {
+			throw new Error(
+				`Subagent settings in '${filePath}' have invalid 'joinMode'; ` +
+					`expected one of: ${[...VALID_JOIN_MODES].join(", ")}.`,
+			);
+		}
+		out.joinMode = mode as "each" | "smart";
+	}
+	const flushMs = positiveInt(input.joinFlushMs, "joinFlushMs", filePath);
+	if (flushMs !== undefined) out.joinFlushMs = flushMs;
+}
+
 function parseHerdrSettings(
 	value: unknown,
 	filePath: string,
@@ -172,6 +193,8 @@ export function parseSubagentSettings(
 
 	const herdr = parseHerdrSettings(input.herdr, filePath);
 	if (herdr) out.herdr = herdr;
+
+	readJoinFields(input, out, filePath);
 
 	// THE WHITELIST: every key read above must be assigned, or it is silently
 	// discarded. `presets` is the newest key and the easiest to drop here.
@@ -309,6 +332,10 @@ export function resolveSubagentSettings(
 	if (project.presets) {
 		out.presets = { ...(user.presets ?? {}), ...project.presets };
 	}
+
+	if (project.joinMode !== undefined) out.joinMode = project.joinMode;
+	if (project.joinFlushMs !== undefined)
+		out.joinFlushMs = project.joinFlushMs;
 
 	return out;
 }

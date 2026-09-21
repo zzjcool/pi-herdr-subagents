@@ -15,7 +15,7 @@ export const PARENT_PLAYBOOK = [
 	"   One child:  subagent({ agent: \"<role>\", task: \"...\" })",
 	"   Parallel:   subagent({ tasks: [{ agent, task }, { agent, task }] })",
 	"2. Same agent type shares one tab (each child is a pane). Different types get different tabs. Prefer tasks[] over two separate tool calls.",
-	"3. Then return control. Running children show next to the input. A completion message wakes this session when it is idle; if this session is still working, the notice waits until the current turn finishes. Finished children recycle their pane (and the type tab when it is empty) automatically — do not retire or close panes. Resume from the session file if you need the child again.",
+	"3. Then return control. Running children show next to the input. A completion message wakes this session when it is idle; if this session is still working, the notice waits until the current turn finishes. Finished children recycle their pane (and the type tab when it is empty) automatically — do not retire or close panes. Resume from the session file if you need the child again. Parallel children launched together finish at different times; their completion notices are merged and delivered as one grouped message — read it once and synthesize a combined summary instead of reacting per child. If you need first-finished-first or know runtimes differ wildly, call `subagent({ action: \"wait\", all: true, timeoutMs })` (or `wait` with `name`) to block for results.",
 	"4. Later control is only `subagent({ action: \"steer\"|\"continue\"|\"resume\"|\"collect\"|\"status\"|\"list\", name })`. `action=list` is optional; the roster is already in this prompt.",
 	"5. Isolation is YOUR call. Pass `worktree: true` when another parent may write this repo, or when the child should ship via MR (own branch, do not touch the current checkout). Pass `worktree: false` to edit the current checkout in place. Omit it to use the role default (bundled worker isolates).",
 	"Forbidden: `herdr --help`, bare `herdr agent|pane|tab`, `herdr pane split`, `herdr agent start|prompt|wait`, `test HERDR_ENV`, telling a child to prompt this pane.",
@@ -25,7 +25,7 @@ export const TOOL_DESCRIPTION = [
 	PARENT_PLAYBOOK,
 	"Roles: the system prompt lists every loaded role each turn (bundled scout/planner/worker/reviewer/oracle plus ~/.pi/agent/agents and project .pi/agents). Prefer the matching role over doing that work yourself.",
 	"Launch is async by default. Outcomes come from the child session JSONL, not herdr's agent_status.",
-	"Actions: launch (default), continue, steer, resume, status, collect, list. Panes recycle automatically when a turn finishes.",
+	"Actions: launch (default), continue, steer, resume, status, collect, wait, list. Panes recycle automatically when a turn finishes.",
 ].join(" ");
 
 const DISCOVERY_GROUPS = new Set([

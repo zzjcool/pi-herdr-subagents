@@ -6,6 +6,8 @@ import {
 	deliverCompletion,
 	formatCollectFailure,
 	formatCompletionNotice,
+	formatGroupedNotice,
+	type GroupedEntry,
 	previewOutput,
 	SUBAGENT_NOTIFY_TYPE,
 } from "../../src/extension/notify.ts";
@@ -148,4 +150,109 @@ test("formatCompletionNotice: settled cursor answer reports completed with its v
 	assert.equal(notice.status, "completed");
 	assert.match(notice.content, /Background task completed: \*\*advisor-0 \(advisor\)\*\*/);
 	assert.match(notice.content, /acceptance: accepted/);
+});
+
+// ─────────────────────────── grouped notices (smart join) ───────────────────────────
+
+function groupedEntry(over: Partial<GroupedEntry> = {}): GroupedEntry {
+	return {
+		name: "worker-0",
+		agent: "worker",
+		execution: { status: "success" },
+		output: "ok",
+		acceptance: { status: "accepted", level: "attested" },
+		status: "completed",
+		...over,
+	};
+}
+
+test("formatGroupedNotice: multiple entries merge into one notice with a header", () => {
+	const notice = formatGroupedNotice({
+		runId: "r-1",
+		entries: [
+			groupedEntry({ name: "worker-0", agent: "worker" }),
+			groupedEntry({ name: "worker-1", agent: "worker" }),
+		],
+	});
+	assert.equal(notice.status, "completed");
+	assert.equal(notice.display, false);
+	assert.match(notice.content, /Background tasks completed \(2\):/);
+	assert.match(notice.content, /Run: r-1/);
+	assert.match(notice.content, /- worker-0 \(worker\): completed — acceptance: accepted \(attested\)/);
+	assert.match(notice.content, /- worker-1 \(worker\): completed — acceptance: accepted \(attested\)/);
+	assert.match(notice.content, /\(pane recycled\)/);
+});
+
+test("formatGroupedNotice: recycle markers are per-entry, not a blanket footer", () => {
+	// A wait()-released sibling can race the flush window: the blanket
+	// "Pane recycled" footer used to lie about panes that were still open.
+	const notice = formatGroupedNotice({
+		entries: [
+			groupedEntry({ name: "kept", recycled: false }),
+			groupedEntry({ name: "gone" }),
+		],
+	});
+	assert.match(notice.content, /- gone \(worker\): completed .*\(pane recycled\)/);
+	assert.doesNotMatch(notice.content, /- kept \(worker\): completed .*pane recycled/);
+	assert.doesNotMatch(notice.content, /Pane recycled\. Resume from session files/);
+});
+
+test("formatGroupedNotice: any failed → failed aggregate and display", () => {
+	const notice = formatGroupedNotice({
+		entries: [
+			groupedEntry({ name: "worker-0" }),
+			groupedEntry({
+				name: "reviewer-1",
+				agent: undefined,
+				execution: { status: "failed", reason: "model error" },
+				acceptance: undefined,
+				status: "failed",
+				output: "boom",
+			}),
+		],
+	});
+	assert.equal(notice.status, "failed");
+	assert.equal(notice.display, true);
+	assert.match(notice.content, /- reviewer-1: failed \(model error\)/);
+});
+
+test("formatGroupedNotice: no runId omits the run header; stillRunning line appended", () => {
+	const notice = formatGroupedNotice({
+		entries: [groupedEntry({ name: "worker-0" })],
+		stillRunning: ["slow-2"],
+	});
+	assert.doesNotMatch(notice.content, /^Run:/m);
+	assert.match(notice.content, /Background tasks completed \(1 of 2\):/);
+	assert.match(
+		notice.content,
+		/Still running: slow-2 \(notifies separately when it finishes\)/,
+	);
+});
+
+test("formatGroupedNotice: a single entry still uses the grouped shape", () => {
+	const notice = formatGroupedNotice({
+		entries: [groupedEntry({ name: "worker-0" })],
+	});
+	assert.equal(notice.status, "completed");
+	assert.match(notice.content, /Background tasks completed \(1\):/);
+	assert.match(notice.content, /- worker-0 \(worker\): completed/);
+});
+
+test("formatGroupedNotice: per-entry previews are capped so the batch stays bounded", () => {
+	const long = "x".repeat(5000);
+	const notice = formatGroupedNotice({
+		entries: [
+			groupedEntry({ name: "a", output: long }),
+			groupedEntry({ name: "b", output: long }),
+			groupedEntry({ name: "c", output: long }),
+			groupedEntry({ name: "d", output: long }),
+			groupedEntry({ name: "e", output: long }),
+			groupedEntry({ name: "f", output: long }),
+			groupedEntry({ name: "g", output: long }),
+			groupedEntry({ name: "h", output: long }),
+		],
+	});
+	// 8 entries → cap is max(500, 4000/8) = 500 chars per preview.
+	assert.match(notice.content, /…/);
+	assert.ok(notice.content.length < 8 * 600 + 500, "batch preview must be bounded");
 });

@@ -641,6 +641,10 @@ export interface SubagentsSettings {
 	disableThinking?: boolean;
 	maxSubagentSpawnsPerSession?: number;
 	herdr?: HerdrSettings;
+	/** Completion-notice merge mode. Default "smart". */
+	joinMode?: "each" | "smart";
+	/** smart-mode group flush window (ms). Default 10000. */
+	joinFlushMs?: number;
 }
 
 /**

@@ -567,3 +567,57 @@ test("modelCandidates is unique and keeps an empty primary as one attempt", () =
 	assert.deepEqual(modelCandidates(undefined, undefined), [undefined]);
 	assert.deepEqual(modelCandidates("  ", [" x "]), [undefined, "x"]);
 });
+
+// ─────────────────────────── join settings (smart join) ───────────────────────────
+
+test("settings: joinMode accepts each/smart, rejects anything else", () => {
+	assert.deepEqual(
+		parseSubagentSettings({ subagents: { joinMode: "each" } }, "/s.json"),
+		{ joinMode: "each" },
+	);
+	assert.deepEqual(
+		parseSubagentSettings({ subagents: { joinMode: "smart" } }, "/s.json"),
+		{ joinMode: "smart" },
+	);
+	assert.throws(
+		() => parseSubagentSettings({ subagents: { joinMode: "batch" } }, "/s.json"),
+		/invalid 'joinMode'/,
+	);
+	assert.throws(
+		() => parseSubagentSettings({ subagents: { joinMode: 42 } }, "/s.json"),
+		/invalid 'joinMode'/,
+	);
+});
+
+test("settings: joinFlushMs must be a positive integer", () => {
+	assert.deepEqual(
+		parseSubagentSettings({ subagents: { joinFlushMs: 5000 } }, "/s.json"),
+		{ joinFlushMs: 5000 },
+	);
+	assert.throws(() =>
+		parseSubagentSettings({ subagents: { joinFlushMs: 0 } }, "/s.json"),
+	);
+	assert.throws(() =>
+		parseSubagentSettings({ subagents: { joinFlushMs: -1 } }, "/s.json"),
+	);
+	assert.throws(() =>
+		parseSubagentSettings({ subagents: { joinFlushMs: 1.5 } }, "/s.json"),
+	);
+});
+
+test("settings: join keys default to absent and project overrides user", () => {
+	assert.deepEqual(parseSubagentSettings({ subagents: {} }, "/s.json"), {});
+	const merged = resolveSubagentSettings(
+		{ joinMode: "each", joinFlushMs: 1000 },
+		{ joinMode: "smart", joinFlushMs: 2000 },
+	);
+	assert.equal(merged.joinMode, "smart");
+	assert.equal(merged.joinFlushMs, 2000);
+	// A project that sets neither keeps the user's join config.
+	const kept = resolveSubagentSettings(
+		{ joinMode: "each", joinFlushMs: 1000 },
+		{ defaultModel: "cb/mid" },
+	);
+	assert.equal(kept.joinMode, "each");
+	assert.equal(kept.joinFlushMs, 1000);
+});

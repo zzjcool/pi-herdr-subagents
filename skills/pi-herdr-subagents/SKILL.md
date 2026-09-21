@@ -44,6 +44,13 @@ session file if you need the child again. `collect` after auto-watch returns
 the cached snapshot; `retire` after auto-recycle is a no-op. Pass `async: false`
 only for a short foreground run.
 
+Parallel children launched together finish at different times; their completion
+notices are merged and delivered as one grouped message — read it once and
+synthesize a combined summary instead of reacting per child. If you need
+first-finished-first or know runtimes differ wildly, call
+`subagent({ action: "wait", all: true, timeoutMs })` (or `wait` with `name`)
+to block for results.
+
 ## Task cards
 
 Write the work, the paths, and the output location. The plugin **already
