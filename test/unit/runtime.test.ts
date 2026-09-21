@@ -797,3 +797,188 @@ test("runtime.wait: a non-terminal (running) snapshot keeps the job active and u
 	assert.equal(messages.length, 0, "a running snapshot never notifies");
 	runtime.dispose();
 });
+
+// ────────────── A: watch re-arms on a running snapshot (U1/U2) ──────────────
+
+test("U1: watch re-arms instead of notifying when collect times out on a live child", async () => {
+	const messages: SentMessage[] = [];
+	const resolves: Array<(s: CollectSnapshot) => void> = [];
+	let collectCalls = 0;
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message as SentMessage);
+		},
+	});
+	runtime.track({
+		name: "live",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/live.jsonl",
+		timeoutMs: 1_000,
+		collect: () =>
+			new Promise<CollectSnapshot>((resolve) => {
+				collectCalls += 1;
+				resolves.push(resolve);
+			}),
+	});
+	runtime.watch("live");
+	await waitFor(() => collectCalls === 1, "first collect in flight");
+
+	// collect gives up while the agent is alive (F29): not a verdict.
+	resolves[0]!(
+		joinSnapshot({
+			execution: { status: "running", reason: "collect timed out; still alive" },
+		}),
+	);
+
+	// A: the watch must re-arm — a fresh collect starts, nothing is notified,
+	// and the child stays on the widget instead of being orphaned by release().
+	await waitFor(() => collectCalls === 2, "watch re-armed after the running snapshot");
+	await new Promise((r) => setTimeout(r, 20));
+	assert.equal(messages.length, 0, "a running snapshot must not notify");
+	assert.equal(runtime.activeJobs().length, 1, "the child must stay tracked");
+	const job = runtime.get("live");
+	assert.ok(job);
+	assert.equal(job.state, "working", "still working, not awaiting");
+	assert.equal(job.watching, true, "the re-armed watch is in flight");
+	assert.equal(job.notified, false, "the notify flag was cleared for the new round");
+
+	// The child truly finishes: the re-armed watch collects and notifies.
+	resolves[1]!(joinSnapshot({ output: "finally done" }));
+	await waitFor(() => messages.length === 1, "completion after the re-arm");
+	assert.match(messages[0]!.content, /Background task completed: \*\*live/);
+	assert.match(messages[0]!.content, /finally done/);
+	await waitFor(() => runtime.activeJobs().length === 0, "released after the terminal");
+});
+
+test("U2: the re-armed watch never treats the same running snapshot as terminal", async () => {
+	const messages: SentMessage[] = [];
+	let collectCalls = 0;
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message as SentMessage);
+		},
+	});
+	runtime.track({
+		name: "slow",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/slow.jsonl",
+		timeoutMs: 1_000,
+		collect: async () => {
+			collectCalls += 1;
+			// First round: the timeout snapshot. Second round: the real answer.
+			return collectCalls === 1
+				? joinSnapshot({
+						execution: { status: "running", reason: "collect timed out" },
+					})
+				: joinSnapshot({ output: "the real answer" });
+		},
+	});
+	runtime.watch("slow");
+	await waitFor(() => collectCalls === 2, "second collect after re-arm");
+	await waitFor(() => messages.length === 1, "exactly one notice");
+	await new Promise((r) => setTimeout(r, 20));
+
+	assert.equal(collectCalls, 2, "one re-arm, no busy loop");
+	assert.equal(messages.length, 1, "exactly one notice — no failed + success pair");
+	assert.match(messages[0]!.content, /Background task completed: \*\*slow/);
+	assert.doesNotMatch(messages[0]!.content, /failed/);
+	assert.doesNotMatch(messages[0]!.content, /still alive/);
+});
+
+test("U2: a re-arming watch joins no group until it really finishes", async () => {
+	// The re-arm must not look like a terminal to the join coordinator: the
+	// member stays pending, so a sibling finishing first does not flush it in.
+	const messages: SentMessage[] = [];
+	let liveCalls = 0;
+	const runtime = createSessionRuntime({
+		sendMessage(message) {
+			messages.push(message as SentMessage);
+		},
+	});
+	runtime.setJoinConfig({ mode: "smart", flushMs: 50 });
+	runtime.track({
+		name: "live",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/live.jsonl",
+		timeoutMs: 1_000,
+		collect: async () => {
+			liveCalls += 1;
+			return liveCalls === 1
+				? joinSnapshot({ execution: { status: "running" } })
+				: new Promise<CollectSnapshot>(() => {});
+		},
+	});
+	runtime.track({
+		name: "quick",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/quick.jsonl",
+		timeoutMs: 1_000,
+		collect: async () => joinSnapshot({ output: "quick-out" }),
+	});
+	runtime.watch("live");
+	runtime.watch("quick");
+	await waitFor(() => messages.length === 1, "window flush");
+	assert.match(messages[0]!.content, /quick/);
+	assert.match(messages[0]!.content, /Still running: live/);
+	assert.doesNotMatch(messages[0]!.content, /- live \(worker\)/);
+});
+
+// ────────────── C: a running snapshot never enters the finished cache (U5) ──────────────
+
+test("U5: a running snapshot is not cached as a finished result", async () => {
+	const runtime = createSessionRuntime({ sendMessage() {} });
+	runtime.track({
+		name: "stale",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/stale.jsonl",
+		timeoutMs: 1_000,
+		collect: async () =>
+			joinSnapshot({
+				execution: { status: "running", reason: "collect timed out" },
+				output: "half-done",
+			}),
+	});
+	const collected = await runtime.consumeCollect("stale");
+	assert.ok(collected);
+	assert.equal(collected.execution.status, "running");
+
+	// Drop the job the way a (pre-A) terminal watch would have, leaving only
+	// the finished cache behind. A later request must NOT be served the stale
+	// "still working" snapshot as if the turn had ended.
+	runtime.release("stale");
+	assert.equal(
+		runtime.consumeCollect("stale"),
+		undefined,
+		"a running snapshot must not be cached for consumeCollect",
+	);
+	const results = await runtime.wait(["stale"], { timeoutMs: 50 });
+	assert.deepEqual(
+		results,
+		[{ name: "stale", missing: true }],
+		"a released running child has no finished cache to hit",
+	);
+});
+
+test("U5: a terminal snapshot is still cached (the exclusion is running-only)", async () => {
+	const runtime = createSessionRuntime({ sendMessage() {} });
+	runtime.track({
+		name: "done",
+		runId: "r-1",
+		agent: "worker",
+		sessionFile: "/tmp/done.jsonl",
+		timeoutMs: 1_000,
+		collect: async () => joinSnapshot({ output: "all good" }),
+	});
+	const first = await runtime.consumeCollect("done");
+	assert.equal(first?.output, "all good");
+	runtime.release("done");
+	const cached = await runtime.consumeCollect("done");
+	assert.equal(cached?.output, "all good", "a terminal snapshot stays cached");
+	const results = await runtime.wait(["done"], { timeoutMs: 50 });
+	assert.equal(results[0]?.snapshot?.output, "all good", "wait hits the cache too");
+});

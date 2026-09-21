@@ -209,3 +209,33 @@ test("join: two runs batch independently", () => {
 		["a", "b"],
 	);
 });
+
+// ─────────────────── U4: a running entry is not a completion (B) ───────────────────
+
+test("U4: onTerminal fails loud on a running entry instead of buffering a lie", () => {
+	// A running snapshot means collect timed out while the child is alive
+	// (F29). The runtime's watch() re-arms on it; if it ever reached the
+	// coordinator the aggregate would be built from a non-completion, so the
+	// coordinator refuses rather than silently mapping it to `failed`.
+	const { join, delivered } = harness();
+	join.addPending("r-1", "live");
+	assert.throws(
+		() => join.onTerminal(entry("live", "r-1", "running")),
+		/running snapshot is not a completion/,
+	);
+	assert.equal(delivered.length, 0, "nothing may be delivered for a running entry");
+	// The failed member is still pending, so the group was not corrupted.
+	assert.equal(join.allSettled("r-1"), false);
+});
+
+test("U4: a running entry mixed into a batch is refused, not merged", () => {
+	const { join, delivered } = harness();
+	join.addPending("r-1", "done");
+	join.addPending("r-1", "live");
+	join.onTerminal(entry("done"));
+	assert.throws(
+		() => join.onTerminal(entry("live", "r-1", "running")),
+		/running snapshot is not a completion/,
+	);
+	assert.equal(delivered.length, 0, "the batch must not flush around a running member");
+});

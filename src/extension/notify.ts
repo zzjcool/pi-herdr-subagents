@@ -16,7 +16,7 @@
 
 export const SUBAGENT_NOTIFY_TYPE = "subagent-notify";
 
-export type CompletionStatus = "completed" | "failed" | "stopped";
+export type CompletionStatus = "completed" | "failed" | "stopped" | "running";
 
 export interface CompletionInput {
 	name: string;
@@ -46,11 +46,18 @@ const PREVIEW_CHARS = 4_000;
  * verdict. Without that witness, `unknown` stays `failed` (pi kind, no
  * messages at all). The old blanket mapping labelled every successful
  * cursor answer "Background task failed".
+ *
+ * `running` is NOT a completion and is reported as itself (B). It used to fall
+ * through to the `failed` default, so a collect timeout on a live child sent
+ * "Background task failed" while the body said "still alive". A running
+ * snapshot must never be formatted at all — `formatCompletionNotice` (and
+ * `JoinCoordinator.onTerminal`) throw on it instead.
  */
 export function completionStatusOf(
 	executionStatus: string,
 	acceptanceStatus?: string,
 ): CompletionStatus {
+	if (executionStatus === "running") return "running";
 	if (executionStatus === "success") return "completed";
 	if (executionStatus === "aborted") return "stopped";
 	if (
@@ -73,6 +80,12 @@ export function formatCompletionNotice(input: CompletionInput): CompletionNotice
 		input.execution.status,
 		input.acceptance?.status,
 	);
+	if (status === "running") {
+		// Fail loud (B): a still-alive child is a progress signal, not a verdict.
+		// watch() re-arms on a running snapshot instead of notifying, so reaching
+		// here means a caller lost that guard — never silently label it.
+		throw new Error("running snapshot is not a completion");
+	}
 	const label = input.agent ? `${input.name} (${input.agent})` : input.name;
 	const reason = input.execution.reason
 		? ` (${input.execution.reason})`

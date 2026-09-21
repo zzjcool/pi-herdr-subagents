@@ -17,7 +17,10 @@ test("completionStatusOf: success is completed, abort is stopped, else failed", 
 	assert.equal(completionStatusOf("aborted"), "stopped");
 	assert.equal(completionStatusOf("failed"), "failed");
 	assert.equal(completionStatusOf("truncated"), "failed");
-	assert.equal(completionStatusOf("running"), "failed");
+	// B: `running` is a progress signal, not a completion — it no longer falls
+	// through to `failed` (that mislabelled every collect timeout on a live
+	// child "Background task failed" while the body said "still alive").
+	assert.equal(completionStatusOf("running"), "running");
 });
 
 test("formatCompletionNotice: success is quiet in the transcript but still sent", () => {
@@ -126,6 +129,46 @@ test("deliverCompletion returns false when sendMessage throws", () => {
 		}),
 	);
 	assert.equal(ok, false);
+});
+
+// ────────────────── U3: a running snapshot is never a completion (B) ──────────────────
+
+test("U3: completionStatusOf reports `running` as itself (never folded into failed)", () => {
+	assert.equal(completionStatusOf("running"), "running");
+	// The other statuses keep their existing mapping.
+	assert.equal(completionStatusOf("success"), "completed");
+	assert.equal(completionStatusOf("aborted"), "stopped");
+});
+
+test("U3: formatCompletionNotice fails loud on a running snapshot (B)", () => {
+	assert.throws(
+		() =>
+			formatCompletionNotice({
+				name: "worker-1",
+				execution: {
+					status: "running",
+					reason: "collect timed out after 900000ms; the agent is still alive",
+				},
+				output: "",
+			}),
+		/running snapshot is not a completion/,
+	);
+});
+
+test("U3: a running snapshot never surfaces as a failed notice by accident (B regression)", () => {
+	// The old blanket mapping made this the most dangerous case: a live child
+	// announced as `failed` while its body said "still alive".
+	let thrown: unknown;
+	try {
+		formatCompletionNotice({
+			name: "worker-1",
+			execution: { status: "running" },
+			output: "still working",
+		});
+	} catch (error) {
+		thrown = error;
+	}
+	assert.ok(thrown instanceof Error, "running must not format into a notice");
 });
 
 test("completionStatusOf: unknown with a parsed verdict is completed, not failed", () => {

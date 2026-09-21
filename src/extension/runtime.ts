@@ -164,7 +164,6 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 	const jobs = new Map<string, TrackedJob>();
 	const finished = new Map<string, CollectSnapshot>();
 	const board = createStatusBoard();
-	let ctx: StatusUi | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let disposed = false;
 	let busyRaised = false;
@@ -300,7 +299,15 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 				} catch {
 					// Notification still happens; the tool-side persist is the backup.
 				}
-				if (!snapshot.blocked) finished.set(job.name, snapshot);
+				// C: a `running` snapshot is a timeout on a live child, not a result.
+				// Caching it would let a later wait/collect hand out a stale
+				// "still working" snapshot as if it were the final answer.
+				if (
+					!snapshot.blocked &&
+					snapshot.execution.status !== "running"
+				) {
+					finished.set(job.name, snapshot);
+				}
 				return snapshot;
 			})();
 		}
@@ -346,11 +353,15 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 				if (snapshot.blocked && !job.watching) {
 					// Nobody is collecting anymore: the previous watch consumed
 					// this blocked snapshot and went hold. Without a rewatch the
-					// eventual completion would never surface. Skip this branch
-					// for a merely-running snapshot — a fresh watch would
-					// re-collect the SAME running snapshot and treat it as a
-					// terminal failure. Resume keeps the flag cleared on its own
-					// branch, so no double-reset.
+					// eventual completion would never surface.
+					//
+					// A merely-running snapshot needs no branch here: watch()
+					// re-arms itself on it (the re-arm's collect is a FRESH call
+					// that blocks until the next timeout, so it cannot spin on the
+					// same snapshot). When no watch is in flight, wait() reports
+					// stillRunning and the caller (or a later collect) decides.
+					// Resume keeps the flag cleared on its own branch, so no
+					// double-reset.
 					job.collectPromise = undefined;
 					job.notified = false;
 					runtime.watch(name);
@@ -381,7 +392,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 
 	const runtime: SessionRuntime = {
 		bind(next) {
-			ctx = next;
+			// The board is the only consumer of the UI handle; keep no second copy.
 			board.bind(next);
 			refreshUi();
 		},
@@ -454,6 +465,28 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 						}
 						hold = true;
 						job.watching = false;
+						return;
+					}
+					if (snapshot.execution.status === "running") {
+						// Not terminal: collect timed out but the agent is alive (F29
+						// discriminator). A notice here would misreport "failed" (the
+						// running status used to fall through to the `failed` default),
+						// and a release would orphan the child — its eventual completion
+						// would never surface. Re-arm instead: clear the settled collect
+						// promise and watch again. collect() blocks until the next
+						// timeout, so this is not a busy loop.
+						//
+						// Same skeleton as the blocked-resume branch above, but NOT
+						// handleBlocked: there is no approval to ask about.
+						job.state = "working";
+						job.collectPromise = undefined;
+						job.notified = false; // a previous round may have set it
+						job.consumedByTool = false; // ditto
+						// join bookkeeping: this member never reached onTerminal, so the
+						// group's `pending` still contains it. Re-adding is a no-op on a
+						// Set and keeps the branch symmetric with blocked-resume.
+						join.addPending(job.runId, job.name);
+						runtime.watch(name, opts); // generation bumps; this watch returns
 						return;
 					}
 					job.state = "awaiting";
@@ -575,7 +608,6 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 				busyRaised = false;
 				deps.emitBusy?.(false);
 			}
-			ctx = undefined;
 		},
 	};
 

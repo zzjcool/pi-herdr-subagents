@@ -132,13 +132,17 @@ export class JoinCoordinator {
 	/** Terminal entry point (success and collect-failure alike). */
 	onTerminal(entry: JoinEntry): void {
 		if (this.disposed) return;
-		const buffered: BufferedEntry = {
-			...entry,
-			status: completionStatusOf(
-				entry.input.execution.status,
-				entry.input.acceptance?.status,
-			),
-		};
+		const status = completionStatusOf(
+			entry.input.execution.status,
+			entry.input.acceptance?.status,
+		);
+		if (status === "running") {
+			// A running snapshot is not a completion (B). The runtime's watch()
+			// re-arms on it; buffering it here would mislabel the child and the
+			// aggregate status would silently swallow it. Fail loud instead.
+			throw new Error("running snapshot is not a completion");
+		}
+		const buffered: BufferedEntry = { ...entry, status };
 		if (this.config.mode === "each") {
 			this.deliverFn([buffered]);
 			return;

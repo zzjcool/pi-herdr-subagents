@@ -95,3 +95,13 @@ test("playbook explains merged completion notices and the wait action", () => {
 	assert.match(PARENT_PLAYBOOK, /\(or `wait` with `name`\)/);
 	assert.match(TOOL_DESCRIPTION, /collect, wait, list/);
 });
+
+test("U8: playbook explains that a collect timeout notice is a progress signal", () => {
+	// §1.E frozen copy: the parent must not read "still alive" as a verdict.
+	assert.match(
+		PARENT_PLAYBOOK,
+		/collect timed out … the agent is still alive` is a progress signal, not a verdict/,
+	);
+	assert.match(PARENT_PLAYBOOK, /will notify again when it truly finishes/);
+	assert.match(PARENT_PLAYBOOK, /appends to its queue rather than interrupting/);
+});

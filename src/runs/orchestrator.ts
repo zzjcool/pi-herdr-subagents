@@ -151,6 +151,16 @@ export interface CollectResult {
 	blocked?: boolean;
 }
 
+/**
+ * How many times a collect may push its deadline past the caller's timeout when
+ * the child's artifact is still growing (D). Total wait ≤ (1 + N) × timeoutMs.
+ *
+ * A hard-killed child writes nothing (F29), so a growing file is positive
+ * evidence of a live, still-writing turn — reporting `running` for it was the
+ * false-timeout that made the parent think a healthy worker had stalled.
+ */
+export const COLLECT_GRACE_EXTENSIONS = 2;
+
 /** Environment variable carrying the lineage chain into a child process. */
 const LINEAGE_ENV = "PI_SUBAGENT_PARENT_PATH";
 /** Environment variable carrying the depth ceiling into a child process. */
@@ -192,6 +202,15 @@ function canFallbackStart(error: unknown): boolean {
  */
 function ownerToken(): string {
 	return randomBytes(8).toString("hex");
+}
+
+/** Size of a collect artifact in bytes; 0 when missing or unreadable. */
+function artifactSize(file: string): number {
+	try {
+		return fs.statSync(file).size;
+	} catch {
+		return 0;
+	}
 }
 
 /**
@@ -1137,7 +1156,7 @@ export class Orchestrator {
 		if (await this.isAgentBlocked(name)) return this.blockedResult(child);
 
 		const timeoutMs = opts.timeoutMs ?? DEFAULTS.turnTimeoutMs;
-		const deadline = this.now() + timeoutMs;
+		let deadline = this.now() + timeoutMs;
 		// The chat dir may not exist yet at launch (cursor creates it lazily),
 		// so it is resolved per read, not cached — a launch-time null must not
 		// pin the whole collect to the pane path.
@@ -1151,11 +1170,32 @@ export class Orchestrator {
 			cursorChat && cursorTurnSettled(initial)
 				? true
 				: isLastTurnComplete(initial);
-		const wait = alreadySettled
+		let wait = alreadySettled
 			? "settled"
 			: initial.turns.length > 0
 				? await this.awaitTurn(child, initial, deadline, await chatDirNow())
 				: await this.awaitHerdrSettle(child, deadline);
+		// D: a timeout is only a verdict when the child's artifact is QUIET.
+		// While the session jsonl (or cursor store) is still growing the agent is
+		// demonstrably working, so grant a bounded extension instead of reporting
+		// `running` at the exact deadline. Fully sequential — no second waiter —
+		// so there is no race with the wait above.
+		for (
+			let grace = 0;
+			wait === "timeout" && grace < COLLECT_GRACE_EXTENSIONS;
+			grace += 1
+		) {
+			const chatForProbe = await chatDirNow();
+			if (!(await this.collectArtifactGrowing(child, chatForProbe))) break;
+			// Extend by a full slice off the EXISTING deadline rather than
+			// re-basing on `now`: the probe already consumed one poll interval,
+			// so `now + timeoutMs` would drift past the (1+N)×timeoutMs bound.
+			deadline += timeoutMs;
+			wait =
+				initial.turns.length > 0
+					? await this.awaitTurn(child, initial, deadline, chatForProbe)
+					: await this.awaitHerdrSettle(child, deadline);
+		}
 		if (wait === "blocked") return this.blockedResult(child);
 		const timedOut = wait === "timeout";
 
@@ -1225,7 +1265,12 @@ export class Orchestrator {
 			},
 		);
 
-		child.state = "awaiting";
+		// C: only a real terminal outcome retires the child into `awaiting`. A
+		// `running` snapshot means collect timed out while the agent is still
+		// alive (F29) — flipping the record to `awaiting` made the parent read
+		// `status` as "turn over, just needs wrapping up". Keep it working so
+		// watch()'s re-arm (A) and any later collect still treat it as live.
+		if (execution.status !== "running") child.state = "awaiting";
 		child.execution = execution;
 		child.acceptance = acceptance;
 		this.onChildUpdate(child);
@@ -1573,6 +1618,32 @@ export class Orchestrator {
 			status: "running",
 			reason: `collect timed out after ${timeoutMs}ms; the agent is still alive`,
 		};
+	}
+
+	/**
+	 * Whether the child's artifact grew since the last poll (D).
+	 *
+	 * Cheap, non-blocking probe in the spirit of `waitForQuiet`'s size check:
+	 * it samples the cursor chat store (`store.db`) when there is one, else the
+	 * session jsonl, waits one poll interval, and samples again. A delta means
+	 * the agent is mid-write — a live turn, not a stalled one. `waitForQuiet`
+	 * itself is not reusable here: it returns on QUIET and would needlessly
+	 * discard the "still growing" answer we actually want.
+	 *
+	 * Deliberately returns `false` once the file is gone/unreadable (size 0 both
+	 * samples): no signal means no grace, so the caller keeps the plain timeout.
+	 */
+	private async collectArtifactGrowing(
+		child: ChildRecord,
+		cursorChat: string | null,
+	): Promise<boolean> {
+		const target = cursorChat
+			? path.join(cursorChat, "store.db")
+			: child.sessionFile;
+		const before = artifactSize(target);
+		if (before <= 0) return false;
+		await this.sleep(this.pollIntervalMs);
+		return artifactSize(target) > before;
 	}
 
 	/**

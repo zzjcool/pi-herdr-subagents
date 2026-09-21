@@ -51,6 +51,12 @@ first-finished-first or know runtimes differ wildly, call
 `subagent({ action: "wait", all: true, timeoutMs })` (or `wait` with `name`)
 to block for results.
 
+A completion notice reading `collect timed out … the agent is still alive` is a
+progress signal, not a verdict: the child keeps running and will notify again
+when it truly finishes. Check `status` and the child's session tail before
+deciding to steer or continue — a `continue` while it is mid-turn appends to
+its queue rather than interrupting.
+
 ## Task cards
 
 Write the work, the paths, and the output location. The plugin **already

@@ -1379,3 +1379,153 @@ test("cursor collect keeps waiting while the store has no answer yet", async () 
 		h.cleanup();
 	}
 });
+
+// ─────── C (U6): a running collect must not retire the child into `awaiting` ───────
+
+test("U6: a timed-out (running) collect leaves the child in `working`, not `awaiting`", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
+		// A prompt with no reply yet, agent alive: collect times out as running.
+		writeFileSync(handle.sessionFile, transcript([{ role: "user", text: "go" }]));
+
+		const result = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 2_000,
+		});
+		assert.equal(result.execution.status, "running");
+
+		// C: `awaiting` reads as "the turn ended, only cleanup left" — that is
+		// exactly the misreading that had the parent wrap up a live child. The
+		// lifecycle dimension must stay `working` while execution is `running`.
+		const child = h.orchestrator
+			.childrenSnapshot()
+			.find((c) => c.name === handle.name);
+		assert.equal(child?.state, "working");
+		assert.equal(child?.execution?.status, "running");
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("U6: a terminal collect still marks the child `awaiting` (the change is running-only)", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
+		writeFileSync(
+			handle.sessionFile,
+			transcript([
+				{ role: "user", text: "go" },
+				{ role: "assistant", stopReason: "stop", text: "done" },
+			]),
+		);
+
+		const result = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+		assert.equal(result.execution.status, "success");
+		const child = h.orchestrator
+			.childrenSnapshot()
+			.find((c) => c.name === handle.name);
+		assert.equal(child?.state, "awaiting");
+	} finally {
+		h.cleanup();
+	}
+});
+
+// ─────── D (U7): a growing artifact grants a bounded deadline extension ───────
+
+test("U7: a still-growing session file extends the collect deadline instead of reporting `running`", async () => {
+	// The incident: collect hit its 30-minute deadline while the worker was
+	// demonstrably still writing. A growing artifact must buy time; only a
+	// QUIET artifact may be reported as `running`.
+	const { appendFileSync } = await import("node:fs");
+	const runDir = mkdtempSync(path.join(tmpdir(), "orch-grace-"));
+	const fake = new FakeHerdr();
+	fake.addRootPane("w1");
+	const client = createHerdrClient(createFakeRunner(fake));
+	const timeoutMs = 3_000;
+	const pollMs = 500;
+	let sleeps = 0;
+	let growing = true;
+	const orchestrator = new Orchestrator({
+		client,
+		runDir,
+		cwd: "/tmp/project",
+		now: () => fake.now,
+		sleep: async (ms) => {
+			fake.advance(ms);
+			sleeps += 1;
+			if (!growing) return;
+			// Keep the file growing across the FIRST deadline (6 polls at
+			// 500ms), then land the real reply during the grace window.
+			if (sleeps <= 8) {
+				appendFileSync(
+					handleRef!.sessionFile,
+					`${userMsg(`still working ${sleeps}`)}\n`,
+				);
+				return;
+			}
+			growing = false;
+			appendFileSync(
+				handleRef!.sessionFile,
+				`${assistantMsg({ stopReason: "stop", text: "late but done" })}\n`,
+			);
+		},
+	});
+	let handleRef: { sessionFile: string } | undefined;
+	try {
+		const launch = await orchestrator.launch({ agent: agent(), task: "t" });
+		handleRef = { sessionFile: launch.sessionFile };
+		writeFileSync(launch.sessionFile, transcript([{ role: "user", text: "go" }]));
+		const started = fake.now;
+
+		const result = await orchestrator.collect(launch.name, { timeoutMs });
+		const elapsed = fake.now - started;
+
+		// The turn's completion was captured instead of a false `running`.
+		assert.equal(result.execution.status, "success");
+		assert.match(result.output, /late but done/);
+		assert.ok(
+			elapsed > timeoutMs,
+			`the deadline must have been extended (elapsed ${elapsed}ms)`,
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("U7: a quiet artifact still times out as `running` (no extension, no hang)", async () => {
+	// No grace for a silent file: nothing is being written, so the timeout is
+	// the answer. This is the other half of the growing/quiet discriminator.
+	const runDir = mkdtempSync(path.join(tmpdir(), "orch-quiet-"));
+	const fake = new FakeHerdr();
+	fake.addRootPane("w1");
+	const client = createHerdrClient(createFakeRunner(fake));
+	const timeoutMs = 3_000;
+	const orchestrator = new Orchestrator({
+		client,
+		runDir,
+		cwd: "/tmp/project",
+		now: () => fake.now,
+		sleep: async (ms) => {
+			fake.advance(ms);
+		},
+	});
+	try {
+		const handle = await orchestrator.launch({ agent: agent(), task: "t" });
+		writeFileSync(handle.sessionFile, transcript([{ role: "user", text: "go" }]));
+		const started = fake.now;
+
+		const result = await orchestrator.collect(handle.name, { timeoutMs });
+		const elapsed = fake.now - started;
+
+		assert.equal(result.execution.status, "running");
+		assert.match(result.execution.reason ?? "", /timed out/);
+		assert.ok(
+			elapsed < timeoutMs * 2,
+			`a quiet file must not extend the deadline (elapsed ${elapsed}ms)`,
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
