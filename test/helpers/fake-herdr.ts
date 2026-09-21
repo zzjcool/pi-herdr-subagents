@@ -14,6 +14,74 @@
  */
 
 import type { CommandRunner } from "../../src/shared/types.ts";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+
+// ---------------------------------------------------------------------------
+// Cursor chat-store fixtures (mirror the real cursor-agent on-disk shape)
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a chat dir + store.db under `root`, returning the chat id (dir name).
+ * Mirrors `~/.cursor/chats/<projectHash>/<chatId>/` with `meta.json` + a
+ * `blobs(id, data)` SQLite table.
+ */
+function createCursorChatStore(root: string, cwd: string): string {
+	const chatId = crypto.randomUUID();
+	const dir = path.join(root, "projhash", chatId);
+	fs.mkdirSync(dir, { recursive: true });
+	fs.writeFileSync(
+		path.join(dir, "meta.json"),
+		JSON.stringify({
+			schemaVersion: 1,
+			cwd,
+			title: "fake",
+			createdAtMs: Date.now(),
+		}),
+	);
+	const db = new DatabaseSync(path.join(dir, "store.db"));
+	db.exec("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)");
+	db.close();
+	return chatId;
+}
+
+/** Append one completed turn (user prompt + assistant reply) to the store. */
+function appendCursorTurn(
+	chatDir: string,
+	prompt: string,
+	reply: string,
+): void {
+	const db = new DatabaseSync(path.join(chatDir, "store.db"));
+	try {
+		const count = (
+			db.prepare("SELECT COUNT(*) AS n FROM blobs").get() as { n: number }
+		).n;
+		const ins = db.prepare("INSERT INTO blobs (id, data) VALUES (?, ?)");
+		ins.run(`u${count + 1}`, JSON.stringify({ role: "user", content: prompt }));
+		ins.run(
+			`a${count + 2}`,
+			JSON.stringify({
+				role: "assistant",
+				content: [{ type: "text", text: reply }],
+			}),
+		);
+	} finally {
+		db.close();
+	}
+}
+
+/**
+ * Test-facing helper: land a completed turn in a fake cursor agent's chat
+ * store, as the real cursor-agent does when a turn finishes.
+ */
+export function appendTurnToFakeStore(
+	chatDir: string,
+	prompt: string,
+	reply: string,
+): void {
+	appendCursorTurn(chatDir, prompt, reply);
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -31,6 +99,11 @@ export interface FakeHerdrOptions {
 	 * existing tests that never pass `--workspace` green.
 	 */
 	focusedWorkspaceId?: string;
+	/**
+	 * Root directory for cursor-kind chat stores. Defaults to a fresh temp
+	 * dir mirroring the real `~/.cursor/chats/` layout.
+	 */
+	chatRoot?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +143,13 @@ interface FakeAgent {
 	paneId: string;
 	/** Session path reported by `agent start` (F1); null for non-pi kinds (F7). */
 	sessionPath: string | null;
+	/**
+	 * cursor-kind only: id of the chat store directory under `chatRoot`,
+	 * reported as `agent_session.value` — mirrors real herdr's `herdr:cursor`.
+	 */
+	chatId: string | null;
+	/** cursor-kind only: the chat dir path (`<chatRoot>/<project>/<id>`). */
+	chatStore: string | null;
 	status: "idle" | "working" | "done" | "blocked" | "exited";
 	labels: Record<string, string>;
 	tokens: unknown;
@@ -140,6 +220,12 @@ export class FakeHerdr {
 	readonly failStartOnModel = new Set<string>();
 	/** Models that successfully started, in order. */
 	readonly startedModels: Array<string | undefined> = [];
+	/**
+	 * Root for cursor-kind chat stores. Each cursor agent gets
+	 * `<chatRoot>/<project>/<uuid>/store.db`, mirroring the real
+	 * `~/.cursor/chats/<projectHash>/<chatId>/` layout.
+	 */
+	readonly chatRoot: string;
 
 	private clock: number;
 	private nextPane = 1;
@@ -149,6 +235,7 @@ export class FakeHerdr {
 		this.paneBusyMs = opts.paneBusyMs ?? 0;
 		this.clock = opts.now ?? Date.now();
 		this.focusedWorkspaceId = opts.focusedWorkspaceId ?? "w1";
+		this.chatRoot = opts.chatRoot ?? fs.mkdtempSync(path.join("/tmp", "fake-chats-"));
 	}
 
 	// -- time ----------------------------------------------------------------
@@ -223,6 +310,8 @@ export class FakeHerdr {
 			kind,
 			paneId,
 			sessionPath,
+			chatId: null,
+			chatStore: null,
 			status: "idle",
 			labels: {},
 			tokens: { input: 0, output: 0 },
@@ -313,6 +402,15 @@ export class FakeHerdr {
 				}
 				agent.status = turn.exitsAfter ? "exited" : "done";
 				if (pane) pane.agent_status = turn.exitsAfter ? undefined : "idle";
+				// Structured channel: cursor-kind turns also land in the chat store,
+				// mirroring the real cursor-agent's SQLite persistence.
+				if (agent.kind === "cursor" && agent.chatStore) {
+					try {
+						appendCursorTurn(agent.chatStore, prompt, turn.outputText);
+					} catch {
+						// A broken store must not fail the scripted turn.
+					}
+				}
 				if (turn.exitsAfter) {
 					// F16: the name is freed on exit.
 					this.agents.delete(name);
@@ -552,7 +650,18 @@ export class FakeHerdr {
 				}
 				// F1/F7: only pi kinds report a session path.
 				const sessionPath = kind === "pi" ? `/tmp/sessions/${name}.jsonl` : null;
+				// cursor kinds get a chat store, like the real cursor-agent's SQLite
+				// persistence under ~/.cursor/chats/<project>/<chatId>/.
+				let chatId: string | null = null;
+				if (kind === "cursor") {
+					chatId = createCursorChatStore(this.chatRoot, pane.cwd ?? "/tmp/project");
+				}
 				this.addAgent(name, paneId, kind, sessionPath);
+				if (chatId) {
+					const agent = this.agents.get(name)!;
+					agent.chatId = chatId;
+					agent.chatStore = path.join(this.chatRoot, "projhash", chatId);
+				}
 				this.startedModels.push(model);
 				const agent = this.agents.get(name)!;
 				pane.agent_status = "idle";
@@ -612,6 +721,30 @@ export class FakeHerdr {
 					}
 					return okOut({ sent: keys });
 				}
+				const pane = this.panes.get(agent.paneId);
+				if (
+					pane &&
+					keys.some((key) => key === "enter" || key === "return") &&
+					/\[Pasted text #\d+/i.test(pane.screen.join("\n"))
+				) {
+					// Cursor TUI: Enter submits the collapsed paste and the turn starts.
+					pane.screen.push(
+						'Paste submitted.\n{"ok": true, "reason": "paste submitted"}',
+					);
+					// The real cursor-agent also lands the completed turn in its chat
+					// store; mirror that so the structured channel sees it.
+					if (agent.kind === "cursor" && agent.chatStore) {
+						try {
+							appendCursorTurn(
+								agent.chatStore,
+								"(pasted prompt)",
+								'Paste submitted.\n{"ok": true, "reason": "paste submitted"}',
+							);
+						} catch {
+							// A broken store must not fail the scripted turn.
+						}
+					}
+				}
 				// F11: ctrl+d is the clean exit; ctrl+c does NOT stop the agent.
 				if (keys.includes("ctrl+d")) {
 					agent.status = "exited";
@@ -670,9 +803,13 @@ export class FakeHerdr {
 			agent_status: agent.status,
 			cwd: this.panes.get(agent.paneId)?.cwd ?? null,
 			// F1: pi → {kind, source, value: sessionPath}; F7: non-pi → null.
-			agent_session: agent.sessionPath
-				? { kind: "session", source: "pi", value: agent.sessionPath }
-				: null,
+			// cursor → the chat-store id, like real herdr's `herdr:cursor` session.
+			agent_session:
+				agent.sessionPath
+					? { kind: "session", source: "pi", value: agent.sessionPath }
+					: agent.chatId
+						? { kind: "id", source: "herdr:cursor", value: agent.chatId }
+						: null,
 			state_labels: agent.labels,
 			tokens: agent.tokens,
 		};

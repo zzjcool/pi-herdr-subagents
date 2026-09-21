@@ -221,7 +221,14 @@ function toAgentStartResult(
 ): AgentStartResult {
 	const record = asRecord(value);
 	const agent = toAgentInfo(record.agent);
-	const sessionPath = agent.agent_session?.value;
+	// Only the pi session FILE is a `sessionPath` (F1: the resume credential).
+	// A cursor child reports `agent_session = {kind:"id", source:"herdr:cursor"}`
+	// — a chat-store id, not a path; surfacing it here would let callers treat
+	// it as a jsonl to parse.
+	const sessionPath =
+		agent.agent_session && agent.agent_session.source === "pi"
+			? agent.agent_session.value
+			: undefined;
 	return {
 		name: agent.name ?? opts.name,
 		paneId: agent.pane_id || opts.paneId,

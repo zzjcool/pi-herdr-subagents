@@ -125,3 +125,27 @@ test("deliverCompletion returns false when sendMessage throws", () => {
 	);
 	assert.equal(ok, false);
 });
+
+test("completionStatusOf: unknown with a parsed verdict is completed, not failed", () => {
+	// A finished cursor child reports `unknown` (F7: no stopReason) even when
+	// its own verdict JSON was parsed from the pane. The old blanket mapping
+	// labelled those answers "Background task failed".
+	assert.equal(completionStatusOf("unknown", "accepted"), "completed");
+	assert.equal(completionStatusOf("unknown", "rejected"), "completed");
+	// Without a witnessed verdict, unknown stays failed (pi kind wrote nothing).
+	assert.equal(completionStatusOf("unknown"), "failed");
+	assert.equal(completionStatusOf("unknown", "unknown"), "failed");
+});
+
+test("formatCompletionNotice: settled cursor answer reports completed with its verdict", () => {
+	const notice = formatCompletionNotice({
+		name: "advisor-0",
+		agent: "advisor",
+		execution: { status: "unknown", reason: "no session jsonl; collected from pane" },
+		output: "1+1 等于 2。\n{\"ok\": true, \"reason\": \"arithmetic\"}",
+		acceptance: { status: "accepted", level: "attested" },
+	});
+	assert.equal(notice.status, "completed");
+	assert.match(notice.content, /Background task completed: \*\*advisor-0 \(advisor\)\*\*/);
+	assert.match(notice.content, /acceptance: accepted/);
+});

@@ -10,6 +10,7 @@ import * as path from "node:path";
 import {
 	deriveOutcome,
 	extractVerdict,
+	paneHasLiveReply,
 	paneLooksStuck,
 	parseSessionFile,
 	parseSessionText,
@@ -231,6 +232,75 @@ test("paneLooksStuck detects Cursor trust and paste-preview chrome", () => {
 		paneLooksStuck(`${SEARCH_PROMPT}\n杭州 1270 万人，城镇化率 85%。\n{"ok": true, "reason": "done"}`, SEARCH_PROMPT),
 		false,
 	);
+});
+
+test("paneLooksStuck ignores leftover paste chrome once a live reply exists", () => {
+	const pane = `[Pasted text #1 +58 lines]\n${SEARCH_PROMPT}\n杭州常住人口约 1270 万。\n{"ok": true, "reason": "4 sourced facts"}`;
+	assert.equal(paneLooksStuck(pane, SEARCH_PROMPT), false);
+	assert.equal(
+		paneHasLiveReply(
+			"cursor-agent --model cursor-grok-4.6-xhigh\n➜  mqtt-workspace\n[Pasted text #1 +58 lines]\nWorking",
+		),
+		false,
+	);
+});
+
+/**
+ * The launch banner is chrome, not a reply. Reading it as one recycled a live
+ * cursor child ~3s after launch, before its pasted prompt was submitted.
+ *
+ * The `Tip:` line ROTATES between runs, so every observed wording is pinned
+ * here: a blacklist that enumerates wording passes on the variant it was
+ * written against and rots on the next release.
+ */
+const CURSOR_TIP_LINES = [
+	"Tip: Try Cursor Grok 4.6 via /model, frontier intelligence at a fraction of the cost.",
+	"Tip: Use /debug to instrument and debug complex problems.",
+	"Tip: Type ? in the prompt bar to show in-app hints.",
+];
+
+const CURSOR_STATUS_BARS = [
+	"Cursor Grok 4.6 Extra High",
+	"Auto Balance",
+	"Cursor Grok 4.6 Extra High · 80.4% · 8 files edited",
+];
+
+function cursorBanner(tip: string, status: string): string {
+	return [
+		"cursor-agent --model cursor-grok-4.6-xhigh --trust --force",
+		"➜  herdr-subagents cursor-agent --model cursor-grok-4.6-xhigh --trust --force",
+		"  Cursor Agent",
+		"  v2026.09.18-9a7762b",
+		`  ${tip}`,
+		"",
+		"  → [Pasted text #1 +84 lines]",
+		"",
+		`  ${status}                                                                  Run Everything`,
+		"  ~/code/herdr-subagents · master",
+	].join("\n");
+}
+
+test("paneHasLiveReply reads every rotating cursor banner variant as not-yet-replied", () => {
+	for (const tip of CURSOR_TIP_LINES) {
+		for (const status of CURSOR_STATUS_BARS) {
+			const pane = cursorBanner(tip, status);
+			assert.equal(
+				paneHasLiveReply(pane),
+				false,
+				`banner must not count as a reply:\n${pane}`,
+			);
+			// The whole point of the fix: the nudge path must stay reachable.
+			assert.equal(paneLooksStuck(pane, SEARCH_PROMPT), true);
+		}
+	}
+});
+
+test("paneHasLiveReply still sees a real reply under the banner", () => {
+	const pane = cursorBanner(CURSOR_TIP_LINES[2]!, CURSOR_STATUS_BARS[0]!).replace(
+		"  → [Pasted text #1 +84 lines]",
+		`  ${SEARCH_PROMPT}\n  杭州常住人口约 1270 万。\n  {"ok": true, "reason": "4 sourced facts"}`,
+	);
+	assert.equal(paneHasLiveReply(pane), true);
 });
 
 test("turn boundaries are split by user messages; per-turn stats are independent", () => {

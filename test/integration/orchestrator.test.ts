@@ -26,7 +26,11 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { FakeHerdr, createFakeRunner } from "../helpers/fake-herdr.ts";
+import {
+	FakeHerdr,
+	appendTurnToFakeStore,
+	createFakeRunner,
+} from "../helpers/fake-herdr.ts";
 import { createHerdrClient } from "../../src/herdr/client.ts";
 import {
 	Orchestrator,
@@ -94,6 +98,8 @@ function harness(options: { paneBusyMs?: number } = {}): Harness {
 		client,
 		runDir,
 		cwd: "/tmp/project",
+		now: () => fake.now,
+		cursorChatsRoot: fake.chatRoot,
 		sleep: async (ms) => {
 			fake.advance(ms);
 		},
@@ -969,12 +975,21 @@ test("every kind starts via herdr then gets the task as agent prompt", async () 
 		assert.ok(paneId);
 		const pane = h.fake.panes.get(paneId);
 		assert.ok(pane);
+		// The pane renders the reply; the fake ALSO lands it in the chat store
+		// (as the real cursor-agent does), which is what settles the turn now.
 		pane.screen.push('CURSOR_OK\n{"ok": true, "reason": "reviewed"}');
+		const fakeAgent = h.fake.agents.get(handle.name);
+		assert.ok(fakeAgent?.chatStore, "cursor child must have a chat store");
+		appendTurnToFakeStore(
+			fakeAgent!.chatStore!,
+			"(pasted prompt)",
+			'CURSOR_OK\n{"ok": true, "reason": "reviewed"}',
+		);
 
 		const collected = await h.orchestrator.collect(handle.name, {
 			timeoutMs: 5_000,
 		});
-		assert.equal(collected.execution.status, "unknown");
+		assert.equal(collected.execution.status, "success");
 		assert.match(collected.output, /CURSOR_OK/);
 		assert.equal(collected.acceptance.status, "accepted");
 		assert.match(startArgv, /--trust/);
@@ -1000,6 +1015,7 @@ test("pane collect does not attest a system-prompt template verdict", async () =
 		assert.ok(pane);
 		assert.ok(handle.child.promptText);
 		pane.screen.push(handle.child.promptText);
+		pane.screen.push("Hangzhou facts still loading from the search tool.");
 
 		const collected = await h.orchestrator.collect(handle.name, {
 			timeoutMs: 5_000,
@@ -1024,12 +1040,56 @@ test("cursor collect sends enter when the pane is still a paste preview", async 
 		assert.ok(pane);
 		pane.screen.push("[Pasted text #1 +55 lines]");
 
-		await h.orchestrator.collect(handle.name, { timeoutMs: 5_000 });
+		const collected = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
 		assert.ok(
 			h.fake.sentKeys.some(
 				(row) => row.target === handle.name && row.keys.includes("enter"),
 			),
 			"stuck cursor pane must be nudged with enter",
+		);
+		assert.match(collected.output, /Paste submitted/);
+		assert.equal(collected.acceptance.status, "accepted");
+		assert.equal(
+			h.fake.agents.has(handle.name),
+			true,
+			"a submitted paste must not recycle the pane mid-turn",
+		);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("cursor collect does not settle on an idle Working spinner (debugger 7s retire)", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
+			task: "diagnose the pane recycle",
+		});
+		const paneId = handle.paneId;
+		assert.ok(paneId);
+		const pane = h.fake.panes.get(paneId);
+		assert.ok(pane);
+		pane.screen.push("cursor-agent --model cursor-grok-4.6-xhigh --trust --force");
+		pane.screen.push("➜  mqtt-workspace cursor-agent --model cursor-grok-4.6-xhigh");
+		pane.screen.push("Working");
+
+		const collected = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+		assert.equal(collected.execution.status, "running");
+		assert.match(collected.execution.reason ?? "", /timed out/);
+		assert.equal(
+			h.fake.agents.has(handle.name),
+			true,
+			"timeout must not close a still-alive cursor pane",
+		);
+		assert.equal(
+			h.fake.panes.has(paneId),
+			true,
+			"collect itself must not recycle; running is not terminal",
 		);
 	} finally {
 		h.cleanup();
@@ -1155,6 +1215,166 @@ test("launch: an agent with no model at all still launches", async () => {
 		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
 		assert.ok(handle.name);
 		assert.equal(handle.child.modelDropped, undefined);
+	} finally {
+		h.cleanup();
+	}
+});
+
+// ─────────── the real cursor banner must not be read as a reply ───────────
+//
+// Live failures (advisor/search, three separate runs) showed the child recycled
+// ~3s after launch with `no session jsonl; collected from pane`. The pane was
+// still on the launch banner: the prompt was collapsed to `[Pasted text #N]`
+// and had never been submitted. `paneHasLiveReply` counted the banner text as a
+// reply, so the Enter nudge in `nonPiPaneStillWorking` was unreachable.
+//
+// Existing tests only pushed a bare `[Pasted text #N]`; these pin the FULL
+// banner, whose `Tip:` line ROTATES between runs.
+
+/** The banner as captured from live runs (Tip wording varies per run). */
+function cursorLaunchBanner(tip: string): string[] {
+	return [
+		"cursor-agent --model cursor-grok-4.6-xhigh --trust --force",
+		"➜  herdr-subagents cursor-agent --model cursor-grok-4.6-xhigh --trust --force",
+		"",
+		"  Cursor Agent",
+		"  v2026.09.18-9a7762b",
+		`  ${tip}`,
+		"",
+		"  → [Pasted text #1 +84 lines]",
+		"",
+		"  Cursor Grok 4.6 Extra High · 80.4% · 8 files edited                    Run Everything",
+		"  ~/code/herdr-subagents · master",
+	];
+}
+
+const OBSERVED_TIPS = [
+	"Tip: Try Cursor Grok 4.6 via /model, frontier intelligence at a fraction of the cost.",
+	"Tip: Use /debug to instrument and debug complex problems.",
+	"Tip: Type ? in the prompt bar to show in-app hints.",
+];
+
+test("cursor collect nudges Enter when the pane shows the real launch banner", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
+			task: "t",
+		});
+		const pane = h.fake.panes.get(handle.paneId!);
+		assert.ok(pane);
+		for (const line of cursorLaunchBanner(OBSERVED_TIPS[0]!)) {
+			pane.screen.push(line);
+		}
+
+		const collected = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+
+		assert.ok(
+			h.fake.sentKeys.some(
+				(row) => row.target === handle.name && row.keys.includes("enter"),
+			),
+			"the launch banner must not suppress the Enter nudge",
+		);
+		assert.match(collected.output, /Paste submitted/);
+		assert.equal(
+			h.fake.agents.has(handle.name),
+			true,
+			"a nudged turn must not recycle the pane",
+		);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("every observed Tip wording reaches the nudge (wording must not matter)", async () => {
+	for (const tip of OBSERVED_TIPS) {
+		const h = harness();
+		try {
+			const handle = await h.orchestrator.launch({
+				agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
+				task: "t",
+			});
+			const pane = h.fake.panes.get(handle.paneId!);
+			assert.ok(pane);
+			for (const line of cursorLaunchBanner(tip)) pane.screen.push(line);
+
+			const collected = await h.orchestrator.collect(handle.name, {
+				timeoutMs: 5_000,
+			});
+			assert.match(
+				collected.output,
+				/Paste submitted/,
+				`Tip wording must not change the outcome: ${tip}`,
+			);
+		} finally {
+			h.cleanup();
+		}
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Structured cursor collection (chat store) — the SQLite channel
+// ---------------------------------------------------------------------------
+
+test("cursor collect reads the verdict from the chat store, not the pane", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
+			task: "t",
+		});
+		const pane = h.fake.panes.get(handle.paneId!);
+		assert.ok(pane);
+		// The pane shows ONLY the launch banner — nothing reply-like. The old
+		// screen-reading path could never settle from this alone.
+		for (const line of cursorLaunchBanner(OBSERVED_TIPS[0]!)) {
+			pane.screen.push(line);
+		}
+
+		const collected = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 5_000,
+		});
+
+		// The store carries the answer (written by the Enter submit): the
+		// verdict must be derived from it — attested, with the pane never having
+		// rendered a reply beyond the banner.
+		assert.equal(collected.execution.status, "success");
+		assert.equal(collected.acceptance.status, "accepted");
+		assert.equal(collected.acceptance.level, "attested");
+		assert.match(collected.output, /Paste submitted/);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("cursor collect keeps waiting while the store has no answer yet", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({
+			agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
+			task: "t",
+		});
+		const pane = h.fake.panes.get(handle.paneId!);
+		assert.ok(pane);
+		// Banner + a mid-turn spinner, and NO paste preview anywhere: nothing
+		// to nudge, no answer in the store. The turn must time out as running.
+		for (const line of cursorLaunchBanner(OBSERVED_TIPS[1]!)) {
+			pane.screen.push(line);
+		}
+		pane.screen.push("⠘⠣ Working 12 tokens ctrl+c to stop");
+
+		const collected = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 3_000,
+		});
+
+		assert.equal(collected.execution.status, "running");
+		assert.equal(
+			h.fake.agents.has(handle.name),
+			true,
+			"a mid-turn pane must not be recycled",
+		);
 	} finally {
 		h.cleanup();
 	}

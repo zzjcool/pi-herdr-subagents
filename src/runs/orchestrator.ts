@@ -40,9 +40,16 @@ import {
 	parseSessionFile,
 	emptyParsedSession,
 	extractVerdict,
-	paneLooksStuck,
+	paneHasLiveReply,
+	paneIsBusy,
+	paneNeedsSubmitNudge,
 	stripPromptEcho,
 } from "../shared/session.ts";
+import {
+	cursorTurnSettled,
+	findCursorChatDir,
+	parseCursorChat,
+} from "../shared/cursor-chat.ts";
 import {
 	type AgentConfig,
 	type AcceptanceResult,
@@ -128,6 +135,11 @@ export interface OrchestratorDeps {
 	 * another parent in the same Space does not adopt this tab.
 	 */
 	parentPaneId?: string;
+	/**
+	 * Root of the cursor chat stores, overriding `~/.cursor/chats` — injects
+	 * the fake's store root in tests.
+	 */
+	cursorChatsRoot?: string;
 }
 
 export interface CollectResult {
@@ -290,6 +302,8 @@ export class Orchestrator {
 	private readonly client: HerdrClient;
 	private readonly runDir: string;
 	private readonly cwd: string;
+	/** Overridden in tests: the cursor chat-store root (`~/.cursor/chats`). */
+	private readonly cursorChatsRoot?: string;
 	private readonly onChildUpdate: (child: ChildRecord) => void;
 	private readonly now: () => number;
 	private readonly sleep: (ms: number) => Promise<void>;
@@ -304,6 +318,14 @@ export class Orchestrator {
 	 * `agent_not_found` and abort instead of sitting until timeoutMs.
 	 */
 	private readonly waitSliceMs = 2_000;
+	/**
+	 * Minimum gap between paste-submit Enters for one non-pi child. A swallowed
+	 * nudge must be retried, but the TUI needs time to ingest the paste first —
+	 * pressing faster than this just queues noise (measured on a live pane).
+	 */
+	private readonly nudgeIntervalMs = 1_500;
+	/** Per-child timestamp of the last paste-submit Enter. */
+	private readonly nudgeTimestamps = new Map<string, number>();
 	private readonly parentPath: NestedPathEntry[];
 	private readonly maxDepth: number;
 	private readonly maxSpawns: number | null;
@@ -326,6 +348,7 @@ export class Orchestrator {
 		this.client = deps.client;
 		this.runDir = deps.runDir;
 		this.cwd = deps.cwd;
+		this.cursorChatsRoot = deps.cursorChatsRoot;
 		this.onChildUpdate = deps.onChildUpdate ?? (() => {});
 		this.now = deps.now ?? (() => Date.now());
 		this.sleep = deps.sleep ?? defaultSleep;
@@ -1115,18 +1138,33 @@ export class Orchestrator {
 
 		const timeoutMs = opts.timeoutMs ?? DEFAULTS.turnTimeoutMs;
 		const deadline = this.now() + timeoutMs;
-		const initial = parseSessionFile(child.sessionFile);
+		// The chat dir may not exist yet at launch (cursor creates it lazily),
+		// so it is resolved per read, not cached — a launch-time null must not
+		// pin the whole collect to the pane path.
+		const chatDirNow = () => this.cursorChatDirOf(child);
+		const cursorChat = await chatDirNow();
+		const initial = cursorChat
+			? parseCursorChat(cursorChat)
+			: parseSessionFile(child.sessionFile);
 
-		const alreadySettled = isLastTurnComplete(initial);
+		const alreadySettled =
+			cursorChat && cursorTurnSettled(initial)
+				? true
+				: isLastTurnComplete(initial);
 		const wait = alreadySettled
 			? "settled"
 			: initial.turns.length > 0
-				? await this.awaitTurn(child, initial, deadline)
+				? await this.awaitTurn(child, initial, deadline, await chatDirNow())
 				: await this.awaitHerdrSettle(child, deadline);
 		if (wait === "blocked") return this.blockedResult(child);
 		const timedOut = wait === "timeout";
 
-		const parsed = parseSessionFile(child.sessionFile);
+		// Re-resolve after the wait: the store appears (and the answer lands in
+		// it) while the child runs, so the initial read above is stale by now.
+		const chatAtCollect = await chatDirNow();
+		const parsed = chatAtCollect
+			? parseCursorChat(chatAtCollect)
+			: parseSessionFile(child.sessionFile);
 		if (parsed.turns.length > 0) {
 			return this.finishCollect(
 				child,
@@ -1155,7 +1193,7 @@ export class Orchestrator {
 			parsed,
 			await this.executionFromPane(child, timedOut, timeoutMs),
 			deadline,
-			await this.readPaneForCollect(child, deadline),
+			await this.readPaneOutput(child),
 		);
 	}
 
@@ -1211,28 +1249,33 @@ export class Orchestrator {
 	}
 
 	/**
-	 * Cursor's TUI can swallow a large `agent prompt` as `[Pasted text #N]`
-	 * or sit on workspace trust. If the pane still looks like that after
-	 * wait, send Enter once and wait again.
+	 * The child's cursor chat store directory, when it has one.
+	 *
+	 * herdr reports the chat id as `agent_session.value` for cursor children;
+	 * the id is the directory name under `~/.cursor/chats/<project>/<id>/`.
+	 * Returns null for pi kinds, unreadable ids, or a chat not yet on disk —
+	 * the caller then falls back to the pane path.
 	 */
-	private async readPaneForCollect(
-		child: ChildRecord,
-		deadline: number,
-	): Promise<string> {
-		let paneOutput = await this.readPaneOutput(child);
-		if (
-			child.kind !== "cursor" ||
-			!child.paneId ||
-			!paneLooksStuck(paneOutput, child.promptText)
-		) {
-			return paneOutput;
-		}
-		await bestEffort(this.client.agentSendKeys(child.name, "enter"));
-		if (await this.isAgentBlocked(child.name)) return paneOutput;
-		await this.awaitHerdrSettle(child, deadline);
-		return this.readPaneOutput(child);
+	private async cursorChatDirOf(child: ChildRecord): Promise<string | null> {
+		if (child.kind !== "cursor") return null;
+		const agentState = await this.client.agentGet(child.name);
+		if (!agentState.ok) return null;
+		const chatId = agentState.value.agent_session?.value;
+		if (!chatId) return null;
+		return findCursorChatDir(chatId, {
+			cwd: child.worktreePath ?? this.cwd,
+			...(this.cursorChatsRoot ? { chatsRoot: this.cursorChatsRoot } : {}),
+		});
 	}
 
+	/**
+	 * Outcome of a non-pi child, derived from its pane (no session jsonl — F7).
+	 *
+	 * The design contract (design.md §802, F7) pins non-pi kinds to `unknown`:
+	 * without a session stopReason there is no authoritative success signal, and
+	 * a pane reply is not one. Do NOT promote this to `success` — the lying part
+	 * is elsewhere (see notify.completionStatusOf).
+	 */
 	private async executionFromPane(
 		child: ChildRecord,
 		timedOut: boolean,
@@ -1245,8 +1288,19 @@ export class Orchestrator {
 				model: child.model ?? null,
 			};
 		}
-		const empty = emptyParsedSession();
-		return this.resolveExecution(child.name, empty, true, timeoutMs);
+		const agentState = await this.client.agentGet(child.name);
+		if (agentState.ok) {
+			return {
+				status: "running",
+				reason: `collect timed out after ${timeoutMs}ms; the agent is still alive`,
+				model: child.model ?? null,
+			};
+		}
+		return {
+			status: "aborted",
+			reason: "herdr agent gone (tab or pane closed)",
+			model: child.model ?? null,
+		};
 	}
 
 	/**
@@ -1306,16 +1360,89 @@ export class Orchestrator {
 				timeoutMs: Math.min(remaining, this.waitSliceMs),
 			});
 			if (waited.ok) {
-				await this.waitForQuiet(child.sessionFile, deadline);
+				if (child.kind === "pi") {
+					await this.waitForQuiet(child.sessionFile, deadline);
+				}
 				const after = await this.agentPresence(child.name);
 				if (after === "blocked") return "blocked";
 				if (after === "gone") return "gone";
+				if (await this.nonPiPaneStillWorking(child)) {
+					continue;
+				}
 				return "settled";
 			}
 			if (await this.isAgentGone(child.name)) return "gone";
 			if (await this.isAgentBlocked(child.name)) return "blocked";
+			await this.sleep(this.pollIntervalMs);
 		}
 		return "timeout";
+	}
+
+	/**
+	 * Non-pi kinds have no jsonl, so `agent wait` + an empty-file quiet window
+	 * is not a turn boundary. Cursor in particular collapses a large prompt
+	 * into `[Pasted text #N]` and looks idle to herdr — collect used to return
+	 * in ~7s and recycle the pane while the child was still Working.
+	 *
+	 * Keep waiting until the pane has a live reply. While the TUI is still on
+	 * trust / paste chrome WITH a non-empty input box, send Enter and keep
+	 * polling.
+	 *
+	 * The nudge must be RETRIED, not sent once: measured on a live cursor pane,
+	 * a single early Enter was swallowed and the child sat on
+	 * `→ [Pasted text #1 +82 lines]` until the collect deadline. The pane only
+	 * accepts the paste once the TUI has finished ingesting it, and the input
+	 * box then returns to its `Add a follow-up` placeholder — that transition is
+	 * what stops the retries, so a healthy long turn is never pressed at.
+	 */
+	private async nonPiPaneStillWorking(
+		child: ChildRecord,
+	): Promise<boolean> {
+		if (child.kind === "pi") return false;
+		if (!child.paneId) return false;
+		// Structured channel first: when the cursor chat store already shows a
+		// settled turn, the reply is in hand and the pane's rendering is
+		// irrelevant (it can lag the store or wrap the text).
+		const chatDir = await this.cursorChatDirOf(child);
+		const structured = chatDir ? parseCursorChat(chatDir) : null;
+		if (structured && cursorTurnSettled(structured)) {
+			return false;
+		}
+		const paneOutput = await this.readPaneOutput(child);
+		// A live spinner / token counter / `ctrl+c to stop` means the turn is
+		// still running. Without this the half-streamed answer tripped the reply
+		// test below, collect returned early, and the child was reported failed
+		// while it was still writing.
+		if (paneIsBusy(paneOutput)) {
+			await this.sleep(this.pollIntervalMs);
+			return true;
+		}
+		// With a chat store, the STORE settles the turn — never the pane's
+		// rendered text. Measured: the TUI wraps the banner/model name/Tip across
+		// lines in a different shape every run, so "pane looks like a reply" is
+		// not a signal. The pane remains responsible only for the input side
+		// (submitting the paste) below.
+		if (!structured) {
+			if (paneHasLiveReply(stripPromptEcho(paneOutput, child.promptText))) {
+				return false;
+			}
+		}
+		// Still working. Return true so `awaitHerdrSettle` keeps polling; the
+		// deadline is enforced by its own loop condition, which surfaces as
+		// `timeout` (→ `running`, pane kept) rather than a false `settled`.
+		if (paneNeedsSubmitNudge(paneOutput)) {
+			if (this.now() - this.lastNudgeAt(child.name) >= this.nudgeIntervalMs) {
+				this.nudgeTimestamps.set(child.name, this.now());
+				await bestEffort(this.client.agentSendKeys(child.name, "enter"));
+			}
+		}
+		await this.sleep(this.pollIntervalMs);
+		return true;
+	}
+
+	/** When `name` was last sent a paste-submit Enter (0 = never). */
+	private lastNudgeAt(name: string): number {
+		return this.nudgeTimestamps.get(name) ?? 0;
 	}
 
 	/**
@@ -1336,6 +1463,7 @@ export class Orchestrator {
 		child: ChildRecord,
 		initial: ReturnType<typeof parseSessionFile>,
 		deadline: number,
+		cursorChat?: string | null,
 	): Promise<"settled" | "timeout" | "blocked" | "gone"> {
 		const before = countAssistantMessages(initial);
 		const timeoutMs = deadline - this.now();
@@ -1346,7 +1474,9 @@ export class Orchestrator {
 			const presence = await this.agentPresence(child.name);
 			if (presence === "blocked") return "blocked";
 			if (presence === "gone") return "gone";
-			const parsed = parseSessionFile(child.sessionFile);
+			const parsed = cursorChat
+				? parseCursorChat(cursorChat)
+				: parseSessionFile(child.sessionFile);
 			if (countAssistantMessages(parsed) > before) {
 				progressed = true;
 				break;

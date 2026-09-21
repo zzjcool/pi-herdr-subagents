@@ -2,7 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createSessionRuntime } from "../../src/extension/runtime.ts";
+import {
+	createSessionRuntime,
+	shouldRecycleAfterCollect,
+} from "../../src/extension/runtime.ts";
 import { SUBAGENT_NOTIFY_TYPE } from "../../src/extension/notify.ts";
 import type { CollectSnapshot } from "../../src/extension/runtime.ts";
 import { withTempDir } from "../helpers/tmp.ts";
@@ -362,4 +365,12 @@ test("runtime: non-pi probe fills the same live fields", async () => {
 		lastTools: ["edit"],
 	});
 	runtime.dispose();
+});
+
+test("shouldRecycleAfterCollect keeps running/blocked panes, recycles unknown", () => {
+	assert.equal(shouldRecycleAfterCollect("running"), false);
+	assert.equal(shouldRecycleAfterCollect("blocked"), false);
+	assert.equal(shouldRecycleAfterCollect("unknown"), true);
+	assert.equal(shouldRecycleAfterCollect("success"), true);
+	assert.equal(shouldRecycleAfterCollect("aborted"), true);
 });

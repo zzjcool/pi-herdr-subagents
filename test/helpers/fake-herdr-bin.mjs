@@ -60,6 +60,15 @@ if (cmd === "pane" && sub === "split") {
 	});
 }
 
+if (cmd === "pane" && sub === "read") {
+	// F6: plain text. Cursor/non-pi collect waits for a live reply on the pane
+	// (jsonl is empty); an empty read would hang until turnTimeoutMs.
+	process.stdout.write(
+		'FAKE_PANE_REPLY from hermetic herdr\n{"ok": true, "reason": "fake herdr done"}\n',
+	);
+	process.exit(0);
+}
+
 if (cmd === "pane" && sub === "get") {
 	out({
 		pane: {
@@ -77,7 +86,16 @@ if (cmd === "tab" && (sub === "list" || sub === "get")) {
 }
 
 if (cmd === "tab" && sub === "create") {
-	out({ tab: { tab_id: "w1:t1", paneIds: [] } });
+	out({
+		tab: { tab_id: "w1:t1", paneIds: ["w1:p1"] },
+		root_pane: {
+			pane_id: "w1:p1",
+			tab_id: "w1:t1",
+			workspace_id: "w1",
+			cwd: null,
+			agent_status: null,
+		},
+	});
 }
 
 if (cmd === "agent" && sub === "start") {
@@ -130,8 +148,8 @@ if (cmd === "agent" && sub === "start") {
 	});
 }
 
-if (cmd === "agent" && (sub === "prompt" || sub === "send-keys")) {
-	out({ ok: true });
+if (cmd === "agent" && (sub === "prompt" || sub === "send-keys" || sub === "wait" || sub === "get")) {
+	out({ ok: true, agent: { name: argv[2] ?? "child", agent_status: "idle" } });
 }
 
 if (cmd === "agent" && sub === "list") {

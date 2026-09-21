@@ -145,8 +145,28 @@ test("agentStart reports NO session path for non-pi kinds (F7)", async () => {
 	const res = await client.agentStart({ name: "cursor-1", kind: "cursor", paneId });
 	assert.ok(res.ok);
 	if (res.ok) {
+		// F7 still holds: no session FILE path (the jsonl channel is pi-only).
 		assert.equal(res.value.sessionPath, undefined);
 		const info = await client.agentGet("cursor-1");
+		assert.ok(info.ok);
+		if (info.ok) {
+			// The cursor kind instead reports its chat-store id, mirroring real
+			// herdr's `herdr:cursor` session — the structured collect channel.
+			const session = info.value.agent_session;
+		assert.ok(session && session.kind === "id" && session.source === "herdr:cursor");
+			assert.match(session!.value, /^[0-9a-f-]{36}$/);
+		}
+	}
+});
+
+test("agentStart reports NO agent_session for other non-pi kinds (F7)", async () => {
+	const { fake, client } = clientWith();
+	const paneId = fake.addRootPane();
+	const res = await client.agentStart({ name: "claude-1", kind: "claude", paneId });
+	assert.ok(res.ok);
+	if (res.ok) {
+		assert.equal(res.value.sessionPath, undefined);
+		const info = await client.agentGet("claude-1");
 		assert.ok(info.ok);
 		if (info.ok) assert.equal(info.value.agent_session, null);
 	}

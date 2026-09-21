@@ -36,11 +36,29 @@ export interface CompletionNotice {
 
 const PREVIEW_CHARS = 4_000;
 
+/**
+ * Map an execution status onto the coarse notification label.
+ *
+ * `unknown` needs a witness: non-pi kinds cannot produce a stopReason (F7),
+ * so a finished cursor child reports `unknown`. When its own verdict was
+ * still parsed (acceptance accepted/rejected), the turn demonstrably ran and
+ * finished — report completion and let the `acceptance:` line carry the
+ * verdict. Without that witness, `unknown` stays `failed` (pi kind, no
+ * messages at all). The old blanket mapping labelled every successful
+ * cursor answer "Background task failed".
+ */
 export function completionStatusOf(
 	executionStatus: string,
+	acceptanceStatus?: string,
 ): CompletionStatus {
 	if (executionStatus === "success") return "completed";
 	if (executionStatus === "aborted") return "stopped";
+	if (
+		executionStatus === "unknown" &&
+		(acceptanceStatus === "accepted" || acceptanceStatus === "rejected")
+	) {
+		return "completed";
+	}
 	return "failed";
 }
 
@@ -51,7 +69,10 @@ export function previewOutput(text: string, max = PREVIEW_CHARS): string {
 }
 
 export function formatCompletionNotice(input: CompletionInput): CompletionNotice {
-	const status = completionStatusOf(input.execution.status);
+	const status = completionStatusOf(
+		input.execution.status,
+		input.acceptance?.status,
+	);
 	const label = input.agent ? `${input.name} (${input.agent})` : input.name;
 	const reason = input.execution.reason
 		? ` (${input.execution.reason})`

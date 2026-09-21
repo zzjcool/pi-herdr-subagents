@@ -466,15 +466,71 @@ export function stripPromptEcho(output: string, prompt?: string): string {
 	return rest.replace(/\n{3,}/g, "\n\n").trim();
 }
 
-/** Cursor TUI still sitting on trust / a paste preview, not a finished turn. */
-export function paneLooksStuck(output: string, prompt?: string): boolean {
-	if (STUCK_PANE.test(output)) return true;
-	if (!prompt?.trim()) return false;
-	return !paneHasLiveReply(stripPromptEcho(output, prompt));
+/**
+ * Whether cursor's TUI is mid-turn: the spinner, a live token counter, or the
+ * `ctrl+c to stop` affordance only appear while a turn is running.
+ *
+ * Checked BEFORE the reply test. `paneHasLiveReply` strips `Working` as noise
+ * (it sits inside the text a reply would be measured from), which means a
+ * half-streamed answer counts as a finished one — and the answer gets cut off
+ * and the child reported as failed.
+ */
+export function paneIsBusy(output: string): boolean {
+	return (
+		/ctrl\+c to stop/i.test(output) ||
+		/\bWorking\b/i.test(output) ||
+		/\d+\s+tokens?\b/i.test(output)
+	);
 }
 
-const STUCK_PANE =
-	/Workspace Trust Required|Do you trust the contents of this directory|\[Pasted text #\d+/i;
+/** Cursor TUI still sitting on trust / a paste preview, not a finished turn. */
+export function paneLooksStuck(output: string, prompt?: string): boolean {
+	// A live reply settles the question: leftover `[Pasted text #N]` chrome in
+	// the scrollback must not keep the pane "stuck" after the child has answered.
+	// This check comes FIRST for exactly that reason.
+	if (paneHasLiveReply(stripPromptEcho(output, prompt))) return false;
+	// No reply yet, but the TUI is waiting for Enter (trust dialog, or a paste
+	// that was never submitted): that is the stuck shape we must nudge.
+	if (paneNeedsSubmitNudge(output)) return true;
+	// Mid-turn with a live spinner / token counter: working, not stuck.
+	if (paneIsBusy(output)) return false;
+	if (!prompt?.trim()) return false;
+	return true;
+}
+
+const TRUST_PANE = /Workspace Trust Required|Do you trust/i;
+
+/**
+ * The TUI's input-box line: the LAST line opening with `→`, e.g.
+ * `→ Add a follow-up` or `→ [Pasted text #1 +82 lines]`.
+ */
+function lastInputLine(output: string): string | undefined {
+	const lines = output.split("\n");
+	for (let i = lines.length - 1; i >= 0; i -= 1) {
+		const line = lines[i];
+		if (line !== undefined && /^\s*→/.test(line)) return line;
+	}
+	return undefined;
+}
+
+/**
+ * Whether this pane needs an Enter to submit its collapsed paste (or to
+ * confirm a trust dialog).
+ *
+ * The decision is STRUCTURAL, never wording-based. The placeholder inside the
+ * input box ROTATES between runs (observed: `Add a follow-up`,
+ * `Plan, search, build anything`, `Ask anything`), so only the `→` line's own
+ * content — a still-pending `[Pasted text #N]` — decides. This also keeps a
+ * `[Pasted text]` left in scrollback from re-triggering Enters after the paste
+ * was accepted and the child is already answering.
+ */
+export function paneNeedsSubmitNudge(output: string): boolean {
+	if (TRUST_PANE.test(output)) return true;
+	const input = lastInputLine(output);
+	// With no `→` chrome in view (other terminals / older fixtures) the paste
+	// marker itself is the only available signal.
+	return /\[Pasted text #\d+/i.test(input ?? output);
+}
 
 function stripOnce(haystack: string, needle: string): string {
 	if (!needle) return haystack;
@@ -487,13 +543,70 @@ function fencedBlocks(text: string): string[] {
 	return text.match(/```(?:json)?\s*\n([\s\S]*?)```/g) ?? [];
 }
 
-function paneHasLiveReply(text: string): boolean {
-	const cleaned = text
-		.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
-		.replace(/\[Pasted text[^\]]*\]/gi, "")
-		.replace(/cursor-agent(?:[ \t]+--\S+)*/gi, "")
-		.replace(/^.*➜.*$/gm, "")
-		.trim();
+/**
+ * Cursor's TUI chrome. It sits above the prompt and is NOT a reply: product
+ * name, version, the rotating `Tip:` line, an empty `→` cursor, the
+ * `Run Everything` status bar, the `~/cwd · branch` footer, and the
+ * `Add a follow-up` placeholder.
+ *
+ * The `Tip:` wording ROTATES between runs (observed in the wild: "Tip: Try
+ * Cursor Grok…", "Tip: Use /debug…", "Tip: Type ? in the prompt bar…"), so it
+ * is matched by SHAPE, never by its wording. Enumerating tip strings rots the
+ * moment cursor ships a new one — which is exactly how the banner was read as
+ * a reply and a live child recycled ~3s after launch, before its pasted prompt
+ * was ever submitted.
+ */
+const CURSOR_TUI_CHROME: readonly RegExp[] = [
+	// Product name + version may share one line (`Cursor Agent v2026.09.18-…`),
+	// so these two are substring matches — a `^…$` line anchor silently fails
+	// when the TUI squeezes them together (measured on a live pane).
+	/Cursor Agent\s+v\d+\.\d+\.\d+[-\w.]*/gi,
+	/^\s*Cursor Agent\s*$/gim,
+	/^\s*v\d+\.\d+\.\d+[-\w.]*\s*$/gim,
+	/^\s*Tip: .*$/gim,
+	/^\s*→.*$/gim,
+	/^.*\bRun Everything\b.*$/gim,
+	// The model-name status line, whether it renders ALONE (`Cursor Grok 4.6
+	// Extra High` on its own row) or fused with the rest of the bar. A line is
+	// chrome only when it is BOTH: (a) built purely from status glyphs — ASCII
+	// letters, digits, `. % · : -` and spaces — AND (b) names a model family.
+	// Replies are prose (Chinese, markdown, sentences) and never match (a), so
+	// they survive even when they mention a model.
+	/^[\w\s.%·:\-–—]*\b(?:Grok|Claude|GPT|Gemini|Sonnet|Opus|Haiku|DeepSeek|Kimi|GLM|Auto)\b[\w\s.%·:\-–—]*$/gim,
+	// The footer, e.g. `~/code/herdr-subagents · master`. Requires the leading
+	// `~`/`/` and the ` · ` separator so a real reply containing ` · ` survives.
+	/^\s*~?\/[^\n·]*·\s*\S+\s*$/gim,
+	/^\s*Add a follow-up\s*$/gim,
+];
+
+/** TUI chrome for every kind, stripped before deciding whether a reply exists. */
+const PANE_NOISE: readonly RegExp[] = [
+	/\x1b\[[0-9;]*[A-Za-z]/g,
+	/\[Pasted text[^\]]*\]/gi,
+	/Workspace Trust Required/gi,
+	/Do you trust the contents of this directory[^\n]*/gi,
+	/Do you trust[^\n]*/gi,
+	/cursor-agent(?:[ \t]+\S+)*/gi,
+	// The ➜ prompt line can render as `➜  <model cursor-grok-4.6-xhigh …>`;
+	// after the ➜-line strip what is left is a bare `--model …` argument
+	// fragment. It is launch chrome, not a reply (measured on a live pane where
+	// it was the only residue keeping a never-submitted prompt "live").
+	/^[<([]model\s[^\n]*$/gim,
+	/^.*➜.*$/gm,
+	/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g,
+	/\bWorking\b/gi,
+	...CURSOR_TUI_CHROME,
+];
+
+/**
+ * Whether the pane already shows a real reply (as opposed to launch chrome or
+ * an idle spinner). A false positive here recycles a live child mid-turn; a
+ * false negative only costs one extra poll, so the bar prefers the latter.
+ */
+export function paneHasLiveReply(text: string): boolean {
+	let cleaned = text;
+	for (const pattern of PANE_NOISE) cleaned = cleaned.replace(pattern, "");
+	cleaned = cleaned.trim();
 	if (!cleaned) return false;
 	if (extractVerdict(cleaned)) return true;
 	return cleaned.replace(/\s+/g, " ").length >= 24;
@@ -518,7 +631,15 @@ function extractJsonVerdict(
 	// Also try the last balanced {...} span, so prose around the JSON still works.
 	const first = text.indexOf("{");
 	const last = text.lastIndexOf("}");
-	if (first !== -1 && last > first) candidates.push(text.slice(first, last + 1));
+	if (first !== -1 && last > first) {
+		const span = text.slice(first, last + 1);
+		candidates.push(span);
+		// The cursor TUI word-wraps long lines, which breaks a streamed verdict
+		// JSON mid-string (`…top reason:\n  arithmetic identity"}`). A newline
+		// inside a JSON string literal is invalid JSON, so joining wrapped lines
+		// is a safe repair: the unwrapped original is still tried first above.
+		candidates.push(span.replace(/\n\s+/g, " "));
+	}
 
 	for (const candidate of candidates) {
 		let parsed: unknown;

@@ -100,6 +100,8 @@ const DEFAULT_PROBE_MS = 2_000;
 
 /** Recycle after collect unless the child is still waiting on the user. */
 export function shouldRecycleAfterCollect(status: string): boolean {
+	// `unknown` is terminal for non-pi kinds (F7: no jsonl). `running` means
+	// collect gave up while the agent is still alive — keep the pane.
 	return status !== "blocked" && status !== "running";
 }
 
