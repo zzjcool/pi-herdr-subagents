@@ -110,3 +110,61 @@ test("parseCursorChat on a missing store is an empty session", () => {
 	const parsed = parseCursorChat(dir);
 	assert.equal(parsed.turns.length, 0);
 });
+
+test("parseCursorChat on an unopenable store is an empty session", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "chats-"));
+	const dir = path.join(root, "projhash", "chat-corrupt");
+	fs.mkdirSync(dir, { recursive: true });
+	fs.writeFileSync(
+		path.join(dir, "meta.json"),
+		JSON.stringify({ schemaVersion: 1, cwd: "/repo", title: "t" }),
+	);
+	// A db file that exists but is not SQLite: opening must fail soft, not throw.
+	fs.writeFileSync(path.join(dir, "store.db"), "definitely not a sqlite file");
+	const parsed = parseCursorChat(dir);
+	assert.equal(parsed.turns.length, 0);
+});
+
+test("parseCursorChat on a zero-byte store is an empty session", () => {
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "chats-"));
+const dir = path.join(root, "projhash", "chat-zero");
+fs.mkdirSync(dir, { recursive: true });
+fs.writeFileSync(
+	path.join(dir, "meta.json"),
+	JSON.stringify({ schemaVersion: 1, cwd: "/repo", title: "t" }),
+);
+// SQLite opens a 0-byte file as an empty db; the missing `blobs` table
+// then fails at prepare() — must fail soft, never throw.
+fs.writeFileSync(path.join(dir, "store.db"), "");
+const parsed = parseCursorChat(dir);
+assert.equal(parsed.turns.length, 0);
+});
+
+test("regression: no source file may statically import node:sqlite or bun:sqlite", () => {
+// pi ships as a Bun-compiled binary. Bun lacks `node:sqlite`, and a STATIC
+// import fails at module-resolution time — the whole extension dies on load
+// even when no cursor child ever runs. SQLite must be required lazily at
+// call time and branched per runtime (bun:sqlite vs node:sqlite). Guard
+// EVERY shipped source file, not just cursor-chat.ts: moving the read into
+// a new module with a static import would otherwise slip through.
+const pkgRoot = path.resolve(import.meta.dirname, "../..");
+const walkTs = (dir: string): string[] => {
+	const out: string[] = [];
+	for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+const p = path.join(dir, ent.name);
+if (ent.isDirectory()) out.push(...walkTs(p));
+else if (ent.name.endsWith(".ts")) out.push(p);
+	}
+	return out;
+};
+const files = [path.join(pkgRoot, "index.ts"), ...walkTs(path.join(pkgRoot, "src"))];
+assert.ok(files.length > 1, "sanity: source walk found files");
+for (const file of files) {
+	const src = fs.readFileSync(file, "utf-8");
+	assert.doesNotMatch(
+src,
+/^\s*import[^;\n]*from\s*["'](node:sqlite|bun:sqlite)["']/m,
+`${file}: sqlite must be loaded lazily (require at call time), never via a static import`,
+	);
+}
+});

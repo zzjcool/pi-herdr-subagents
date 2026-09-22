@@ -21,12 +21,111 @@
  * the parser should refuse rather than mis-parse.
  */
 
-import { DatabaseSync } from "node:sqlite";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+// `node:module` is implemented by both Bun and Node, so this static import is
+// safe — unlike node:sqlite, which Bun lacks entirely.
+import { createRequire } from "node:module";
 import type { ParsedSession, TurnRecord } from "./types.ts";
 import { emptyParsedSession } from "./session.ts";
+
+/**
+ * Minimal structural type both runtimes' SQLite drivers satisfy.
+ *
+ * IMPORTANT: sqlite is loaded LAZILY via createRequire at call time — pi
+ * ships as a Bun-compiled binary, Bun has no `node:sqlite`, and a static
+ * import would fail at module-resolution time, killing the whole extension
+ * on load even when no cursor child ever runs. Runtime branch: Bun →
+ * `bun:sqlite` (readonly: true), Node ≥22.5 → `node:sqlite`
+ * (readOnly: true).
+ */
+interface MinimalSqliteDb {
+	prepare(sql: string): { iterate(): IterableIterator<{ data: unknown }> };
+	close(): void;
+}
+
+/**
+ * Per-driver opener recipe: the module id and its own read-only option
+ * spelling (bun uses `readonly`, node uses `readOnly` — each driver gets only
+ * its own key, so no cross-runtime assumption about unknown-key tolerance).
+ */
+const SQLITE_DRIVERS: ReadonlyArray<{
+	id: string;
+	readonlyKey: "readonly" | "readOnly";
+	ctor: "Database" | "DatabaseSync";
+}> = [
+	{ id: "bun:sqlite", readonlyKey: "readonly", ctor: "Database" },
+	{ id: "node:sqlite", readonlyKey: "readOnly", ctor: "DatabaseSync" },
+];
+
+/** Opens a SQLite file read-only (per-runtime driver, resolved lazily). */
+type SqliteOpener = (dbPath: string) => MinimalSqliteDb;
+
+/** Cached CommonJS require; created lazily so a hostile import.meta.url in a
+ * compiled binary cannot crash module load (the very bug this guards). */
+let cachedRequire: ((id: string) => unknown) | null | undefined;
+
+/** Cached opener; null once both drivers are known to be unavailable. */
+let cachedOpener: SqliteOpener | null | undefined;
+
+/** Get a CommonJS require for built-ins; null when unobtainable. */
+function requireForBuiltins(): ((id: string) => unknown) | null {
+	if (cachedRequire !== undefined) return cachedRequire;
+	try {
+		// Deferred (not module-top-level) so even a weird virtual
+		// import.meta.url (Bun compiled binaries) only degrades cursor
+		// collection via the catch below, never extension loading.
+		cachedRequire = createRequire(import.meta.url);
+	} catch {
+		cachedRequire = null;
+	}
+	return cachedRequire;
+}
+
+/** Constructor shape shared by Bun's `Database` and Node's `DatabaseSync`. */
+type SqliteDbCtor = new (
+	dbPath: string,
+	opts: Record<string, boolean>,
+) => MinimalSqliteDb;
+/** Pick the driver constructor out of a required module namespace. */
+function ctorOf(
+	mod: unknown,
+	name: "Database" | "DatabaseSync",
+): SqliteDbCtor | null {
+	if (typeof mod !== "object" || mod === null) return null;
+	// SAFETY: structural narrowing of an untyped module namespace — the
+	// typeof-function guard is the whole invariant; the constructor signature
+	// is then checked by TypeScript at the `new` site below.
+	const ctor = (mod as Record<string, unknown>)[name];
+	if (typeof ctor !== "function") return null;
+	return ctor as SqliteDbCtor;
+}
+
+/** Resolve the current runtime's SQLite driver lazily; null when unavailable. */
+function sqliteOpener(): SqliteOpener | null {
+	if (cachedOpener !== undefined) return cachedOpener;
+	const req = requireForBuiltins();
+	if (req) {
+		for (const driver of SQLITE_DRIVERS) {
+			let mod: unknown;
+			try {
+				mod = req(driver.id);
+			} catch {
+				continue; // this runtime lacks the builtin
+			}
+			const Ctor = ctorOf(mod, driver.ctor);
+			if (Ctor) {
+				const opts: Record<string, boolean> = {};
+				opts[driver.readonlyKey] = true;
+				cachedOpener = (dbPath) => new Ctor(dbPath, opts);
+				return cachedOpener;
+			}
+		}
+	}
+	cachedOpener = null;
+	return null;
+}
 
 /** The only schemaVersion observed in the wild so far. */
 const SUPPORTED_SCHEMA_VERSION = 1;
@@ -121,9 +220,11 @@ export function parseCursorChat(chatDir: string): ParsedSession {
 /** Open the store read-only and pull the ordered user/assistant messages. */
 function readMessages(dbPath: string): ChatMessage[] {
 	// readOnly keeps the child's WAL untouched; a missing db is an empty turn.
-	let db: DatabaseSync;
+	const open = sqliteOpener();
+	if (!open) return [];
+	let db: MinimalSqliteDb;
 	try {
-		db = new DatabaseSync(dbPath, { readOnly: true });
+		db = open(dbPath);
 	} catch {
 		return [];
 	}
