@@ -307,6 +307,12 @@ You can still hand-write the same mapping:
 Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
 (project). Project wins on overlap.
 
+> **herdr sidebar**: while async children are live, the parent pane is annotated
+> `idle=⏳ N subagents (…)` via `pane report-metadata --state-label` (TTL'd, self
+> clearing). herdr's own integration reports the parent `idle` the moment its
+> turn settles — the label is the visible "waiting on subagents" cue in the
+> sidebar. No setting; automatic when running inside herdr.
+
 ```json
 {
   "subagents": {

@@ -364,6 +364,12 @@ function paneReportMetadataArgs(opts: {
 	displayAgent?: string;
 	title?: string;
 	tokens?: Record<string, string>;
+	/** `idle=waiting 2 subagents` — labels a herdr agent_status from this source. */
+	stateLabel?: { status: string; text: string };
+	/** Auto-expiry so a crashed reporter leaves no stale label. */
+	ttlMs?: number;
+	/** Drop all state-labels set by this source. */
+	clearStateLabels?: boolean;
 }): string[] {
 	const args = [
 		"pane",
@@ -376,6 +382,10 @@ function paneReportMetadataArgs(opts: {
 	if (opts.title) args.push("--title", opts.title);
 	for (const [k, v] of Object.entries(opts.tokens ?? {}))
 		args.push("--token", `${k}=${v}`);
+	if (opts.stateLabel)
+		args.push("--state-label", `${opts.stateLabel.status}=${opts.stateLabel.text}`);
+	if (opts.clearStateLabels) args.push("--clear-state-labels");
+	if (opts.ttlMs !== undefined) args.push("--ttl-ms", String(opts.ttlMs));
 	return args;
 }
 
