@@ -40,6 +40,7 @@ import {
 	followUpFor,
 } from "./src/extension/blocked.ts";
 import { formatAlreadyRecycled } from "./src/extension/recycle.ts";
+import { ParentPaneLabeler } from "./src/extension/parent-label.ts";
 import {
 	SUBAGENT_NOTIFY_TYPE,
 } from "./src/extension/notify.ts";
@@ -197,6 +198,12 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	// completed child to one line so visibility does not cost a screen.
 	pi.registerMessageRenderer(SUBAGENT_NOTIFY_TYPE, renderSubagentNotice);
 
+	// The parent pane's own id: absent when pi runs outside herdr, in which
+	// case every labeler call is a no-op.
+	const parentLabeler = new ParentPaneLabeler({
+		client: createHerdrClient(),
+		paneId: process.env.HERDR_PANE_ID,
+	});
 	const layout = createSessionLayout();
 	let lastModelRegistry: ExtensionContext["modelRegistry"] | undefined;
 	let lastConfirm: ((message: string) => Promise<boolean>) | undefined;
@@ -208,6 +215,12 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	const runtime = createSessionRuntime({
 		sendMessage: (message, options) => pi.sendMessage(message, options),
 		emitBusy: (active, label) => {
+			// Sidebar annotation (research option C): herdr's own integration
+			// reports the parent `idle` the moment its turn settles — exactly
+			// when it is WAITING on subagents. Label the idle state so the
+			// sidebar says `waiting` instead of reading done. Display-layer only;
+			// the status icon stays herdr's call.
+			parentLabeler.report(active ? label : undefined);
 			try {
 				pi.events.emit(
 					"herdr:busy",
@@ -356,6 +369,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", () => {
 		runtime.dispose();
+		void parentLabeler.clear();
 	});
 }
 

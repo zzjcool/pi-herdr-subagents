@@ -461,6 +461,12 @@ export interface HerdrClient {
 		displayAgent?: string;
 		title?: string;
 		tokens?: Record<string, string>;
+		/** `idle=waiting 2 subagents` — labels a herdr agent_status from this source. */
+		stateLabel?: { status: string; text: string };
+		/** Auto-expiry so a crashed reporter leaves no stale label. */
+		ttlMs?: number;
+		/** Drop all state-labels set by this source. */
+		clearStateLabels?: boolean;
 	}): Promise<HerdrResult<void>>;
 
 	// ── tabs ──
