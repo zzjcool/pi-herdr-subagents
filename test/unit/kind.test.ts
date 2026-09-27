@@ -50,6 +50,67 @@ test("cursorModel maps grok-4.6 plus thinking onto the CLI slug", () => {
 	assert.equal(cursorModel("cb/glm-5.3-flash"), undefined);
 });
 
+// grok-4.7 dropped the `cursor-` prefix AND switched its SDK effort param to
+// `reasoning_effort`, adding a `context` (256k|500k) variant param — measured
+// against `cursor-agent --list-models` + Cursor.models.list() 2026-09-27.
+
+test("cursorModel maps bare grok onto version-correct CLI slugs", () => {
+	// 4.6 keeps the legacy prefix; 4.7+ lost it.
+	assert.equal(cursorModel("grok-4.7"), "grok-4.7-high");
+	assert.equal(cursorModel("grok-4.7", "xhigh"), "grok-4.7-xhigh");
+	assert.equal(cursorModel("grok-4.10", "low"), "grok-4.10-low");
+});
+
+test("cursorModel repairs a wrongly-prefixed grok-4.7 slug", () => {
+	// Pre-fix mapping emitted `cursor-grok-4.7-xhigh`, which the CLI rejects.
+	assert.equal(cursorModel("cursor-grok-4.7-xhigh"), "grok-4.7-xhigh");
+	assert.equal(
+		cursorModel("cursor-grok-4.7-xhigh", "low"),
+		"grok-4.7-low",
+	);
+	assert.equal(cursorModel("cursor-grok-4.6-xhigh"), "cursor-grok-4.6-xhigh");
+	assert.equal(cursorModel("grok-4.7-xhigh-fast"), "grok-4.7-xhigh-fast");
+});
+
+test("cursorModel expands pi-cursor-sdk context aliases to the bracket form", () => {
+	// `grok-4.7@500k` (settings preset) — the bug that crashed advisor.
+	assert.equal(
+		cursorModel("grok-4.7@500k", "xhigh"),
+		"grok-4.7[context=500k,reasoning_effort=xhigh,fast=false]",
+	);
+	// Full pi-cursor-sdk id with provider prefix and embedded :level; the
+	// suffix wins over the `thinking` arg, mirroring pi's applyThinkingSuffix.
+	assert.equal(
+		cursorModel("cursor/grok-4.7@500k:xhigh", "low"),
+		"grok-4.7[context=500k,reasoning_effort=xhigh,fast=false]",
+	);
+	// No thinking at all → effort defaults to high, never omitted: the CLI
+	// rejects a partial bracket (measured).
+	assert.equal(
+		cursorModel("grok-4.7@500k"),
+		"grok-4.7[context=500k,reasoning_effort=high,fast=false]",
+	);
+	// 256k context variant, pi thinking → cursor effort mapping.
+	assert.equal(
+		cursorModel("grok-4.7@256k", "max"),
+		"grok-4.7[context=256k,reasoning_effort=xhigh,fast=false]",
+	);
+	// 1M spelling normalization.
+	assert.equal(
+		cursorModel("grok-4.7@1m"),
+		"grok-4.7[context=1m,reasoning_effort=high,fast=false]",
+	);
+	// A non-grok @alias is not ours to rewrite: pass through untouched.
+	assert.equal(cursorModel("model@500k"), "model@500k");
+	// grok-4.6 has no context variants — not expanded, the CLI reports it.
+	assert.equal(cursorModel("grok-4.6@500k"), "grok-4.6@500k");
+});
+
+test("cursorModel leaves explicit bracket forms untouched", () => {
+	const bracket = "grok-4.7[context=500k,reasoning_effort=xhigh,fast=false]";
+	assert.equal(cursorModel(bracket, "low"), bracket);
+});
+
 test("nativeModelFor drops inherited pi ids for non-pi kinds", () => {
 	assert.equal(
 		nativeModelFor("cursor", "cb/glm-5.3-flash", "medium"),

@@ -16,6 +16,7 @@ import {
 	type AgentKind,
 	isThinkingLevel,
 } from "../shared/types.ts";
+import { splitThinkingSuffix } from "../agents/model-scope.ts";
 import { formatChildTask } from "../extension/child-guard.ts";
 import {
 	applyThinkingSuffix,
@@ -115,17 +116,69 @@ function composePrompt(input: BuildArgsInput): string {
 /**
  * Cursor CLI slugs look like `cursor-grok-4.6-high`, not `provider/id:thinking`.
  * A parent pi model (`cb/glm-5.3`) is dropped rather than forwarded.
+ *
+ * Grok slug schema, measured against `cursor-agent --list-models` (2026-09-27):
+ *   grok-4.5 / 4.6 → `cursor-grok-<v>-<effort>(-fast)?`  (prefixed)
+ *   grok-4.7+      → `grok-<v>-<effort>(-fast)?`        (NO prefix)
+ * SDK parameter schemas (Cursor.models.list(), ~/.pi/agent/cursor-sdk-model-list.json):
+ *   grok-4.5 / 4.6 → effort, fast
+ *   grok-4.7       → context(256k|500k), reasoning_effort, fast
  */
+
+/** `grok-4.6` → 406, `grok-4.7` → 407, `grok-4.10` → 410. Dot-decimal would misorder 4.10 < 4.7. */
+function grokVersion(id: string): number | undefined {
+	const m = id.match(/^grok-(\d+)\.(\d+)$/);
+	if (!m || m[1] === undefined || m[2] === undefined) return undefined;
+	return Number(m[1]) * 100 + Number(m[2]);
+}
+
+/** Highest grok whose CLI slug still carries the `cursor-` prefix (measured: 4.6). */
+const GROK_LAST_PREFIXED = 406;
+
+/** grok ≤4.6 slugs carry the `cursor-` prefix; 4.7+ dropped it. */
+function grokSlugPrefix(version: number): string {
+	return version <= GROK_LAST_PREFIXED ? "cursor-grok" : "grok";
+}
+
+/**
+ * Expand a pi-cursor-sdk style context alias — `grok-4.7@500k`,
+ * `cursor/grok-4.7@500k` — into the bracket form the CLI accepts:
+ * `grok-4.7[context=500k,reasoning_effort=xhigh,fast=false]`.
+ *
+ * Measured (2026-09-27): the CLI rejects PARTIAL bracket lists, so every SDK
+ * param of the model must be present — `fast` gets an explicit `false`.
+ * Only grok-4.7+ exposes `context` (4.5/4.6 have no context variants), so an
+ * @-alias for an older grok is not a real cursor id and passes through
+ * untouched for the CLI to report.
+ */
+function expandCursorSdkAlias(
+	compact: string,
+	effort: CursorEffort,
+): string {
+	const alias = compact.match(/^(?:cursor\/)?(.+?)@(\d+[km])$/);
+	if (!alias || alias[1] === undefined || alias[2] === undefined) return compact;
+	const base = alias[1];
+	const context = alias[2].toLowerCase();
+	const version = grokVersion(base);
+	if (version === undefined || version < 407) return compact;
+	return `${base}[context=${context},reasoning_effort=${effort},fast=false]`;
+}
+
 export function cursorModel(
 	model: string,
 	thinking?: string | false,
 ): string | undefined {
-	const compact = model.trim().replace(/\s+/g, "-");
+	// A pi-style `:level` suffix (`grok-4.7@500k:xhigh`) is the embedded form
+	// of `thinking`; the suffix wins, mirroring pi's applyThinkingSuffix
+	// precedence for provider/id:level ids.
+	const split = splitThinkingSuffix(model.trim());
+	const effectiveThinking = split.thinking ?? thinking;
+	const compact = split.baseModel.trim().replace(/\s+/g, "-");
 	if (!compact) return undefined;
 	if (isPiShapedModel(compact)) return undefined;
 	if (compact.includes("[")) return compact;
 
-	const effort = cursorEffort(thinking);
+	const effort = cursorEffort(effectiveThinking);
 	const lower = compact.toLowerCase();
 
 	// Cursor ships two Autos: legacy `auto`/`default` (bundled Auto pricing)
@@ -142,15 +195,28 @@ export function cursorModel(
 		return "auto-smart[optimize_for=balanced]";
 	}
 
-	const bareGrok = lower.match(/^(?:cursor-)?grok-(\d+\.\d+)$/);
-	if (bareGrok) return `cursor-grok-${bareGrok[1]}-${effort ?? "high"}`;
+	// pi-cursor-sdk context alias: preserve the context variant via the
+	// bracket form instead of degrading to the default-context slug.
+	if (compact.includes("@")) {
+		return expandCursorSdkAlias(lower, effort ?? "high");
+	}
 
+	const bareGrok = lower.match(/^(?:cursor-)?grok-(\d+\.\d+)$/);
+	if (bareGrok && bareGrok[1] !== undefined) {
+		const version = grokVersion(`grok-${bareGrok[1]}`) ?? 0;
+		return `${grokSlugPrefix(version)}-${bareGrok[1]}-${effort ?? "high"}`;
+	}
+
+	// An already-slugged grok, with or without the `cursor-` prefix: rebuild
+	// the prefix per version so a pre-fix `cursor-grok-4.7-xhigh` is repaired,
+	// and swap the effort when thinking was given.
 	const slugged = lower.match(
-		/^(cursor-grok-\d+\.\d+)-(low|medium|high|xhigh)(-fast)?$/,
+		/^(?:cursor-)?grok-(\d+\.\d+)-(low|medium|high|xhigh)(-fast)?$/,
 	);
-	if (slugged) {
-		if (effort === undefined) return compact;
-		return `${slugged[1]}-${effort}${slugged[3] ?? ""}`;
+	if (slugged && slugged[1] !== undefined && slugged[2] !== undefined) {
+		const version = grokVersion(`grok-${slugged[1]}`) ?? 0;
+		const keep = effort ?? slugged[2];
+		return `${grokSlugPrefix(version)}-${slugged[1]}-${keep}${slugged[3] ?? ""}`;
 	}
 
 	return compact;
