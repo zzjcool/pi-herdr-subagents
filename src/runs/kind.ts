@@ -147,20 +147,26 @@ function grokSlugPrefix(version: number): string {
  *
  * Measured (2026-09-27): the CLI rejects PARTIAL bracket lists, so every SDK
  * param of the model must be present — `fast` gets an explicit `false`.
- * Only grok-4.7+ exposes `context` (4.5/4.6 have no context variants), so an
- * @-alias for an older grok is not a real cursor id and passes through
- * untouched for the CLI to report.
+ *
+ * Only the grok-4.7 schema is known well enough to expand (context,
+ * reasoning_effort, fast — verified against Cursor.models.list()); any other
+ * @alias (claude/gpt/... use different effort param names, and future grok
+ * versions may change schema) cannot be safely rewritten, and the CLI has no
+ * `@` syntax of its own — so those return undefined, which the orchestrator
+ * treats as an unexpressible explicit model and refuses BEFORE any pane is
+ * created, instead of letting the child crash on start.
  */
 function expandCursorSdkAlias(
 	compact: string,
 	effort: CursorEffort,
-): string {
+): string | undefined {
 	const alias = compact.match(/^(?:cursor\/)?(.+?)@(\d+[km])$/);
-	if (!alias || alias[1] === undefined || alias[2] === undefined) return compact;
+	if (!alias || alias[1] === undefined || alias[2] === undefined) return undefined;
 	const base = alias[1];
 	const context = alias[2].toLowerCase();
-	const version = grokVersion(base);
-	if (version === undefined || version < 407) return compact;
+	// Only the grok-4.7 schema is verified; 4.5/4.6 expose no context param,
+	// and anything newer may have drifted.
+	if (grokVersion(base) !== 407) return undefined;
 	return `${base}[context=${context},reasoning_effort=${effort},fast=false]`;
 }
 
@@ -196,7 +202,10 @@ export function cursorModel(
 	}
 
 	// pi-cursor-sdk context alias: preserve the context variant via the
-	// bracket form instead of degrading to the default-context slug.
+	// bracket form instead of degrading to the default-context slug. An alias
+	// whose schema we cannot expand returns undefined — the orchestrator
+	// refuses an explicit model before creating a pane (better than a child
+	// that crashes on start with an id the CLI cannot parse).
 	if (compact.includes("@")) {
 		return expandCursorSdkAlias(lower, effort ?? "high");
 	}
@@ -219,7 +228,11 @@ export function cursorModel(
 		return `${grokSlugPrefix(version)}-${slugged[1]}-${keep}${slugged[3] ?? ""}`;
 	}
 
-	return compact;
+	// The `:level` split above only serves the grok/alias branches. Any other
+	// bare slug carrying one (`composer-1.5:high`) is not ours to rewrite —
+	// hand the ORIGINAL string to the CLI rather than silently dropping the
+	// suffix.
+	return split.thinking !== undefined ? model.trim() : compact;
 }
 
 function cursorEffort(thinking?: string | false): CursorEffort | undefined {

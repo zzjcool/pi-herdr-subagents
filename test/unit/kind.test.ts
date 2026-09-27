@@ -100,10 +100,30 @@ test("cursorModel expands pi-cursor-sdk context aliases to the bracket form", ()
 		cursorModel("grok-4.7@1m"),
 		"grok-4.7[context=1m,reasoning_effort=high,fast=false]",
 	);
-	// A non-grok @alias is not ours to rewrite: pass through untouched.
-	assert.equal(cursorModel("model@500k"), "model@500k");
-	// grok-4.6 has no context variants — not expanded, the CLI reports it.
-	assert.equal(cursorModel("grok-4.6@500k"), "grok-4.6@500k");
+	// A non-grok @alias has no verified schema to expand to: undefined, so an
+	// explicit choice is refused up front instead of crashing the child.
+	assert.equal(cursorModel("cursor/claude-opus-4-8@300k"), undefined);
+	assert.equal(cursorModel("model@500k"), undefined);
+	// grok-4.6 has no context variants; future grok schemas are unverified.
+	assert.equal(cursorModel("grok-4.6@500k"), undefined);
+	assert.equal(cursorModel("grok-5.0@500k"), undefined);
+});
+
+test("cursorModel maps thinking=false to the lowest effort in every branch", () => {
+	assert.equal(
+		cursorModel("grok-4.7@500k", false),
+		"grok-4.7[context=500k,reasoning_effort=low,fast=false]",
+	);
+	assert.equal(cursorModel("grok-4.6", false), "cursor-grok-4.6-low");
+	assert.equal(
+		cursorModel("cursor-grok-4.6-xhigh-fast", false),
+		"cursor-grok-4.6-low-fast",
+	);
+});
+
+test("cursorModel passes an unknown :level-suffixed slug through unchanged", () => {
+	// Not ours to rewrite — the suffix must not be silently dropped.
+	assert.equal(cursorModel("composer-1.5:high"), "composer-1.5:high");
 });
 
 test("cursorModel leaves explicit bracket forms untouched", () => {
