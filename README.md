@@ -286,6 +286,45 @@ Other commands: `/subagents-profiles` lists saved profiles;
 current registry (and a live probe unless you pass `--no-probe`). Refresh and
 generate accept `--force` and `--no-probe`.
 
+`/subagents-agents [user|project|both]` lists the roles available to the
+`subagent` tool in the CURRENT session — the human-facing version of the
+roster injected into the model's system prompt, plus what a launch would
+actually resolve:
+
+```text
+builtin (7)
+  advisor
+    决策顾问：……
+    kind=cursor · alias: ask, consult, oracle · model: (agent CLI default)
+    file: /pkg/agents/advisor.md
+  scout
+    侦察员：……
+    model: cb/glm-5.3 (agentOverrides)
+    file: ~/.pi/agent/agents/scout.md
+project (1)
+  deploy
+    deploys things
+    model: cb/kimi-k3 (the parent session model)
+    file: <repo>/.pi/agents/deploy.md
+
+Directories
+  builtin: /pkg/agents
+  user: ~/.pi/agent/agents
+  project: /repo/.pi/agents
+```
+
+Each role shows its layer (`builtin` / `user` / `project`), the model a launch
+would actually resolve — with the same provenance labels and refusal checks
+the launch path uses (`the agent's frontmatter`, `agentOverrides`, `the
+preset`, `the parent session model`, …; `✗ outside model scope`, `✗ cannot
+be used with kind 'cursor'`, or `dropped at launch` for a model the target
+CLI cannot express) — plus kind, aliases, and the definition file, so a role
+that is not doing what you expect can be traced to the exact file that
+defines it in one step. The optional scope argument mirrors the tool's
+`agentScope` (`user` by default; `project` skips the user layers, the bundled
+roles always load); it re-reads agent files on every invocation, so edits
+show up immediately.
+
 You can still hand-write the same mapping:
 
 ```json

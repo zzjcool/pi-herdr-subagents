@@ -103,6 +103,14 @@ parent session each time:
 `/subagents-profiles` lists saved files; `/subagents-check-profile <name>`
 verifies they still resolve.
 
+## Listing roles
+
+`/subagents-agents [user|project|both]` shows every role the `subagent` tool
+can spawn in this session — grouped by layer (builtin / user / project), each
+with the model a launch would actually resolve (and where it came from),
+kind, aliases, and the defining file. The same scope semantics as the tool's
+`agentScope`; re-reads agent files on every invocation.
+
 ## Isolation
 
 Child-guard blocks `herdr agent prompt` and foreign `pane read`, and it blocks

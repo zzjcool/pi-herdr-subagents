@@ -121,7 +121,7 @@ export function resolveStepModel(input: StepModelInput): StepModelResult {
  * inherited parent model, so it lives in ONE place rather than being
  * re-derived per caller.
  */
-function classifyModelOrigin(
+export function classifyModelOrigin(
 	resolved: ResolvedModel,
 	override: string | undefined,
 ): { origin: ModelOrigin; label: string | undefined } {
