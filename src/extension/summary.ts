@@ -46,15 +46,11 @@ const SUMMARY_USAGE = "Usage: /subagents-summary [--all] [<name>]";
 /** Session data supplied by the command layer to the pure aggregator. */
 export type SummarySession = ParsedSession;
 
-export type SummarySessionMap =
-	| ReadonlyMap<string, SummarySession>
-	| Readonly<Record<string, SummarySession>>;
-
 export interface SummaryAggregationOptions {
 	/** The clock used for live-child durations. */
 	now?: number | Date;
 	/** Parsed session files, keyed by ChildRecord.sessionFile. */
-	sessions?: SummarySessionMap;
+	sessions?: ReadonlyMap<string, SummarySession>;
 }
 
 export interface SummaryChild {
@@ -106,7 +102,7 @@ export interface SubagentSummary {
 	cwd?: string;
 }
 
-export interface SummaryFormatOptions extends SummaryAggregationOptions {
+export interface SummaryFormatOptions {
 	/** Used only by the empty-state message and relative session paths. */
 	cwd?: string;
 	parentPaneId?: string;
@@ -198,17 +194,6 @@ function addUsage(left: Usage | null, right: Usage | null): Usage | null {
 	};
 }
 
-function parsedSessionFor(
-	sessions: SummarySessionMap | undefined,
-	sessionFile: string,
-): SummarySession | undefined {
-	if (!sessions) return undefined;
-	if (typeof (sessions as ReadonlyMap<string, SummarySession>).get === "function") {
-		return (sessions as ReadonlyMap<string, SummarySession>).get(sessionFile);
-	}
-	return (sessions as Readonly<Record<string, SummarySession>>)[sessionFile];
-}
-
 function parseClock(value: number | Date | undefined): number {
 	if (value instanceof Date) {
 		return Number.isFinite(value.getTime()) ? value.getTime() : Date.now();
@@ -252,45 +237,69 @@ function resolveDuration(
 	};
 }
 
+/** A parsed session with no turns is a pre-created or missing file, not data. */
+function sessionHasData(
+	session: SummarySession | undefined,
+): session is SummarySession {
+	return Boolean(session && session.turns.length > 0);
+}
+
+/**
+ * Session-jsonl usage fallback, gated three ways:
+ *  - no parsed turns → the file is missing or still empty (F4 pre-creation,
+ *    pruned, or a hard kill before the first write), so the parser-shaped
+ *    zero usage is absence, not evidence — a pi child must not render a fake
+ *    `0 / 0 / 0 · $0.000` row into the table and the totals;
+ *  - a non-pi CLI never writes this file (F7), so non-zero content is only
+ *    trustworthy once the child is finished — a live child would otherwise
+ *    show stale partial usage from an earlier turn;
+ *  - a pi session with at least one turn carries real usage, zero included
+ *    (a free model legitimately reports zero).
+ */
+function usageFromSession(
+	child: ChildRecord,
+	session: SummarySession | undefined,
+): Usage | null {
+	if (!sessionHasData(session)) return null;
+	const sessionUsage = normalizeUsage(session.usage);
+	if (!sessionUsage) return null;
+	if (child.kind !== "pi") {
+		if (isRunningState(child.state)) return null;
+		if (usageIsZero(sessionUsage)) return null;
+	}
+	return sessionUsage;
+}
+
 function resolveChild(
 	run: RunRecord,
 	child: ChildRecord,
 	nowMs: number,
-	sessions: SummarySessionMap | undefined,
+	sessions: ReadonlyMap<string, SummarySession> | undefined,
 ): SummaryChild {
-	const session = parsedSessionFor(sessions, child.sessionFile);
-	const explicitExecutionStatus = asExecutionStatus(child.execution?.status);
+	const session = sessions?.get(child.sessionFile);
 	const running = isRunningState(child.state);
+	const explicitExecutionStatus = asExecutionStatus(child.execution?.status);
 	const executionStatus =
 		explicitExecutionStatus ??
-		(!running && session ? asExecutionStatus(deriveOutcome(session).status) : null);
-	const executionUsage = normalizeUsage(child.execution?.usage);
-	let usage = executionUsage;
-	if (!usage && session) {
-		const sessionUsage = normalizeUsage(session.usage);
-		// A non-pi CLI has no pi session usage. Its parser-shaped zero usage is
-		// not evidence of zero tokens, so keep it out of both display and totals.
-		if (sessionUsage && (child.kind === "pi" || !usageIsZero(sessionUsage))) {
-			usage = sessionUsage;
-		}
-	}
-
-	let turns: number | null = null;
-	if (typeof child.execution?.turns === "number" && Number.isFinite(child.execution.turns)) {
-		turns = child.execution.turns;
-	} else if (session) {
-		turns = session.turns.length;
-	}
-
-	let toolErrors: number | null = null;
-	if (
+		(!running && sessionHasData(session)
+			? asExecutionStatus(deriveOutcome(session).status)
+			: null);
+	const usage =
+		normalizeUsage(child.execution?.usage) ?? usageFromSession(child, session);
+	const turns =
+		typeof child.execution?.turns === "number" &&
+		Number.isFinite(child.execution.turns)
+			? child.execution.turns
+			: sessionHasData(session)
+				? session.turns.length
+				: null;
+	const toolErrors =
 		typeof child.execution?.toolErrors === "number" &&
 		Number.isFinite(child.execution.toolErrors)
-	) {
-		toolErrors = child.execution.toolErrors;
-	} else if (session) {
-		toolErrors = session.toolErrors;
-	}
+			? child.execution.toolErrors
+			: sessionHasData(session)
+				? session.toolErrors
+				: null;
 
 	const duration = resolveDuration(child, nowMs, running);
 	return {
@@ -384,19 +393,12 @@ function makeGroup(role: string, children: SummaryChild[]): SummaryGroup {
  */
 export function aggregateSubagentRuns(
 	runs: readonly RunRecord[],
-	input: SummaryAggregationOptions | SummarySessionMap | number | Date = {},
-	thirdClock?: number | Date,
+	options: SummaryAggregationOptions = {},
 ): SubagentSummary {
-	let options: SummaryAggregationOptions;
-	if (typeof input === "number" || input instanceof Date) {
-		options = { now: input };
-	} else if (typeof (input as SummaryAggregationOptions).now !== "undefined" ||
-		typeof (input as SummaryAggregationOptions).sessions !== "undefined") {
-		options = input as SummaryAggregationOptions;
-	} else {
-		options = { sessions: input as SummarySessionMap };
-	}
-	const nowMs = parseClock(thirdClock ?? options.now);
+	// `?? {}` so a nullish options object from an API consumer degrades to
+	// defaults instead of throwing — the rest of this module tolerates garbage.
+	const opts = options ?? {};
+	const nowMs = parseClock(opts.now);
 	const allChildren: SummaryChild[] = [];
 	const earliestCandidates: number[] = [];
 	let latestUpdatedAtMs: number | null = null;
@@ -409,7 +411,7 @@ export function aggregateSubagentRuns(
 					: Math.max(latestUpdatedAtMs, updatedAtMs);
 		}
 		for (const child of run.children) {
-			const resolved = resolveChild(run, child, nowMs, options.sessions);
+			const resolved = resolveChild(run, child, nowMs, opts.sessions);
 			allChildren.push(resolved);
 			if (resolved.startedAtMs !== null) earliestCandidates.push(resolved.startedAtMs);
 		}
@@ -559,27 +561,14 @@ function formatTotalOutcomes(
 	return parts;
 }
 
-function isSummary(value: unknown): value is SubagentSummary {
-	return Boolean(
-		value &&
-		typeof value === "object" &&
-		"groups" in value &&
-		"totals" in value &&
-		"childCount" in value,
-	);
-}
-
 /**
- * Format the default seven-column markdown table. It also accepts raw runs as
- * a convenience for callers that already have parsed session snapshots.
+ * Format the default seven-column markdown table. `summary` comes from
+ * aggregateSubagentRuns; the command handler is the only caller that has one.
  */
 export function formatSubagentSummary(
-	value: SubagentSummary | readonly RunRecord[],
+	summary: SubagentSummary,
 	options: SummaryFormatOptions = {},
 ): string {
-	const summary = isSummary(value)
-		? value
-		: aggregateSubagentRuns(value, options);
 	if (summary.childCount === 0) {
 		const cwd = options.cwd ?? summary.cwd ?? process.cwd();
 		const parent = options.parentPaneId?.trim();
@@ -616,29 +605,15 @@ export function formatSubagentSummary(
 /** Format the one-child detail view. */
 export function formatSubagentDetail(input: SummaryDetailInput): string {
 	const { run, child } = input;
-	const session = input.session;
 	const nowMs = parseClock(input.now);
-	const running = isRunningState(child.state);
-	const executionUsage = normalizeUsage(child.execution?.usage);
-	let usage = executionUsage;
-	if (!usage && session) {
-		const sessionUsage = normalizeUsage(session.usage);
-		if (sessionUsage && (child.kind === "pi" || !usageIsZero(sessionUsage))) {
-			usage = sessionUsage;
-		}
-	}
-	const turns =
-		typeof child.execution?.turns === "number" && Number.isFinite(child.execution.turns)
-			? child.execution.turns
-			: session?.turns.length;
-	const toolErrors =
-		typeof child.execution?.toolErrors === "number" && Number.isFinite(child.execution.toolErrors)
-			? child.execution.toolErrors
-			: session?.toolErrors;
-	const model = child.model ?? child.execution?.model ?? session?.model ?? undefined;
-	const derivedExecution =
-		child.execution?.status ??
-		(!running && session ? deriveOutcome(session).status : undefined);
+	// Same resolution pass as the table: the detail view must never disagree
+	// with the aggregate on usage/turns for the same child. A missing
+	// `input.session` degrades to an empty map — resolveChild then reports
+	// absence (null) rather than parser-shaped zeros.
+	const resolved = resolveChild(run, child, nowMs, input.session ? new Map([[child.sessionFile, input.session]]) : undefined);
+	const { usage, turns, toolErrors, running } = resolved;
+	const model = child.model ?? child.execution?.model ?? input.session?.model ?? undefined;
+	const derivedExecution = resolved.executionStatus ?? undefined;
 	const title = `${child.name} — ${summaryRole(child)}${child.kind ? ` (${child.kind})` : ""}`;
 	const stateBits = [`state: ${child.state}`];
 	if (derivedExecution) stateBits.push(`execution: ${derivedExecution}`);
@@ -666,8 +641,8 @@ export function formatSubagentDetail(input: SummaryDetailInput): string {
 	const renderedUsage = formatDetailUsage(usage);
 	if (renderedUsage) lines.push(`  usage: ${renderedUsage}`);
 	const detailBits: string[] = [];
-	if (turns !== undefined) detailBits.push(`turns: ${turns}`);
-	if (toolErrors !== undefined) detailBits.push(`tool errors: ${toolErrors}`);
+	if (turns !== null) detailBits.push(`turns: ${turns}`);
+	if (toolErrors !== null) detailBits.push(`tool errors: ${toolErrors}`);
 	if (child.acceptance) {
 		detailBits.push(
 			`acceptance: ${child.acceptance.status}${child.acceptance.level ? ` (${child.acceptance.level})` : ""}`,
@@ -685,14 +660,6 @@ export function formatSubagentDetail(input: SummaryDetailInput): string {
 	}
 	return lines.join("\n");
 }
-
-/** Convenient names for consumers that prefer the shorter API vocabulary. */
-export const aggregateRuns = aggregateSubagentRuns;
-export const aggregateSummary = aggregateSubagentRuns;
-export const formatSummary = formatSubagentSummary;
-export const formatChildDetail = formatSubagentDetail;
-export const formatDetail = formatSubagentDetail;
-export const formatTokenCount = formatTokens;
 
 function parseSummaryArgs(
 	args: string,
@@ -793,11 +760,30 @@ export function registerSummaryCommand(pi: ExtensionAPI): void {
 			const sessions = sessionMapFor(runs);
 			const now = Date.now();
 			if (parsed.name) {
-				const picked = pickChildByName(
-					runs,
-					parsed.name,
-					parentPaneId && !parsed.all ? { parentPaneId } : undefined,
+			// Without a pane id the lookup cannot be scoped to this session, and
+			// pickChildByName prefers a LIVE child over the newest run — a name
+			// shared with another parent would silently show that parent's child.
+			// Flag the ambiguity instead of guessing.
+			const scope = parentPaneId && !parsed.all ? { parentPaneId } : undefined;
+			const picked = pickChildByName(runs, parsed.name, scope);
+			if (!picked) {
+				notifyUnknownChild(ctx, parsed.name);
+				return;
+			}
+			if (
+				!scope &&
+				new Set(
+					runs
+						.filter((r) => r.children.some((c) => c.name === parsed.name))
+						.map((r) => r.herdr.parentPaneId),
+				).size > 1
+			) {
+				ctx.ui.notify(
+					`"${parsed.name}" exists under multiple parent panes and this session has no HERDR_PANE_ID; showing the live/newest match. Run with --all to see every run.`,
+					"error",
 				);
+				return;
+			}
 				if (!picked) {
 					notifyUnknownChild(ctx, parsed.name);
 					return;
@@ -814,11 +800,10 @@ export function registerSummaryCommand(pi: ExtensionAPI): void {
 				);
 				return;
 			}
+			const summary = aggregateSubagentRuns(runs, { now, sessions });
 			sendSlashText(
 				pi,
-				formatSubagentSummary(runs, {
-					now,
-					sessions,
+				formatSubagentSummary(summary, {
 					cwd: ctx.cwd,
 					...(!parsed.all && parentPaneId ? { parentPaneId } : {}),
 				}),

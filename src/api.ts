@@ -115,15 +115,9 @@ export {
 export { registerProfileCommands, sendSlashText } from "./extension/slash.ts";
 export {
 	aggregateSubagentRuns,
-	aggregateRuns,
-	aggregateSummary,
 	formatSubagentSummary,
-	formatSummary,
 	formatSubagentDetail,
-	formatChildDetail,
-	formatDetail,
 	formatTokens,
-	formatTokenCount,
 	formatCost,
 	formatDuration,
 	registerSummaryCommand,
@@ -136,7 +130,6 @@ export type {
 	SummaryFormatOptions,
 	SummaryGroup,
 	SummarySession,
-	SummarySessionMap,
 	SummaryTotals,
 	SubagentSummary,
 } from "./extension/summary.ts";

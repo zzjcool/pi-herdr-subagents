@@ -15,6 +15,7 @@ import {
 	formatSubagentSummary,
 	formatTokens,
 	registerSummaryCommand,
+	summaryRole,
 } from "../../src/extension/summary.ts";
 import { parseSessionFile } from "../../src/shared/session.ts";
 import { RunStore } from "../../src/runs/store.ts";
@@ -82,13 +83,26 @@ test("formatters follow the compact summary conventions", () => {
 	assert.equal(formatTokens(50_000), "50K");
 	assert.equal(formatTokens(651_000), "651K");
 	assert.equal(formatTokens(1_200_000), "1.2M");
+	assert.equal(formatTokens(2_000_000), "2M");
+	assert.equal(formatTokens(1_500_000_000), "1.5B");
 	assert.equal(formatTokens(null), "—");
 	assert.equal(formatCost(0.003), "$0.003");
 	assert.equal(formatCost(0.53), "$0.53");
+	assert.equal(formatCost(0), "$0.000");
 	assert.equal(formatCost(null), "—");
 	assert.equal(formatDuration(42_000), "42s");
 	assert.equal(formatDuration(4 * 60_000 + 48_000), "4m48s");
 	assert.equal(formatDuration(65 * 60_000), "1h05m");
+	assert.equal(formatDuration(3_600_000), "1h00m");
+	assert.equal(formatDuration(300_000), "5m");
+	assert.equal(formatDuration(-1), "0s");
+});
+
+test("summaryRole prefers agent verbatim and strips the counter only from name", () => {
+	assert.equal(summaryRole({ name: "reviewer-10" }), "reviewer");
+	assert.equal(summaryRole({ agent: "reviewer-1", name: "anything-0" }), "reviewer-1");
+	assert.equal(summaryRole({ agent: "", name: "worker-3" }), "unknown");
+	assert.equal(summaryRole({ agent: undefined, name: "-9" }), "unknown");
 });
 
 test("aggregateSubagentRuns groups by agent, prefers execution snapshots, and falls back to jsonl", async () => {
@@ -243,13 +257,82 @@ test("non-pi zero session usage is unavailable, and awaiting execution counts as
 	}
 });
 
+test("a missing or empty session file yields no usage, not parser-shaped zeros", async () => {
+	const root = tempRoot();
+	try {
+		const cwd = path.join(root, "project");
+		const now = Date.parse("2026-01-01T05:00:00.000Z");
+		const store = new RunStore({ rootDir: path.join(cwd, ".pi-subagents"), now: () => now });
+		const run = store.createRun({ task: "pruned session fixture", cwd });
+		// retired pi child whose session file was pruned: parseSessionFile
+		// returns an all-zero emptyParsedSession, which must read as absence.
+		const pruned = child(root, "reviewer-0", "2026-01-01T04:50:00.000Z", {
+			agent: "reviewer",
+			sessionFile: path.join(root, "pruned.jsonl"),
+			retiredAt: "2026-01-01T04:55:00.000Z",
+		});
+		await store.addChild(run.runId, pruned);
+		// The file is deliberately never written — that is the point.
+		const runs = store.listRuns();
+		const sessions = new Map(
+			runs.flatMap((record) =>
+				record.children.map((entry) => [entry.sessionFile, parseSessionFile(entry.sessionFile)] as const),
+			),
+		);
+		const summary = aggregateSubagentRuns(runs, { now, sessions });
+		const group = summary.groups[0];
+		assert.ok(group);
+		assert.equal(group.usage, null);
+		assert.equal(group.turns, null);
+		assert.equal(summary.totals.usage, null);
+		const rendered = formatSubagentSummary(summary);
+		assert.match(rendered, /\| reviewer \| 1 \| unknown \| — \| — \| — \|/);
+		assert.doesNotMatch(rendered, /\$0\.000/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a running non-pi child does not display stale session usage", async () => {
+	const root = tempRoot();
+	try {
+		const cwd = path.join(root, "project");
+		const now = Date.parse("2026-01-01T05:00:00.000Z");
+		const store = new RunStore({ rootDir: path.join(cwd, ".pi-subagents"), now: () => now });
+		const run = store.createRun({ task: "stale cursor usage fixture", cwd });
+		const cursor = child(root, "worker-0", "2026-01-01T04:00:00.000Z", {
+			kind: "cursor",
+			agent: "worker",
+			state: "working",
+			sessionFile: path.join(root, "cursor-live.jsonl"),
+		});
+		// The file holds a COMPLETED earlier turn's usage; the child is still
+		// working, so that partial number must not surface as settled usage.
+		writeFileSync(cursor.sessionFile, sessionText({ input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.01 }));
+		await store.addChild(run.runId, cursor);
+		const runs = store.listRuns();
+		const sessions = new Map(
+			runs.flatMap((record) =>
+				record.children.map((entry) => [entry.sessionFile, parseSessionFile(entry.sessionFile)] as const),
+			),
+		);
+		const summary = aggregateSubagentRuns(runs, { now, sessions });
+		const group = summary.groups[0];
+		assert.ok(group);
+		assert.equal(group.usage, null);
+		assert.equal(summary.totals.usage, null);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("formatSubagentSummary renders the fixed seven-column table and empty state", () => {
-	const empty = formatSubagentSummary([], { cwd: "/tmp/project", parentPaneId: "w8:p1" });
+	const empty = formatSubagentSummary(aggregateSubagentRuns([]), { cwd: "/tmp/project", parentPaneId: "w8:p1" });
 	assert.equal(
 		empty,
 		"No subagent runs under this session (parent pane w8:p1).\nLaunch children with the subagent tool to see them here.",
 	);
-	const noPane = formatSubagentSummary([], { cwd: "/tmp/project" });
+	const noPane = formatSubagentSummary(aggregateSubagentRuns([]), { cwd: "/tmp/project" });
 	assert.match(noPane, /^No subagent runs under \/tmp\/project\./);
 });
 
@@ -341,11 +424,27 @@ test("registerSummaryCommand registers completion and emits slash text", async (
 		await command.handler("--all", { cwd, ui: { notify() {} } });
 		assert.match(messages[1] ?? "", /2 children/);
 		assert.match(messages[1] ?? "", /planner/);
+		// error paths: usage noise and unknown-child notify never emit slash text
+		const errors: string[] = [];
+		const errorCtx = { cwd, ui: { notify(msg: string) { errors.push(msg); } } };
+		await command.handler("--bogus", errorCtx);
+		assert.match(errors[0] ?? "", /^Usage: \/subagents-summary/);
+		await command.handler("--all --all", errorCtx);
+		assert.match(errors[1] ?? "", /^Usage: \/subagents-summary/);
+		await command.handler("nope", errorCtx);
+		assert.match(errors[2] ?? "", /^unknown child: nope/);
+		assert.equal(messages.length, 2);
+		// detail path: a known name renders the detail view via sendSlashText
+		await command.handler("reviewer-0", { cwd, ui: { notify() {} } });
+		assert.equal(messages.length, 3);
+		assert.match(messages[2] ?? "", /^reviewer-0 — reviewer/);
 		// The handler establishes the current cwd used by completion lookup.
 		const completions = await command.getArgumentCompletions("rev");
 		assert.deepEqual(completions, [{ value: "reviewer-0", label: "reviewer-0" }]);
 		const allCompletions = await command.getArgumentCompletions("--all p");
 		assert.deepEqual(allCompletions, [{ value: "--all planner-0", label: "planner-0" }]);
+		const unknownFlag = await command.getArgumentCompletions("--x");
+		assert.deepEqual(unknownFlag, []);
 	} finally {
 		process.chdir(oldCwd);
 		if (oldPane === undefined) delete process.env.HERDR_PANE_ID;
