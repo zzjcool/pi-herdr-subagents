@@ -52,6 +52,7 @@ import {
 } from "../shared/cursor-chat.ts";
 import {
 	type AgentConfig,
+	type AgentKind,
 	type AcceptanceResult,
 	type ChildRecord,
 	DEFAULTS,
@@ -357,6 +358,8 @@ export class Orchestrator {
 	private readonly workspaceId?: string;
 	/** Parent pane id used to uniquify type-tab labels across parent Pis. */
 	private readonly parentPaneId?: string;
+	/** Per-kind integration guard outcome, so one session probes/installs once. */
+	private readonly integrationChecked = new Map<AgentKind, boolean>();
 	/** Last type-tab used by a child of this orchestrator. */
 	private lastTypeTabId: string | null = null;
 	private spawned = 0;
@@ -705,6 +708,15 @@ export class Orchestrator {
 			...(input.thinking !== undefined ? { thinking: input.thinking } : {}),
 		});
 
+		// A non-pi child's structured collection depends on herdr's integration
+		// hook for that CLI reporting the session/chat id. Without it the child
+		// still runs and even produces artifacts — but every completion is
+		// misreported "failed: no session jsonl; collected from pane" (nj-hw
+		// 2026-09-28: planner/advisor ran fine, all four reported failed).
+		// Guard BEFORE any resource is allocated, same invariant as the model
+		// chain above; auto-install is idempotent so a missing hook self-heals.
+		await this.ensureIntegrationHook(input.agent.kind);
+
 		let sessionFile = this.sessionFileFor(name);
 		preCreateSessionFile(sessionFile);
 
@@ -1005,6 +1017,82 @@ export class Orchestrator {
 				ErrorCodes.BUDGET_EXCEEDED,
 			);
 		}
+	}
+
+	/**
+	 * Non-pi kinds whose structured collection depends on a herdr integration
+	 * hook. Keyed by `herdr integration` target name; `pi` itself reports its
+	 * session path natively (F1) so it is exempt.
+	 *
+	 * Only `cursor` today: its chat-store collection is the one wired through
+	 * `agent_session.source === "herdr:cursor"`. Other non-pi kinds currently
+	 * collect from the pane by design (F7), so a missing hook there is not a
+	 * telemetry break — adding them here when their structured channels land.
+	 */
+	// pi-lens-ignore: large-class — static table, checked below
+	private static readonly INTEGRATION_DEPENDENT_KINDS = {
+		cursor: "cursor",
+	} as const satisfies Partial<Record<AgentKind, string>>;
+
+	/**
+	 * Ensure the herdr integration hook exists for a hook-dependent kind.
+	 *
+	 * The cursor collection path reads the SQLite chat store herdr locates via
+	 * the sessionStart hook (`~/.cursor/herdr-agent-state.sh` reporting
+	 * `agent_session.source = "herdr:cursor"`). Without the hook the child
+	 * still runs — but every completion is misreported
+	 * `failed: no session jsonl; collected from pane` even when the turn fully
+	 * succeeded (nj-hw 2026-09-28: planner/advisor all "failed", all actually
+	 * succeeded with multi-MB chat stores on disk).
+	 *
+	 * Contract:
+	 *   - hook present ("current") → proceed, remember per kind
+	 *   - hook missing → `herdr integration install <kind>` (idempotent, verified
+	 *     md5-stable on reinstall), re-check, then proceed
+	 *   - herdr cannot tell (`integration status` unsupported/errored) → proceed
+	 *     silently: an older herdr must not brick launches; the pane path then
+	 *     collects as before (F7 semantics)
+	 *   - install refused (e.g. cursor CLI absent) → refuse the launch with the
+	 *     fix in the message, BEFORE any pane/worktree is allocated — same
+	 *     leak-free invariant as `planModelCandidates` above
+	 */
+	private async ensureIntegrationHook(kind: AgentKind): Promise<void> {
+		if (kind === "pi") return;
+		const table: Partial<Record<AgentKind, string>> =
+			Orchestrator.INTEGRATION_DEPENDENT_KINDS;
+		const target = table[kind];
+		if (!target) return;
+		if (this.integrationChecked.get(kind)) return;
+
+		const status = await this.client.integrationStatus(target);
+		if (!status.ok || status.value === null) return; // cannot tell → proceed (F7 pane path)
+		if (!status.value.startsWith("not installed")) {
+			this.integrationChecked.set(kind, true);
+			return;
+		}
+
+		const installed = await this.client.integrationInstall(target);
+		if (!installed.ok) {
+			throw new SubagentError(
+				`herdr's ${target} integration hook is missing and auto-install failed: ` +
+					`${installed.error.message}. Without the hook, ${target} children always ` +
+				`report "failed: no session jsonl" even when they succeed. ` +
+					`Fix: run \`herdr integration install ${target}\` manually, or use a pi-kind role.`,
+				ErrorCodes.START_FAILED,
+			);
+		}
+		// Re-check: a hook that reports "not installed" after a successful install
+		// (config dir mismatch, wrong user) would silently degrade every launch.
+		const verify = await this.client.integrationStatus(target);
+		if (verify.ok && verify.value !== null && verify.value.startsWith("not installed")) {
+			throw new SubagentError(
+				`herdr's ${target} integration hook still reports "not installed" after ` +
+					`install (${installed.value.slice(0, 120)}). Check herdr's integration ` +
+					`paths for this user, or run \`herdr integration install ${target}\` manually.`,
+				ErrorCodes.START_FAILED,
+			);
+		}
+		this.integrationChecked.set(kind, true);
 	}
 
 	/**

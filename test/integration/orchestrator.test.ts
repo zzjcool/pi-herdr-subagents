@@ -998,6 +998,140 @@ test("every kind starts via herdr then gets the task as agent prompt", async () 
 	}
 });
 
+// ─────────────────────────── integration hook guard (cursor telemetry) ───────────────────────────
+
+/**
+ * nj-hw 2026-09-28: a missing herdr cursor integration hook made every cursor
+ * child report "failed: no session jsonl; collected from pane" even though the
+ * runs fully succeeded (multi-MB chat stores on disk). The guard auto-installs
+ * the hook before the first cursor launch; a failed install refuses the launch
+ * with the fix in the message instead of letting the telemetry silently break.
+ */
+test("cursor launch auto-installs a missing integration hook", async () => {
+	const h = harness();
+	try {
+		h.fake.cursorIntegration = "not installed (/fake/.cursor/herdr-agent-state.sh)";
+		const handle = await h.orchestrator.launch({
+			agent: agent({ kind: "cursor", model: "grok-4.6" }),
+			task: "t",
+		});
+		assert.equal(handle.child.kind, "cursor");
+		const install = h.fake.commands.find(
+			(c) => c.args[0] === "integration" && c.args[1] === "install",
+		);
+		assert.ok(install, "a missing hook must trigger integration install");
+		assert.equal(install.args[2], "cursor");
+		// The fake flips its status line on install, so the re-check passes and
+		// the launch proceeds.
+		assert.equal(h.fake.cursorIntegration.startsWith("not installed"), false);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("cursor launch probes the integration once per kind, not per launch", async () => {
+	const h = harness();
+	try {
+		await h.orchestrator.launch({
+			agent: agent({ kind: "cursor", model: "grok-4.6" }),
+			task: "t",
+		});
+		await h.orchestrator.launch({
+			agent: agent({ kind: "cursor", model: "grok-4.6" }),
+			task: "t2",
+		});
+		const probes = h.fake.commands.filter(
+			(c) => c.args[0] === "integration" && c.args[1] === "status",
+		);
+		assert.equal(probes.length, 1, "the second launch must reuse the check");
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("cursor launch refuses cleanly when the hook cannot be installed", async () => {
+	const h = harness();
+	try {
+		h.fake.cursorIntegration = "not installed (/fake/.cursor/herdr-agent-state.sh)";
+		h.fake.cursorIntegrationInstallError =
+			"install cursor agent cli first";
+		await assert.rejects(
+			h.orchestrator.launch({
+			agent: agent({ kind: "cursor", model: "grok-4.6" }),
+			task: "t",
+		}),
+			(error) => {
+				assert.ok(error instanceof Error);
+				assert.match(
+					error.message,
+				/integration hook is missing and auto-install failed/,
+				);
+				assert.match(error.message, /herdr integration install cursor/);
+				// Leak-free: no pane, no worktree, no session file beyond the empty pre-create.
+				assert.equal(h.openPanes(), 1, "only the root pane remains");
+				return true;
+			},
+		);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("an older herdr without integration commands must not brick launches", async () => {
+	const h = harness();
+	try {
+		h.fake.cursorIntegration = null; // `integration status` errors
+		const handle = await h.orchestrator.launch({
+			agent: agent({ kind: "cursor", model: "grok-4.6" }),
+			task: "t",
+		});
+		assert.equal(handle.child.kind, "cursor");
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("pi launches never probe integrations", async () => {
+	const h = harness();
+	try {
+		await h.orchestrator.launch({
+			agent: agent(),
+			task: "t",
+		});
+		const probes = h.fake.commands.filter(
+			(c) => c.args[0] === "integration",
+		);
+		assert.equal(probes.length, 0);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("a hook that reports not-installed even after a successful install refuses the launch", async () => {
+	const h = harness();
+	try {
+		h.fake.cursorIntegration = "not installed (/fake/.cursor/herdr-agent-state.sh)";
+		h.fake.cursorIntegrationInstallKeepsMissing = true;
+		await assert.rejects(
+			h.orchestrator.launch({
+				agent: agent({ kind: "cursor", model: "grok-4.6" }),
+				task: "t",
+			}),
+			(error) => {
+				assert.ok(error instanceof Error);
+				assert.match(
+					error.message,
+				/still reports .not installed. after install/,
+				);
+				assert.equal(h.openPanes(), 1, "refusal allocates nothing");
+				return true;
+			},
+		);
+	} finally {
+		h.cleanup();
+	}
+});
+
 test("pane collect does not attest a system-prompt template verdict", async () => {
 	const h = harness();
 	try {
@@ -1444,7 +1578,6 @@ test("U7: a still-growing session file extends the collect deadline instead of r
 	fake.addRootPane("w1");
 	const client = createHerdrClient(createFakeRunner(fake));
 	const timeoutMs = 3_000;
-	const pollMs = 500;
 	let sleeps = 0;
 	let growing = true;
 	const orchestrator = new Orchestrator({

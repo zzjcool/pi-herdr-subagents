@@ -93,6 +93,19 @@ export interface FakeHerdrOptions {
 	/** Simulated clock start; defaults to Date.now(). */
 	now?: number;
 	/**
+	 * `herdr integration status` line for cursor; null → the command errors
+	 * (models an older herdr without integration subcommands).
+	 */
+	cursorIntegration?: string | null;
+	/** When set, `integration install cursor` fails with this message. */
+	cursorIntegrationInstallError?: string;
+	/**
+	 * When true, `integration install cursor` SUCCEEDS but the status line
+	 * stays "not installed" — models a config-dir/user mismatch where the
+	 * hook landed somewhere herdr does not read.
+	 */
+	cursorIntegrationInstallKeepsMissing?: boolean;
+	/**
 	 * Space that receives `tab create` when argv omits `--workspace`.
 	 * Models real herdr: an unscoped create lands in the UI-focused Space,
 	 * not necessarily the parent agent's Space. Default `"w1"` keeps
@@ -208,6 +221,15 @@ export class FakeHerdr {
 	/** F19 configurable race window (ms). */
 	paneBusyMs: number;
 	/**
+	 * `herdr integration status <target>` line for cursor; null → the command
+	 * is unsupported (older herdr). Defaults to "current (v1) (...)".
+	 */
+	cursorIntegration: string | null;
+	/** When set, `integration install cursor` fails with this message. */
+	cursorIntegrationInstallError: string | null;
+	/** Install succeeds but status keeps reporting "not installed". */
+	cursorIntegrationInstallKeepsMissing: boolean;
+	/**
 	 * Space used by `tab create` when `--workspace` is absent.
 	 * Default `"w1"` — same as the previous hardcoded create target.
 	 */
@@ -233,6 +255,13 @@ export class FakeHerdr {
 
 	constructor(opts: FakeHerdrOptions = {}) {
 		this.paneBusyMs = opts.paneBusyMs ?? 0;
+		this.cursorIntegration =
+			opts.cursorIntegration === undefined
+				? "current (v1) (/fake/.cursor/herdr-agent-state.sh)"
+				: opts.cursorIntegration;
+		this.cursorIntegrationInstallError = opts.cursorIntegrationInstallError ?? null;
+		this.cursorIntegrationInstallKeepsMissing =
+			opts.cursorIntegrationInstallKeepsMissing ?? false;
 		this.clock = opts.now ?? Date.now();
 		this.focusedWorkspaceId = opts.focusedWorkspaceId ?? "w1";
 		this.chatRoot = opts.chatRoot ?? fs.mkdtempSync(path.join("/tmp", "fake-chats-"));
@@ -620,6 +649,40 @@ export class FakeHerdr {
 				});
 			}
 			return fail("unknown_command", `unknown tab subcommand ${String(sub)}`);
+		}
+
+		// -- integrations ---------------------------------------------------------
+		// Human-line output (NOT a JSON envelope) — the real CLI prints
+		// "name: state (path)" lines; the client parses them raw.
+		if (head === "integration") {
+			const [sub, ...sargs] = rest;
+			if (sub === "status") {
+				if (this.cursorIntegration === null) {
+					return record("", "unknown command\n", 1);
+				}
+				return record(`cursor: ${this.cursorIntegration}\n`, "", 0);
+			}
+			if (sub === "install" && sargs[0] === "cursor") {
+				if (this.cursorIntegrationInstallError) {
+					return record(
+						"",
+						`cursor config directory not found. ${this.cursorIntegrationInstallError}\n`,
+						1,
+					);
+				}
+				// A no-op install models the "landed where herdr does not read"
+				// mismatch; the status line then keeps saying "not installed".
+				if (!this.cursorIntegrationInstallKeepsMissing) {
+					this.cursorIntegration =
+						"current (v1) (/fake/.cursor/herdr-agent-state.sh)";
+				}
+				return record(
+					"installed cursor integration hook to /fake/.cursor/herdr-agent-state.sh\n",
+					"",
+					0,
+				);
+			}
+			return fail("unknown_command", `unknown integration subcommand ${String(sub)}`);
 		}
 
 		// -- agents ------------------------------------------------------------

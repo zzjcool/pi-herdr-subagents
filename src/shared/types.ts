@@ -509,6 +509,12 @@ export interface HerdrClient {
 	// ── meta ──
 	version(): Promise<HerdrResult<string>>;
 	available(): Promise<boolean>;
+
+	// ── integrations ──
+	/** One integration's status, or null when herdr cannot report it. */
+	integrationStatus(target: string): Promise<HerdrResult<string | null>>;
+	/** Install an integration hook (idempotent on reinstall). */
+	integrationInstall(target: string): Promise<HerdrResult<string>>;
 }
 
 export type ReadSource =

@@ -565,7 +565,7 @@ function createAgentApi(
 
 function createMetaApi(
 	runner: CommandRunner,
-): Pick<HerdrClient, "version" | "available"> {
+): Pick<HerdrClient, "version" | "available" | "integrationStatus" | "integrationInstall"> {
 	return {
 		async version() {
 			const { stdout, code } = await runner(["--version"]);
@@ -584,6 +584,38 @@ function createMetaApi(
 			} catch {
 				return false;
 			}
+		},
+
+		async integrationStatus(target: string) {
+			// `integration status` prints human lines ("name: state (path)"),
+			// not a JSON envelope — so parseHerdrResponse's JSON path cannot be
+			// used; the raw runner output is matched directly. Unparseable or
+			// missing line → null ("cannot tell"), never an error: the caller
+			// treats null as "skip the guard" rather than fail the launch.
+			const res = await runner(["integration", "status"], {
+				timeoutMs: 5_000,
+			});
+			if (res.code !== 0) return ok(null);
+			const line = res.stdout
+				.split(/\r?\n/)
+				.find((l) => l.trimStart().startsWith(`${target}:`));
+			if (!line) return ok(null);
+			return ok(line.slice(line.indexOf(":") + 1).trim());
+		},
+
+		async integrationInstall(target: string) {
+			const res = await runner(["integration", "install", target], {
+				timeoutMs: 15_000,
+			});
+			if (res.code !== 0) {
+				return err({
+					code: "HERDR_ERROR",
+					message:
+					(res.stderr || res.stdout).trim().slice(0, 300) ||
+						`herdr integration install ${target} failed`,
+				});
+			}
+			return ok((res.stdout || res.stderr).trim());
 		},
 	};
 }
