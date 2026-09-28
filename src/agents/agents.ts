@@ -636,7 +636,17 @@ export function discoverAgents(
 		agents: order.map((name) => byName.get(name) as AgentConfig),
 		projectAgentsDir,
 		builtinAgentsDir: opts.builtinAgentsDir ?? BUILTIN_AGENTS_DIR,
+		userAgentsDir: agentLayersUserDir(scope, opts),
 	};
+}
+
+/** The user-level agents directory for the scope, when that layer runs. */
+function agentLayersUserDir(
+	scope: AgentScope,
+	opts: DiscoverOptions,
+): string | undefined {
+	if (scope === "project") return undefined;
+	return opts.userAgentsDir ?? path.join(getAgentDir(), "agents");
 }
 
 /**

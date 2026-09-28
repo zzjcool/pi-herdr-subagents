@@ -176,6 +176,8 @@ export interface AgentDiscoveryResult {
 	projectAgentsDir: string | null;
 	/** Directory the package's own agent definitions were loaded from. */
 	builtinAgentsDir?: string;
+	/** The user-level agents directory that took part (resolved, not `~`). */
+	userAgentsDir?: string;
 }
 
 // =============================================================================

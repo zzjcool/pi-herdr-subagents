@@ -7,6 +7,9 @@
  *   /subagents-refresh-provider-models <provider> [--force] [--no-probe]
  *   /subagents-generate-profiles <provider> [--no-probe]
  *   /subagents-check-profile <name> [--no-probe]
+ *
+ * Plus the human-facing roster listing:
+ *   /subagents-agents [user|project|both]
  */
 
 import type {
@@ -14,6 +17,11 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import type {
+	AgentConfig,
+	AgentScope,
+	SubagentsSettings,
+} from "../shared/types.ts";
 import {
 	applySubagentProfile,
 	checkSubagentProfile,
@@ -26,6 +34,9 @@ import {
 	refreshProviderModelCatalog,
 	type ModelRegistryLike,
 } from "../profiles/profiles.ts";
+import { classifyModelOrigin, resolveStepModel } from "../agents/step-model.ts";
+import { checkModelScope } from "../agents/model-scope.ts";
+import { nativeModelFor } from "../runs/kind.ts";
 
 export const SLASH_TEXT_RESULT_TYPE = "subagent-slash-text";
 
@@ -402,6 +413,251 @@ export function registerProfileCommands(
 						sendSlashText(pi, lines.join("\n"));
 					},
 				);
+				} catch (error) {
+				notifyError(ctx, error);
+			}
+		},
+	});
+}
+
+// ── /subagents-agents ───────────────────────────────────────────────────────
+
+const AGENT_SCOPES = ["user", "project", "both"] as const;
+
+/** Parse the optional scope argument; empty means the tool default (`user`). */
+export function parseAgentsScopeArg(
+	args: string,
+	usage: string,
+): { ok: true; scope: AgentScope | undefined } | { ok: false; message: string } {
+	const parts = args.trim().split(/\s+/).filter(Boolean);
+	if (parts.length === 0) return { ok: true, scope: undefined };
+	if (parts.length > 1) return { ok: false, message: usage };
+	const scope = parts[0] as AgentScope;
+	if (!AGENT_SCOPES.includes(scope)) return { ok: false, message: usage };
+	return { ok: true, scope };
+}
+
+/**
+ * Render the /subagents-agents listing.
+ *
+ * Pure function of its inputs so tests can drive it directly. `dispatchModel`
+ * is the parent session model as `provider/id` (when known) — supplied so the
+ * `model:` line matches what a launch from THIS session would actually use;
+ * omit it and roles without an explicit model say so instead of guessing.
+ */
+export function renderAgentsListing(input: {
+	agents: AgentConfig[];
+	scope: AgentScope;
+	projectAgentsDir: string | null;
+	builtinAgentsDir: string;
+	userAgentsDir?: string;
+	settings: SubagentsSettings;
+	dispatchModel?: string;
+}): string {
+	const { agents, scope } = input;
+	const lines: string[] = ["Subagent roles", `Scope: ${scope}`];
+
+	const groupOrder: Array<AgentConfig["source"]> = ["builtin", "user", "project"];
+	for (const group of groupOrder) {
+		const members = agents.filter((a) => a.source === group);
+		if (members.length === 0) continue;
+		lines.push("", `${group} (${members.length})`);
+		for (const agent of members) {
+			lines.push(renderOneAgent(agent, input));
+		}
+	}
+
+	if (agents.length === 0) {
+		lines.push(
+			"",
+			"No agents found. Add definitions to ~/.pi/agent/agents/*.md or .pi/agents/*.md.",
+		);
+	}
+
+	lines.push(
+		"",
+		"Directories",
+		`  builtin: ${input.builtinAgentsDir}`,
+		`  user: ${input.userAgentsDir ?? "~/.pi/agent/agents"}${
+			scope === "project" ? " (skipped by scope)" : ""
+		}`,
+		`  project: ${input.projectAgentsDir ?? "(none found)"}`,
+	);
+	if (input.settings.disableBuiltins === true) {
+		lines.push(
+			"  (builtin layer disabled by subagents.disableBuiltins)",
+		);
+	}
+	return lines.join("\n");
+}
+
+function renderOneAgent(
+	agent: AgentConfig,
+	input: {
+		settings: SubagentsSettings;
+		dispatchModel?: string;
+	},
+): string {
+	const lines: string[] = [`  ${agent.name}`];
+	lines.push(`    ${agent.description}`);
+
+	const details: string[] = [];
+	if (agent.kind !== "pi") details.push(`kind=${agent.kind}`);
+	if (agent.alias?.length) details.push(`alias: ${agent.alias.join(", ")}`);
+
+	// Model resolution mirrors the launch path (resolveStepModel) so the line
+	// reports what a launch from this session would use — a preset's
+	// kind/model/thinking fold in, and precedence is the real one.
+	try {
+		const resolved = resolveStepModel({
+			agent,
+			step: {},
+			params: {},
+			settings: input.settings,
+			...(input.dispatchModel ? { dispatchModel: input.dispatchModel } : {}),
+		});
+		if (resolved.resolved.model) {
+			details.push(modelLine(agent, resolved, input.settings));
+		} else {
+			details.push("model: (agent CLI default)");
+		}
+	} catch {
+		// An undefined preset or an incoherent kind/model pair throws here —
+		// the launch would refuse too. Report it instead of guessing.
+		details.push(
+			`model: ${agent.model ?? "(agent CLI default)"} (unresolvable — a launch with this configuration would be refused)`,
+		);
+	}
+	lines.push(`    ${details.join(" · ")}`);
+
+	lines.push(`    file: ${agent.filePath}`);
+	if (agent.unenforcedFields?.length) {
+		lines.push(
+			`    ⚠ not enforced yet: ${agent.unenforcedFields.join(", ")}`,
+		);
+	}
+	return lines.join("\n");
+}
+
+/**
+ * The `model:` detail line, including everything the LAUNCH path would do
+ * with that model. Three behaviours are replicated so the listing tells the
+ * truth about a launch instead of just naming the model:
+ *
+ *   - `classifyModelOrigin` (the launch path's own classifier) — so a parent
+ *     model falling through is labelled `parent session model`, never
+ *     `per-run override` (which cannot happen from this command: step and
+ *     params are empty).
+ *   - `checkModelScope` — an out-of-scope model is flagged exactly like
+ *     `launchStep` would flag it (error-severity for explicit models).
+ *   - `nativeModelFor` — a model the target kind cannot express is either a
+ *     launch refusal (explicit origin, mirroring `planModelCandidates`) or a
+ *     documented drop to the CLI's own default (inherited origin).
+ */
+function modelLine(
+	agent: AgentConfig,
+	resolved: ReturnType<typeof resolveStepModel>,
+	settings: SubagentsSettings,
+): string {
+	const model = resolved.resolved.model as string;
+	const { origin, label } = classifyModelOrigin(resolved.resolved, undefined);
+
+	const parts = [`model: ${model} (${label ?? "resolved"})`];
+
+	// Same settings, same severity semantics as `launchStep`.
+	const violation = checkModelScope(
+		model,
+		settings.modelScope,
+		origin === "explicit" ? "explicit" : "inherited",
+	);
+	if (violation) {
+		parts.push(
+			violation.severity === "error"
+				? `✗ outside model scope — a launch would refuse this`
+				: `⚠ outside model scope — a launch would warn`,
+		);
+	}
+
+	// Kind/model coherence: a model the target CLI cannot express.
+	if (agent.kind !== "pi") {
+		const native = nativeModelFor(agent.kind, model, agent.thinking);
+		if (native === undefined) {
+			if (origin === "explicit") {
+				parts.push(
+					`✗ cannot be used with kind '${agent.kind}' — a launch would refuse this`,
+				);
+			} else {
+				parts.push(
+					`dropped at launch: kind '${agent.kind}' runs on its own default`,
+				);
+			}
+		}
+	}
+
+	return parts.join(" · ");
+}
+
+export interface AgentsCommandDeps {
+	/** Load the agent catalog the same way the subagent tool does. */
+	loadCatalog: (input: {
+		sessionCwd: string;
+		runCwd: string;
+		scope: AgentScope | undefined;
+	}) => {
+		agents: AgentConfig[];
+		settings: SubagentsSettings;
+		projectAgentsDir: string | null;
+		builtinAgentsDir: string;
+		userAgentsDir?: string;
+	};
+}
+
+/** Register /subagents-agents [user|project|both] on a Pi extension. */
+export function registerAgentsCommand(
+	pi: ExtensionAPI,
+	deps: AgentsCommandDeps,
+): void {
+	pi.registerCommand("subagents-agents", {
+		description:
+			"List available subagent roles (use /subagents-agents [user|project|both] to pick a scope)",
+		getArgumentCompletions: (prefix) => {
+			if (prefix.includes(" ")) return null;
+			return AGENT_SCOPES.filter((scope) => scope.startsWith(prefix)).map(
+				(scope) => ({ value: scope, label: scope }),
+			);
+		},
+		handler: async (args, ctx) => {
+			const usage = "Usage: /subagents-agents [user|project|both]";
+			const parsed = parseAgentsScopeArg(args, usage);
+			if (parsed.ok === false) {
+				ctx.ui.notify(parsed.message, "error");
+				return;
+			}
+			try {
+				await withSlashStatus(ctx, "Loading subagent roles…", async () => {
+					const catalog = deps.loadCatalog({
+						sessionCwd: ctx.cwd,
+						runCwd: ctx.cwd,
+						scope: parsed.scope,
+					});
+					const dispatchModel = ctx.model
+						? `${ctx.model.provider}/${ctx.model.id}`
+						: undefined;
+					sendSlashText(
+						pi,
+						renderAgentsListing({
+							agents: catalog.agents,
+							scope: parsed.scope ?? "user",
+							projectAgentsDir: catalog.projectAgentsDir,
+							builtinAgentsDir: catalog.builtinAgentsDir,
+							...(catalog.userAgentsDir
+								? { userAgentsDir: catalog.userAgentsDir }
+								: {}),
+							settings: catalog.settings,
+							...(dispatchModel ? { dispatchModel } : {}),
+						}),
+					);
+				});
 			} catch (error) {
 				notifyError(ctx, error);
 			}

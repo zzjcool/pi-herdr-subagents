@@ -19,7 +19,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { createHerdrClient } from "./src/herdr/client.ts";
-import { discoverAgents, findAgent, formatAgentRoster } from "./src/agents/agents.ts";
+import { discoverAgents, findAgent, formatAgentRoster, BUILTIN_AGENTS_DIR } from "./src/agents/agents.ts";
 import {
 	applyAgentOverrides,
 	applyDefaultModel,
@@ -45,7 +45,7 @@ import {
 	SUBAGENT_NOTIFY_TYPE,
 } from "./src/extension/notify.ts";
 import { renderSubagentNotice } from "./src/extension/notice-renderer.ts";
-import { registerProfileCommands } from "./src/extension/slash.ts";
+import { registerProfileCommands, registerAgentsCommand } from "./src/extension/slash.ts";
 import { registerSummaryCommand } from "./src/extension/summary.ts";
 import {
 	blockMessage,
@@ -255,6 +255,15 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	});
 	registerSummaryCommand(pi);
 
+	// The human-facing roster: what the model gets injected into its system
+	// prompt each turn, but on demand and with resolved models. The catalog
+	// loading is the same function the tool uses, so the two listings cannot
+	// drift apart. Re-loads on every invocation — cheap (a few stat+read calls)
+	// and always fresh after an agent file is edited.
+	registerAgentsCommand(pi, {
+		loadCatalog: (input) => loadCatalog(input.sessionCwd, input.runCwd, input.scope),
+	});
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
@@ -267,7 +276,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 		async execute(
 			_id,
 			params,
-			signal,
+			_signal,
 			onUpdate,
 			ctx: ExtensionContext,
 		): Promise<AgentToolResult<unknown>> {
@@ -382,6 +391,9 @@ export default function herdrSubagents(pi: ExtensionAPI) {
  * with project `.pi/settings.json`. Agent directories are resolved from the
  * run's `cwd`. Bundled roles are included unless `subagents.disableBuiltins`
  * opts out.
+ *
+ * Also returns the discovery directories, for listings that tell the user
+ * WHERE the roles came from (the /subagents-agents command).
  */
 function loadCatalog(
 	sessionCwd: string,
@@ -390,6 +402,8 @@ function loadCatalog(
 ): {
 	agents: AgentConfig[];
 	settings: ReturnType<typeof loadSubagentSettings>;
+	projectAgentsDir: string | null;
+	builtinAgentsDir: string;
 } {
 	const settings = loadSubagentSettings({
 		userSettingsPath: path.join(getAgentDir(), "settings.json"),
@@ -404,6 +418,11 @@ function loadCatalog(
 			settings.defaultModel,
 		),
 		settings,
+		projectAgentsDir: discovery.projectAgentsDir,
+		builtinAgentsDir: discovery.builtinAgentsDir ?? BUILTIN_AGENTS_DIR,
+		...(discovery.userAgentsDir
+			? { userAgentsDir: discovery.userAgentsDir }
+			: {}),
 	};
 }
 
