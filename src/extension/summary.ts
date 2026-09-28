@@ -639,7 +639,7 @@ export function formatSubagentDetail(input: SummaryDetailInput): string {
 	const derivedExecution =
 		child.execution?.status ??
 		(!running && session ? deriveOutcome(session).status : undefined);
-	const title = `${child.name}${child.agent ? ` — ${child.agent}` : ""}${child.kind ? ` (${child.kind})` : ""}`;
+	const title = `${child.name} — ${summaryRole(child)}${child.kind ? ` (${child.kind})` : ""}`;
 	const stateBits = [`state: ${child.state}`];
 	if (derivedExecution) stateBits.push(`execution: ${derivedExecution}`);
 	if (model) stateBits.push(`model: ${model}`);
@@ -820,7 +820,7 @@ export function registerSummaryCommand(pi: ExtensionAPI): void {
 					now,
 					sessions,
 					cwd: ctx.cwd,
-					...(parentPaneId ? { parentPaneId } : {}),
+					...(!parsed.all && parentPaneId ? { parentPaneId } : {}),
 				}),
 			);
 		},
