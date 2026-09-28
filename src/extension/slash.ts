@@ -44,7 +44,7 @@ export interface ProfileCommandDeps {
 	getModelRegistry?: () => ModelRegistryLike | undefined;
 }
 
-function sendSlashText(pi: ExtensionAPI, text: string): void {
+export function sendSlashText(pi: ExtensionAPI, text: string): void {
 	pi.sendMessage({
 		customType: SLASH_TEXT_RESULT_TYPE,
 		content: text,

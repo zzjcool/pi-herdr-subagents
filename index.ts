@@ -46,6 +46,7 @@ import {
 } from "./src/extension/notify.ts";
 import { renderSubagentNotice } from "./src/extension/notice-renderer.ts";
 import { registerProfileCommands, registerAgentsCommand } from "./src/extension/slash.ts";
+import { registerSummaryCommand } from "./src/extension/summary.ts";
 import {
 	blockMessage,
 	forbiddenDispatchReason,
@@ -252,6 +253,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	registerProfileCommands(pi, {
 		getModelRegistry: () => lastModelRegistry,
 	});
+	registerSummaryCommand(pi);
 
 	// The human-facing roster: what the model gets injected into its system
 	// prompt each turn, but on demand and with resolved models. The catalog
@@ -274,7 +276,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 		async execute(
 			_id,
 			params,
-			signal,
+			_signal,
 			onUpdate,
 			ctx: ExtensionContext,
 		): Promise<AgentToolResult<unknown>> {
