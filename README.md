@@ -286,6 +286,13 @@ Other commands: `/subagents-profiles` lists saved profiles;
 current registry (and a live probe unless you pass `--no-probe`). Refresh and
 generate accept `--force` and `--no-probe`.
 
+`/subagents-summary` renders a Markdown table of the current parent pane's
+subagent runs, including role outcomes, turns, token usage, cost, and cumulative
+agent-time. Use `/subagents-summary --all` to include runs from every parent
+pane in the current working directory, or `/subagents-summary <name>` for one
+child's detailed state, timing, usage, and session path. Child names are
+available through command completion.
+
 You can still hand-write the same mapping:
 
 ```json

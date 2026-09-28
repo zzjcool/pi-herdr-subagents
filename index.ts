@@ -46,6 +46,7 @@ import {
 } from "./src/extension/notify.ts";
 import { renderSubagentNotice } from "./src/extension/notice-renderer.ts";
 import { registerProfileCommands } from "./src/extension/slash.ts";
+import { registerSummaryCommand } from "./src/extension/summary.ts";
 import {
 	blockMessage,
 	forbiddenDispatchReason,
@@ -252,6 +253,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	registerProfileCommands(pi, {
 		getModelRegistry: () => lastModelRegistry,
 	});
+	registerSummaryCommand(pi);
 
 	pi.registerTool({
 		name: "subagent",

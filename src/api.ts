@@ -112,7 +112,34 @@ export {
 	refreshProviderModelCatalog,
 	resolveProfilePaths,
 } from "./profiles/profiles.ts";
-export { registerProfileCommands } from "./extension/slash.ts";
+export { registerProfileCommands, sendSlashText } from "./extension/slash.ts";
+export {
+	aggregateSubagentRuns,
+	aggregateRuns,
+	aggregateSummary,
+	formatSubagentSummary,
+	formatSummary,
+	formatSubagentDetail,
+	formatChildDetail,
+	formatDetail,
+	formatTokens,
+	formatTokenCount,
+	formatCost,
+	formatDuration,
+	registerSummaryCommand,
+	summaryRole,
+} from "./extension/summary.ts";
+export type {
+	SummaryAggregationOptions,
+	SummaryChild,
+	SummaryDetailInput,
+	SummaryFormatOptions,
+	SummaryGroup,
+	SummarySession,
+	SummarySessionMap,
+	SummaryTotals,
+	SubagentSummary,
+} from "./extension/summary.ts";
 
 // ── runs ────────────────────────────────────────────────────────────────────
 export { Orchestrator, preCreateSessionFile } from "./runs/orchestrator.ts";
