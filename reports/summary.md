@@ -44,6 +44,10 @@ Subagents session summary — 2 runs · 2 children · 00:39–12:27
 **Totals**: 2 success · 50K in / 12K out / 650.8K cache · $0.53 · 10m35s agent-time
 ```
 
+## MR / PR
+
+https://github.com/zzjcool/pi-herdr-subagents/pull/1
+
 ## 未尽事项
 
 - 未在真实 Pi TUI 中交互调用 slash command；纯 formatter smoke 和注册层 unit test 已通过。
