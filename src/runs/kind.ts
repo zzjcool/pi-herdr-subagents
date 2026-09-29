@@ -96,7 +96,17 @@ function nativeStartArgs(
 		// dialog; without `--trust` the TUI sits on "Workspace Trust Required"
 		// and `herdr agent prompt` never starts a turn.
 		args.push("--trust");
-		if (agent.onBlocked === "auto-approve") args.push("--force");
+		// Unattended by default: a subagent has no human at its pane, so cursor's
+		// allowlist approval ("Run this command? Not in allowlist: …") is a
+		// deadlock, not a safety feature — the child waits forever for a `y`
+		// nobody will type. `--force` (Run Everything) is therefore the default;
+		// `onBlocked: "forward"`/`"notify"` opts back into a human gate by
+		// dropping the flag, and herdr then surfaces the block to the parent.
+		// Deny-list entries (`~/.cursor/cli-config.json` permissions.deny) still
+		// apply: `--force` means "unless explicitly denied", not "no rules".
+		if (agent.onBlocked !== "forward" && agent.onBlocked !== "notify") {
+			args.push("--force");
+		}
 	}
 	return args;
 }

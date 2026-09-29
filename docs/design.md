@@ -481,13 +481,13 @@ if (orphans.length) warn("发现孤儿 pane，可能有越权创建", orphans);
 但这**是状态机的事，不是 cleanup 策略的事**，不应混在一个配置项里。
 
 ```yaml
-onBlocked: forward        # forward | auto-approve | notify
+onBlocked: auto-approve    # auto-approve (default) | forward | notify
 ```
 
 | 值 | 行为 |
 | --- | --- |
-| `forward` | 转发给父 agent 决策 |
-| `auto-approve` | 按白名单自动放行 |
+| `auto-approve`（默认） | 自动放行（cursor 子 agent 启动即带 `--force`）；子 pane 没有人，审批框即死锁 |
+| `forward` | 转发给父 agent 决策（父 TUI 弹 confirm） |
 | `notify` | 只通知用户（`herdr notification show --sound request`），等人来 |
 
 ⚠️ `blocked` 依赖屏幕检测，有误判率，**必须配超时兜底**，不能作为唯一真相。
@@ -554,7 +554,7 @@ kind: pi                    # pi | cursor | claude | codex | gemini | ...
 placement: split-down       # split-down | split-right | new-tab
 worktree: false             # true = git worktree add --detach（herdr 尚无 worktree 客户端）
 steer: true                 # 允许父 agent 中途插话
-onBlocked: forward          # forward | auto-approve | notify
+onBlocked: auto-approve    # auto-approve (default) | forward | notify
 # 注：无 cleanup 字段 —— 回收是无条件的（第 5.1 节）
 ---
 

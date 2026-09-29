@@ -9,6 +9,7 @@
 import type {
 	AgentConfig,
 	ModelSourceInfo,
+	OnBlockedPolicy,
 	SubagentsSettings,
 } from "../shared/types.ts";
 
@@ -104,6 +105,23 @@ export function applyAgentOverrides(
 	}
 
 	return out;
+}
+
+/**
+ * Fill `onBlocked` for agents that do not define one (design §6.2, level 5).
+ *
+ * The default is `auto-approve` (DEFAULT_ON_BLOCKED): subagents run
+ * unattended, so an approval dialog at the child pane is a deadlock, not a
+ * gate. Agents that explicitly choose `forward`/`notify` keep their choice —
+ * this pass never overrides a set value.
+ */
+export function applyDefaultOnBlocked(
+	agents: AgentConfig[],
+	fallback: OnBlockedPolicy,
+): AgentConfig[] {
+	return agents.map((agent) =>
+		agent.onBlocked ? agent : { ...agent, onBlocked: fallback },
+	);
 }
 
 /**

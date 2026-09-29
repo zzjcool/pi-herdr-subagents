@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import type {
 	HerdrSettings,
 	ModelScopeConfig,
+	OnBlockedPolicy,
 	Placement,
 	SubagentsSettings,
 } from "../shared/types.ts";
@@ -75,6 +76,12 @@ function nonNegativeInt(
 }
 
 const VALID_JOIN_MODES: ReadonlySet<string> = new Set(["each", "smart"]);
+
+const VALID_ON_BLOCKED_POLICIES: ReadonlySet<string> = new Set([
+	"forward",
+	"auto-approve",
+	"notify",
+]);
 
 function readJoinFields(
 	input: Record<string, unknown>,
@@ -157,6 +164,20 @@ function parseHerdrSettings(
 	return out;
 }
 
+function parseOnBlocked(
+	value: unknown,
+	filePath: string,
+): OnBlockedPolicy | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || !VALID_ON_BLOCKED_POLICIES.has(value)) {
+		throw new Error(
+			`Subagent settings in '${filePath}' have invalid 'defaultOnBlocked'; ` +
+				`expected one of: ${[...VALID_ON_BLOCKED_POLICIES].join(", ")}.`,
+		);
+	}
+	return value as OnBlockedPolicy;
+}
+
 /** Extract and validate the `subagents` object from a parsed settings document. */
 export function parseSubagentSettings(
 	doc: Record<string, unknown> | undefined,
@@ -177,6 +198,11 @@ export function parseSubagentSettings(
 	// missing key and a rejected key stay distinguishable (only the latter throws).
 	setIf(out, "defaultModel", requiredString(input.defaultModel, "defaultModel", filePath));
 	setIf(out, "defaultProvider", requiredString(input.defaultProvider, "defaultProvider", filePath));
+	setIf(
+		out,
+		"defaultOnBlocked",
+		parseOnBlocked(input.defaultOnBlocked, filePath),
+	);
 	setIf(out, "agentOverrides", parseAgentOverrides(input.agentOverrides, filePath));
 	setIf(out, "disableBuiltins", requiredBoolean(input.disableBuiltins, "disableBuiltins", filePath));
 	setIf(out, "disableThinking", requiredBoolean(input.disableThinking, "disableThinking", filePath));
@@ -307,6 +333,8 @@ export function resolveSubagentSettings(
 		out.defaultModel = project.defaultModel;
 	if (project.defaultProvider !== undefined)
 		out.defaultProvider = project.defaultProvider;
+	if (project.defaultOnBlocked !== undefined)
+		out.defaultOnBlocked = project.defaultOnBlocked;
 	if (project.disableBuiltins !== undefined)
 		out.disableBuiltins = project.disableBuiltins;
 	if (project.disableThinking !== undefined)

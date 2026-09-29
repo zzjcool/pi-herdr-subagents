@@ -190,33 +190,67 @@ test("planKindStart: every kind omits the task from start argv", () => {
 		);
 		assert.ok(pi.args.includes("--session"));
 		assert.match(pi.taskText, /do the thing/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
 
-		const cursor = planKindStart({
-			agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
-			task: "do the thing",
-			sessionFile: "/tmp/s.jsonl",
-			tempDir: dir,
-			model: "grok-4.6",
-			thinking: "high",
-		});
-		assert.deepEqual(cursor.args, [
-			"--model",
-			"cursor-grok-4.6-high",
-			"--trust",
-			"--force",
-		]);
-		assert.equal(cursor.recordModel, "cursor-grok-4.6-high");
-		assert.match(cursor.taskText, /You are a test agent/);
-		assert.match(cursor.taskText, /do the thing/);
-
-		const trusted = planKindStart({
+test("planKindStart: cursor starts --force unless the agent opts into a human gate", () => {
+	// Unattended by default: a subagent pane has no human to answer cursor's
+	// allowlist approval ("Run this command? Not in allowlist: …"), so `--force`
+	// (Run Everything) ships for unset AND `auto-approve`; only `forward`/
+	// `notify` drop the flag and let herdr surface the block to the parent.
+	// Deny-list entries (~/.cursor/cli-config.json permissions.deny) still apply.
+	const dir = mkdtempSync(path.join(tmpdir(), "kind-force-"));
+	try {
+		const unspecified = planKindStart({
 			agent: agent({ kind: "cursor" }),
 			task: "do the thing",
 			sessionFile: "/tmp/s.jsonl",
 			tempDir: dir,
 			model: "grok-4.6",
 		});
-		assert.deepEqual(trusted.args, ["--model", "cursor-grok-4.6-high", "--trust"]);
+		assert.deepEqual(unspecified.args, [
+			"--model",
+			"cursor-grok-4.6-high",
+			"--trust",
+			"--force",
+		]);
+
+		const approved = planKindStart({
+			agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
+			task: "do the thing",
+			sessionFile: "/tmp/s.jsonl",
+			tempDir: dir,
+			model: "grok-4.6",
+		});
+		assert.deepEqual(approved.args, [
+			"--model",
+			"cursor-grok-4.6-high",
+			"--trust",
+			"--force",
+		]);
+		assert.equal(approved.recordModel, "cursor-grok-4.6-high");
+		assert.match(approved.taskText, /You are a test agent/);
+		assert.match(approved.taskText, /do the thing/);
+
+		const gated = planKindStart({
+			agent: agent({ kind: "cursor", onBlocked: "forward" }),
+			task: "do the thing",
+			sessionFile: "/tmp/s.jsonl",
+			tempDir: dir,
+			model: "grok-4.6",
+		});
+		assert.deepEqual(gated.args, ["--model", "cursor-grok-4.6-high", "--trust"]);
+
+		const notified = planKindStart({
+			agent: agent({ kind: "cursor", onBlocked: "notify" }),
+			task: "do the thing",
+			sessionFile: "/tmp/s.jsonl",
+			tempDir: dir,
+			model: "grok-4.6",
+		});
+		assert.deepEqual(notified.args, ["--model", "cursor-grok-4.6-high", "--trust"]);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

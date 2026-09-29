@@ -23,6 +23,7 @@ import { discoverAgents, findAgent, formatAgentRoster, BUILTIN_AGENTS_DIR } from
 import {
 	applyAgentOverrides,
 	applyDefaultModel,
+	applyDefaultOnBlocked,
 } from "./src/agents/overrides.ts";
 import { resolveModel } from "./src/agents/model-resolution.ts";
 import { resolveStepModel } from "./src/agents/step-model.ts";
@@ -65,6 +66,7 @@ import {
 	type AgentConfig,
 	type AgentScope,
 	DEFAULTS,
+	DEFAULT_ON_BLOCKED,
 	ErrorCodes,
 	type HerdrClient,
 	type ModelOrigin,
@@ -413,9 +415,15 @@ function loadCatalog(
 		includeBuiltin: settings.disableBuiltins !== true,
 	});
 	return {
-		agents: applyDefaultModel(
-			applyAgentOverrides(discovery.agents, settings.agentOverrides),
-			settings.defaultModel,
+		// `onBlocked` defaults BEFORE overrides have been merged is wrong (an
+		// override could set it); the fill must happen AFTER overrides, same
+		// layering as `applyDefaultModel`.
+		agents: applyDefaultOnBlocked(
+			applyDefaultModel(
+				applyAgentOverrides(discovery.agents, settings.agentOverrides),
+				settings.defaultModel,
+			),
+			settings.defaultOnBlocked ?? DEFAULT_ON_BLOCKED,
 		),
 		settings,
 		projectAgentsDir: discovery.projectAgentsDir,

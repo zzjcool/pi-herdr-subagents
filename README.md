@@ -91,7 +91,7 @@ to hold.
 | Task-card boilerplate | A frozen appendix is appended to every child task: no wakeup, no nested agents, end with `{"ok": true\|false, "reason": "..."}`. |
 | Read-only roles | `acceptance.role: read-only` (scout, reviewer, …) may still have `bash` for `rg` / `git log` / `ls`, but writes (`rm`, `git commit`, `echo > file`, `npm install`, `sed -i`, …) are blocked. |
 | Acceptance | `{"ok": true}` is only **attested**. If a required criterion lists `evidence: [verification-output]` (the bundled `worker` does), collect then runs `npm run typecheck && npm test` in the child’s cwd and promotes the result to **verified** or rejects it. |
-| Tool approval (`blocked`) | `onBlocked: forward` (default) pops a **confirm** in the parent TUI. Yes → `send-keys y` and keep watching. No → deny. No TUI → a notify is queued instead of silently waiting for the parent model to `steer`. `auto-approve` / `notify` are the other policies. |
+| Tool approval (`blocked`) | `onBlocked: auto-approve` (**default**; a subagent pane has no human, so an approval dialog is a deadlock) silently approves a blocked child via `send-keys y` and keeps watching. `forward` pops a **confirm** in the parent TUI (Yes → `send-keys y`, No → deny; no TUI → a notify is queued). `notify` only notifies. The default is also what cursor children launch with: `--force` (Run Everything) unless the agent sets `forward`/`notify` — set `subagents.defaultOnBlocked` in settings.json to change the default globally. |
 | Late `collect` / `retire` | If watch already collected, `collect` returns the cached snapshot. If the pane is already gone, `retire` is a no-op that points at the session file. |
 
 What is still a **judgment** (and must stay one):
@@ -363,6 +363,7 @@ Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
 {
   "subagents": {
     "defaultModel": "provider/id",
+    "defaultOnBlocked": "auto-approve",
     "disableBuiltins": false,
     "maxSubagentSpawnsPerSession": 8,
     "agentOverrides": {
@@ -386,6 +387,7 @@ Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
 | Key | Meaning |
 | --- | --- |
 | `defaultModel` | Fallback model for roles that do not pin one |
+| `defaultOnBlocked` | Fallback `onBlocked` for roles that do not set one (default `auto-approve`; `forward` restores a human confirm in the parent TUI) |
 | `presets` | Named kind+model+thinking bundles, referenced via `preset:` — they beat `agentOverrides`, lose to the tool `model` |
 | `agentOverrides` | Per-role field overlay (`model`, `thinking`, `preset`, `tools`, `disabled`, …) |
 | `agentOverridesByProvider` | Same overlay, keyed by the **parent** provider id |
@@ -424,7 +426,7 @@ You are a read-only researcher. Facts with paths. No edits.
 Put it in `~/.pi/agent/agents/researcher.md` (user) or
 `<repo>/.pi/agents/researcher.md` (project). Required fields: `name`,
 `description`. Useful optional fields: `model`, `preset`, `thinking`, `tools`, `skills`,
-`timeoutMs`, `placement`, `onBlocked` (`forward` / `auto-approve` / `notify`),
+`timeoutMs`, `placement`, `onBlocked` (`auto-approve` default / `forward` / `notify`),
 `acceptance.role` (`read-only` / `writer`), `acceptance.criteria` with
 `evidence: [verification-output]` (and optional `command:`) if collect should
 run a check, `worktree`, `toolBudget` / `turnBudget` / `toolTimeoutMs`,
@@ -590,7 +592,7 @@ the runtime table above — trust this README and `action=list`’s
   agent definition omits `acceptance.role` (the guard is keyed off it). Treat it
   as a guard-rail against accidents, not a boundary against intent.
 - **`agent_status` has no success/failure semantics** (F26).
-- **Non-pi kinds degrade** (F7): same Herdr control plane (`start` → `prompt` → `wait`), but no usage and outcome is `unknown` unless the pane text includes a verdict JSON that is not just the echoed launch prompt. Cursor starts with `--trust` (and `--force` when `onBlocked: auto-approve`) so workspace-trust does not block the first prompt. Resume depends on each CLI.
+- **Non-pi kinds degrade** (F7): same Herdr control plane (`start` → `prompt` → `wait`), but no usage and outcome is `unknown` unless the pane text includes a verdict JSON that is not just the echoed launch prompt. Cursor starts with `--trust --force` (Run Everything) unless the agent opts back into a human gate via `onBlocked: forward`/`notify`, so workspace-trust and shell-approval dialogs cannot block the first prompt. Resume depends on each CLI.
 - **A model the kind cannot express**: `--model` is built per CLI (pi wants
   `provider/id`, cursor wants slugs like `cursor-grok-4.6-high`). A model that
   cannot be expressed is omitted rather than mangled. Whether that is refused or

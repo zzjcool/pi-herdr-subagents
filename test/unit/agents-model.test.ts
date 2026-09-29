@@ -11,6 +11,7 @@ import { resolveModel, providerOf, modelCandidates } from "../../src/agents/mode
 import {
 	applyAgentOverrides,
 	applyDefaultModel,
+	applyDefaultOnBlocked,
 	applyOverride,
 } from "../../src/agents/overrides.ts";
 import {
@@ -288,6 +289,18 @@ test("overrides: applyDefaultModel is a no-op without a default", () => {
 	assert.equal(applyDefaultModel(list, undefined), list);
 });
 
+test("overrides: applyDefaultOnBlocked fills unset agents, keeps explicit choices", () => {
+	const unset = agent();
+	const gated = agent({ onBlocked: "forward" });
+	const notified = agent({ onBlocked: "notify" });
+	const out = applyDefaultOnBlocked([unset, gated, notified], "auto-approve");
+	assert.equal(out[0]?.onBlocked, "auto-approve");
+	assert.equal(out[1]?.onBlocked, "forward");
+	assert.equal(out[2]?.onBlocked, "notify");
+	// A filled agent is a copy, never an in-place mutation of the catalog.
+	assert.notEqual(out[0], unset);
+});
+
 // ─────────────────────────── settings ───────────────────────────
 
 test("settings: absent subagents key yields empty settings", () => {
@@ -304,6 +317,28 @@ test("settings: rejects an empty defaultModel", () => {
 	assert.throws(() =>
 		parseSubagentSettings({ subagents: { defaultModel: "  " } }, "/s.json"),
 	);
+});
+
+test("settings: defaultOnBlocked validates and merges", () => {
+	assert.deepEqual(
+		parseSubagentSettings(
+			{ subagents: { defaultOnBlocked: "forward" } },
+			"/s.json",
+		),
+		{ defaultOnBlocked: "forward" },
+	);
+	assert.throws(() =>
+		parseSubagentSettings(
+			{ subagents: { defaultOnBlocked: "yolo" } },
+			"/s.json",
+		),
+	);
+	// Project wins over user for the overlapping key.
+	const merged = resolveSubagentSettings(
+		{ defaultOnBlocked: "auto-approve" },
+		{ defaultOnBlocked: "forward" },
+	);
+	assert.equal(merged.defaultOnBlocked, "forward");
 });
 
 test("settings: validates herdr numeric fields", () => {

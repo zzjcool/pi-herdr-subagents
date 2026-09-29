@@ -66,6 +66,13 @@ export type Placement = "split-down" | "split-right" | "new-tab";
 /** What to do when an agent reports `blocked` (design §5.3). */
 export type OnBlockedPolicy = "forward" | "auto-approve" | "notify";
 
+/**
+ * The policy used when an agent sets no `onBlocked` and no
+ * `subagents.defaultOnBlocked` is configured: subagents run unattended, so an
+ * approval dialog is a deadlock. `forward` restores a human gate.
+ */
+export const DEFAULT_ON_BLOCKED: OnBlockedPolicy = "auto-approve";
+
 export type AcceptanceLevel = "none" | "attested" | "verified";
 
 export interface AcceptanceCriterion {
@@ -634,6 +641,14 @@ export interface HerdrSettings {
 export interface SubagentsSettings {
 	defaultModel?: string;
 	defaultProvider?: string;
+	/**
+		 * Default `onBlocked` policy for agents that do not set one in frontmatter
+		 * or agentOverrides. Unattended runs want `auto-approve`; `forward` keeps
+		 * a human gate in the parent TUI. Defaults to `auto-approve` (see
+		 * DEFAULT_ON_BLOCKED) so a fresh install never deadlocks on an approval
+		 * dialog nobody is watching.
+		 */
+	defaultOnBlocked?: OnBlockedPolicy;
 	agentOverrides?: Record<string, Partial<AgentConfig> & { disabled?: boolean }>;
 	/**
 	 * Named kind+model+thinking bundles, referenced by `preset:` (frontmatter,

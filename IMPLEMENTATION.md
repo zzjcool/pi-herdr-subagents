@@ -71,7 +71,8 @@ visible, steerable, resumable, and with accurate success/failure accounting.
    - Project overrides user on name collision when scope is `both`.
    - Skip files without `name` + `description`. Never throw on one bad file.
    - Defaults when absent: `systemPromptMode: "replace"`, `inheritProjectContext: true`,
-     `inheritSkills: false`, `kind: "pi"`, `placement: "split-down"`, `steer: true`, `onBlocked: "forward"`.
+     `inheritSkills: false`, `kind: "pi"`, `placement: "split-down"`, `steer: true`, `onBlocked: "auto-approve"`
+     (overridable globally via `subagents.defaultOnBlocked`; a subagent pane has no human, so an approval dialog is a deadlock).
    - Normalize `tools`/`skills`/`alias` from string-or-array.
    - Validate `kind` against the allowed list; reject unknown kinds with a clear message.
    - `maxSubagentDepth` default 1; `allowNestedSubagents` default false.
