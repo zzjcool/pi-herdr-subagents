@@ -145,7 +145,7 @@ ends. The default is async: launch, return control, get a completion later.
 
 | `action` | Purpose |
 | --- | --- |
-| *(omitted)* / `launch` | Start one child (`agent` + `task`) or several (`tasks[]` / `chain[]`) |
+| *(omitted)* / `launch` | Start one child (`agent` + `task`) or several (`tasks[]`) |
 | `steer` | Prompt a live child; it drops the current turn and takes the new message |
 | `continue` | Prompt a live child without abandoning the current turn |
 | `resume` | Relaunch from the session file if the pane is already gone |
@@ -191,7 +191,7 @@ model unless you set `subagents.defaultModel`,
 
 Named bundles in settings, referenced from agent frontmatter (`preset: strong`),
 from `agentOverrides.<name>.preset`, or from the tool’s `preset` param (single
-launch, `tasks[]`, and `chain[]` all accept it):
+launch and `tasks[]` both accept it):
 
 ```json
 {

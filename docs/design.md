@@ -576,7 +576,7 @@ per-run override
 preset 规则：
 
 - 引用方式：agent frontmatter `preset: <name>`、`agentOverrides.<name>.preset`、
-  或工具的 `preset` 参数（single/tasks/chain 均支持）
+  或工具的 `preset` 参数（single/tasks 均支持）
 - **原子性**：校验的是 preset 的 `kind` 与**最终解析出的** model 这一对，而不是
   preset 自身的 model。因为 model 可能来自更高或更低的层级（per-run tool `model`、
   `defaultModel`、父会话模型、override），只校验 preset 自身会让不兼容的 pair 溜过去，
@@ -723,7 +723,7 @@ workspace  = 项目/仓库边界（跟 cwd 走）
 | --- | --- | --- |
 | 单个 subagent、短任务 | 当前 tab split | 零开销 |
 | 2–4 个并行、相关 | 当前 tab 多 split | 同屏对比 |
-| 多阶段任务（chain） | **独立 tab** | 生命周期长，独立回收 |
+| 多阶段任务（父 agent 协调） | 按阶段启动 | 收到完成通知后决定下一步 |
 | 多个不相关任务并行 | **每任务一个 tab** | 隔离 + 批量回收 |
 
 ```yaml
@@ -887,7 +887,6 @@ subagent({
   // launch
   agent?: string, task?: string,
   tasks?: Array<{ agent: string; task: string }>,   // 并行
-  chain?: Array<{ agent: string; task: string }>,   // 串行
   async?: boolean,          // 默认 true
   model?: string, cwd?: string, placement?: string,
 
@@ -967,7 +966,7 @@ async function retire(name) {
 | 阶段 | 内容 | 验收标准 |
 | --- | --- | --- |
 | **P1 MVP** | single + parallel；pi kind；split pane；start 重试；`deriveOutcome` 成败判定；无条件回收 | 3 个 reviewer 并行跑完，拿到结构化结果 + usage + **准确的 success/failed 判定**；无 pane 泄漏 |
-| **P2 编排** | chain；`continue`/`steer`/`resume`；tab 布局；孤儿审计；blocked 转发；acceptance 校验 | 中途纠正跑偏 worker；awaiting 后 continue 上下文保留；agent 自述失败能被识别 |
+| **P2 编排** | `continue`/`steer`/`resume`；tab 布局；孤儿审计；blocked 转发；acceptance 校验 | 中途纠正跑偏 worker；awaiting 后 continue 上下文保留；agent 自述失败能被识别 |
 | **P3 成熟** | 多 kind（cursor/claude/codex）；async 后台；worktree 隔离；modelScope；tool/turn budget；agent view 面板 | 侧边栏一眼看到全部 subagent 状态 |
 | **P4 产品化** | 打成 pi package；文档；单测 | `pi install npm:...` 一键可用 |
 
@@ -1144,14 +1143,13 @@ launcher 为**每个 child** 创建一个 session 文件，所以泄漏会随 fa
 
 **修法**：非对象、非数组的标量按损坏行计入 `tornLines`，继续解析其余行。
 
-### F41 — `tasks[]` / `chain[]` 的条目未校验
+### F41 — `tasks[]` 的条目未校验
 
 单任务路径用 `Boolean(params.agent && params.task)` 把关，但数组路径直接放行：
 
 ```text
-tasks:[{agent:"worker", task:""}]     → 放行，启动一个没任务的 child
-tasks:[{task:"do it"}]                → 放行，agent 名为 undefined
-chain:[{agent:"worker", task:"   "}] → 放行
+tasks:[{agent:"worker", task:""}] → 放行，启动一个没任务的 child
+tasks:[{task:"do it"}]            → 放行，agent 名为 undefined
 ```
 
 **修法**：每个 step 在分配任何资源之前校验 `agent` 与 `task`。
