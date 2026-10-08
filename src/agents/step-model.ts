@@ -25,7 +25,7 @@ import { assertKindModelCoherent, expandPreset } from "./presets.ts";
 export interface StepModelInput {
 	/** The catalog agent, with `agentOverrides` already folded in. */
 	agent: AgentConfig;
-	/** Per-step overrides (a `tasks[]`/`chain[]` entry). */
+	/** Per-step overrides (a `tasks[]` entry). */
 	step: { model?: string; preset?: string };
 	/** Top-level tool params that act as per-run overrides for every step. */
 	params: { model?: string; preset?: string };

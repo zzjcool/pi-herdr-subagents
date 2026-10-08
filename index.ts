@@ -133,11 +133,6 @@ const SubagentParams = Type.Object({
 	tasks: Type.Optional(
 		Type.Array(TaskItem, { description: "Parallel launches" }),
 	),
-	chain: Type.Optional(
-		Type.Array(TaskItem, {
-			description: "Sequential launches; {previous} is substituted",
-		}),
-	),
 	async: Type.Optional(
 		Type.Boolean({
 			description: "Return after launch instead of waiting. Default true.",
@@ -723,7 +718,7 @@ async function reviveChild(
 }
 
 /**
- * Create children: a single `agent`+`task`, a `tasks[]` fan-out, or a `chain[]`.
+ * Create children: a single `agent`+`task` or a `tasks[]` fan-out.
  *
  * One child failure must not abort the rest, so each step reports its own line.
  */
@@ -801,13 +796,8 @@ async function launchFamily(input: {
 		timeoutByName: new Map(),
 	};
 
-	// Chain steps depend on prior output; everything else launches in parallel
-	// so two scouts do not wait on each other's agentStart.
-	if (params.chain?.length) {
-		for (const step of plan.steps) await launchStep(session, step);
-	} else {
-		await Promise.all(plan.steps.map((step) => launchStep(session, step)));
-	}
+	// Every planned child is independent and launches concurrently.
+	await Promise.all(plan.steps.map((step) => launchStep(session, step)));
 
 	// Persist children first so a crash during the wait still leaves a record.
 	for (const name of session.handles) {
@@ -1104,29 +1094,21 @@ export function buildPlan(params: {
 		preset?: string;
 		worktree?: boolean;
 	}>;
-	chain?: Array<{
-		agent: string;
-		task: string;
-		model?: string;
-		preset?: string;
-		worktree?: boolean;
-	}>;
 	worktree?: boolean;
 }): Plan {
 	const hasSingle = isPresent(params.agent) && isPresent(params.task);
 	const hasTasks = Boolean(params.tasks?.length);
-	const hasChain = Boolean(params.chain?.length);
-	const count = Number(hasSingle) + Number(hasTasks) + Number(hasChain);
+	const count = Number(hasSingle) + Number(hasTasks);
 
 	if (count === 0)
 		return {
 			ok: false,
-			message: "Provide one of: (agent+task), tasks[], or chain[].",
+			message: "Provide one of: (agent+task) or tasks[].",
 		};
 	if (count > 1)
 		return {
 			ok: false,
-			message: "Provide exactly one of: (agent+task), tasks[], or chain[].",
+			message: "Provide exactly one of: (agent+task) or tasks[].",
 		};
 
 	if (hasSingle) {
@@ -1143,34 +1125,18 @@ export function buildPlan(params: {
 		};
 	}
 
-	// `tasks[]` and `chain[]` entries were previously taken on trust, so a
-	// missing or blank `agent`/`task` produced a step that launched a child with
-	// nothing to do (or an empty agent name that failed later, after resources
-	// were allocated). Validate every entry up front instead.
+	// `tasks[]` entries were previously taken on trust, so a missing or blank
+	// `agent`/`task` produced a step that launched a child with nothing to do (or
+	// an empty agent name that failed later, after resources were allocated).
+	// Validate every entry up front instead.
 
-	if (hasTasks) {
-		const tasks = params.tasks as PlanStep[];
-		const problem = firstInvalidStep(tasks, "tasks[]");
-		if (problem) return { ok: false, message: problem };
-		return { ok: true, task: `${tasks.length} parallel tasks`, steps: tasks };
-	}
-
-	// Chain: substitute {previous} with the prior step's output at runtime.
-	const chain = params.chain as PlanStep[];
-	const problem = firstInvalidStep(chain, "chain[]");
+	const tasks = params.tasks as PlanStep[];
+	const problem = firstInvalidStep(tasks, "tasks[]");
 	if (problem) return { ok: false, message: problem };
-
-	const steps = chain.map((step, i) => ({
-		...step,
-		task:
-			i === 0
-				? step.task
-				: step.task.replace(/\{previous\}/g, "(previous step output)"),
-	}));
-	return { ok: true, task: `chain of ${chain.length}`, steps };
+	return { ok: true, task: `${tasks.length} parallel tasks`, steps: tasks };
 }
 
-/** One entry of `tasks[]` or `chain[]`. */
+/** One entry of `tasks[]`. */
 interface PlanStep {
 	agent: string;
 	task: string;

@@ -62,6 +62,7 @@ interface ToolResult {
 }
 
 type SubagentTool = {
+	parameters: ToolParameterSchema;
 	execute: (
 		id: string,
 		params: Record<string, unknown>,
@@ -71,11 +72,17 @@ type SubagentTool = {
 	) => Promise<ToolResult>;
 };
 
+interface ToolParameterSchema {
+	properties?: Record<string, unknown>;
+	additionalProperties?: boolean;
+}
+
 interface BatchOutcome {
 	threw?: Error;
 	text: string;
 	/** Every herdr invocation the launcher made, one line per call. */
 	herdrCalls: string[];
+	parameters: ToolParameterSchema;
 }
 
 /**
@@ -86,6 +93,7 @@ async function runBatch(params: {
 	settings: Record<string, unknown>;
 	agents: Record<string, string>;
 	tasks: Array<Record<string, unknown>>;
+	toolParams?: Record<string, unknown>;
 	/**
 	 * The parent session's model. Supplying this exercises the full end-to-end
 	 * path — tool → resolveStep → classifyModelOrigin → launch → `⚠` — for the
@@ -155,7 +163,7 @@ async function runBatch(params: {
 					"call-1",
 					// `async: false` collects inline instead of leaving a background
 					// watcher polling: a unit test must not depend on timers to exit.
-					{ tasks: params.tasks, async: false },
+					{ ...(params.toolParams ?? { tasks: params.tasks }), async: false },
 					undefined,
 					undefined,
 					{
@@ -173,12 +181,13 @@ async function runBatch(params: {
 					},
 				);
 			const text = (res.content ?? []).map((b) => b.text ?? "").join("\n");
-			return { text, herdrCalls: readLog() };
+			return { text, herdrCalls: readLog(), parameters: tool.parameters };
 		} catch (error) {
 			return {
 				threw: error instanceof Error ? error : new Error(String(error)),
 				text: "",
 				herdrCalls: readLog(),
+				parameters: tool.parameters,
 			};
 		}
 	} finally {
@@ -199,6 +208,28 @@ async function runBatch(params: {
 
 const BROKEN = "---\nname: broken\ndescription: b\npreset: nonexistent\n---\np\n";
 const HEALTHY = "---\nname: healthy\ndescription: h\n---\np\n";
+
+test("launch: a legacy chain field is ignored and cannot start a child", async () => {
+	const { threw, text, herdrCalls, parameters } = await runBatch({
+		settings: {},
+		agents: { "healthy.md": HEALTHY },
+		tasks: [],
+		toolParams: {
+			chain: [{ agent: "healthy", task: "this must not be launched" }],
+		},
+	});
+
+	assert.equal(threw, undefined, `tool execution must not throw: ${threw?.message}`);
+	assert.equal(Object.hasOwn(parameters.properties ?? {}, "chain"), false);
+	// Type.Object does not emit additionalProperties:false, so a caller may
+	// still pass the legacy field; launch planning must ignore it.
+	assert.equal(parameters.additionalProperties, undefined);
+	assert.match(text, /Provide one of: \(agent\+task\) or tasks\[\]\./);
+	assert.ok(
+		!herdrCalls.some((call) => call.startsWith("agent start")),
+		`the legacy field must not launch any child: ${JSON.stringify(herdrCalls)}`,
+	);
+});
 
 // ────────────────────── BUG P1: sibling survival ──────────────────────
 
