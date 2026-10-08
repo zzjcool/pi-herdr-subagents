@@ -13,3 +13,6 @@ node_modules/
 
 # transient agent handoff notes (not part of the package)
 STATE.md
+
+# agent reports are not stored in the repo
+reports/
