@@ -136,14 +136,21 @@ const SAFE_PATH_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 function readJsonObjectFile(filePath: string): Record<string, unknown> {
 	const raw = fs.readFileSync(filePath, "utf-8");
-	const parsed = JSON.parse(raw) as unknown;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw) as unknown;
+	} catch (error) {
+		throw new Error(
+			`Invalid JSON in '${filePath}': ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
 		throw new Error(`File '${filePath}' must contain a JSON object.`);
 	}
 	return parsed as Record<string, unknown>;
 }
 
-function writeJsonFile(filePath: string, value: unknown): void {
+export function writeJsonFile(filePath: string, value: unknown): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
 }
@@ -283,7 +290,7 @@ export function readSubagentProfile(
 	return { filePath, profile: validateSubagentProfile(filePath, parsed) };
 }
 
-function readSettingsFile(filePath: string): Record<string, unknown> {
+export function readSettingsFile(filePath: string): Record<string, unknown> {
 	if (!fs.existsSync(filePath)) return {};
 	return readJsonObjectFile(filePath);
 }

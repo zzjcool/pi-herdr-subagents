@@ -223,6 +223,21 @@ test("applySubagentProfile writes agentOverrides and keeps other settings", asyn
 	});
 });
 
+test("readSubagentProfile reports malformed JSON with its file path", async () => {
+	await withTempDir(async (dir) => {
+		const paths = resolveProfilePaths({ agentDir: dir });
+		mkdirSync(paths.profilesDir, { recursive: true });
+		const file = path.join(paths.profilesDir, "broken.json");
+		writeFileSync(file, "{ invalid");
+		assert.throws(
+			() => readSubagentProfile("broken", { agentDir: dir }),
+			(error: unknown) =>
+				error instanceof Error &&
+				error.message.includes(`Invalid JSON in '${file}'`),
+		);
+	});
+});
+
 test("list/read profiles ignore the providers subdirectory", async () => {
 	await withTempDir(async (dir) => {
 		const paths = resolveProfilePaths({ agentDir: dir });

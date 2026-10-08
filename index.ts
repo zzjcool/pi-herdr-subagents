@@ -25,6 +25,11 @@ import {
 	applyDefaultModel,
 	applyDefaultOnBlocked,
 } from "./src/agents/overrides.ts";
+import {
+	applyTeam,
+	DEFAULT_TEAM,
+	type ActiveTeam,
+} from "./src/agents/teams.ts";
 import { resolveModel } from "./src/agents/model-resolution.ts";
 import { resolveStepModel } from "./src/agents/step-model.ts";
 import { checkModelScope } from "./src/agents/model-scope.ts";
@@ -46,7 +51,11 @@ import {
 	SUBAGENT_NOTIFY_TYPE,
 } from "./src/extension/notify.ts";
 import { renderSubagentNotice } from "./src/extension/notice-renderer.ts";
-import { registerProfileCommands, registerAgentsCommand } from "./src/extension/slash.ts";
+import {
+	registerProfileCommands,
+	registerAgentsCommand,
+	registerTeamCommand,
+} from "./src/extension/slash.ts";
 import { registerSummaryCommand } from "./src/extension/summary.ts";
 import {
 	blockMessage,
@@ -262,9 +271,13 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	// loading is the same function the tool uses, so the two listings cannot
 	// drift apart. Re-loads on every invocation — cheap (a few stat+read calls)
 	// and always fresh after an agent file is edited.
-	registerAgentsCommand(pi, {
-		loadCatalog: (input) => loadCatalog(input.sessionCwd, input.runCwd, input.scope),
-	});
+	const commandCatalogLoader = (input: {
+		sessionCwd: string;
+		runCwd: string;
+		scope: AgentScope | undefined;
+	}) => loadCatalog(input.sessionCwd, input.runCwd, input.scope);
+	registerAgentsCommand(pi, { loadCatalog: commandCatalogLoader });
+	registerTeamCommand(pi, { loadCatalog: commandCatalogLoader });
 
 	pi.registerTool({
 		name: "subagent",
@@ -294,14 +307,15 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 			const action = params.action ?? "launch";
 			const cwd = params.cwd ?? ctx.cwd;
 			const store = new RunStore({ rootDir: path.join(cwd, ".pi-subagents") });
-			const { agents, settings } = loadCatalog(ctx.cwd, cwd, params.agentScope);
+			const catalog = loadCatalog(ctx.cwd, cwd, params.agentScope);
+			const { agents, allAgents, settings, team, teamWarnings } = catalog;
 			runtime.setJoinConfig({
 				mode: settings.joinMode ?? DEFAULT_JOIN_MODE,
 				flushMs: settings.joinFlushMs ?? DEFAULT_FLUSH_MS,
 				parentBusy: () => parentTurnActive,
 			});
 
-			if (action === "list") return listAgents(agents);
+			if (action === "list") return ok(renderAgentList(agents, team, teamWarnings));
 
 			// Control actions address an EXISTING child; launch-family actions
 			// create new ones. The two share almost nothing, so they are separate.
@@ -313,6 +327,8 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 					store,
 					cwd,
 					agents,
+					allAgents,
+					team,
 					runtime,
 					layout,
 				});
@@ -325,7 +341,9 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 				store,
 				cwd,
 				agents,
+				allAgents,
 				settings,
+				team,
 				runtime,
 				layout,
 				onUpdate,
@@ -338,9 +356,13 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 		const tools = event.systemPromptOptions?.selectedTools;
 		if (Array.isArray(tools) && !tools.includes("subagent")) return;
 		if (ctx?.cwd) lastCwd = ctx.cwd;
-		const { agents } = loadCatalog(lastCwd, lastCwd, undefined);
+		const catalog = loadCatalog(lastCwd, lastCwd, undefined);
 		return {
-			systemPrompt: `${event.systemPrompt}\n\n${PARENT_PLAYBOOK}\n\n${formatAgentRoster(agents)}`,
+			systemPrompt: `${event.systemPrompt}\n\n${PARENT_PLAYBOOK}\n\n${renderParentRoster(
+				catalog.agents,
+				catalog.team,
+				catalog.teamWarnings,
+			)}`,
 		};
 	});
 
@@ -397,13 +419,16 @@ export default function herdrSubagents(pi: ExtensionAPI) {
  * Also returns the discovery directories, for listings that tell the user
  * WHERE the roles came from (the /subagents-agents command).
  */
-function loadCatalog(
+export function loadCatalog(
 	sessionCwd: string,
 	runCwd: string,
 	scope: AgentScope | undefined,
 ): {
 	agents: AgentConfig[];
+	allAgents: AgentConfig[];
 	settings: ReturnType<typeof loadSubagentSettings>;
+	team: ActiveTeam;
+	teamWarnings: string[];
 	projectAgentsDir: string | null;
 	builtinAgentsDir: string;
 } {
@@ -414,17 +439,20 @@ function loadCatalog(
 	const discovery = discoverAgents(runCwd, scope ?? "user", {
 		includeBuiltin: settings.disableBuiltins !== true,
 	});
-	return {
-		// `onBlocked` defaults BEFORE overrides have been merged is wrong (an
-		// override could set it); the fill must happen AFTER overrides, same
-		// layering as `applyDefaultModel`.
-		agents: applyDefaultOnBlocked(
-			applyDefaultModel(
-				applyAgentOverrides(discovery.agents, settings.agentOverrides),
-				settings.defaultModel,
-			),
+	const overridden = applyAgentOverrides(discovery.agents, settings.agentOverrides);
+	const teamResult = applyTeam(overridden, settings);
+	const resolveDefaults = (items: AgentConfig[]): AgentConfig[] =>
+		applyDefaultOnBlocked(
+			applyDefaultModel(items, settings.defaultModel),
 			settings.defaultOnBlocked ?? DEFAULT_ON_BLOCKED,
-		),
+		);
+	return {
+		// Team member overrides must be applied before defaults so they win over
+		// subagents.defaultModel and defaultOnBlocked.
+		agents: resolveDefaults(teamResult.agents),
+		allAgents: resolveDefaults(overridden),
+		team: teamResult.team,
+		teamWarnings: teamResult.warnings,
 		settings,
 		projectAgentsDir: discovery.projectAgentsDir,
 		builtinAgentsDir: discovery.builtinAgentsDir ?? BUILTIN_AGENTS_DIR,
@@ -449,6 +477,8 @@ async function controlAction(input: {
 	store: RunStore;
 	cwd: string;
 	agents: AgentConfig[];
+	allAgents: AgentConfig[];
+	team: ActiveTeam;
 	runtime: SessionRuntime;
 	layout: SessionLayout;
 }): Promise<AgentToolResult<unknown>> {
@@ -471,6 +501,7 @@ async function controlAction(input: {
 			params,
 			runtime: input.runtime,
 			agents: input.agents,
+			allAgents: input.allAgents,
 			store,
 			cwd,
 		});
@@ -493,6 +524,7 @@ async function controlAction(input: {
 		layout: input.layout,
 		workspaceId: process.env.HERDR_WORKSPACE_ID,
 		parentPaneId: process.env.HERDR_PANE_ID,
+		...teamForChildren(input.team),
 	});
 	orchestrator.restore(found.run);
 
@@ -522,6 +554,7 @@ interface ChildContext {
 	store: RunStore;
 	cwd: string;
 	agents: AgentConfig[];
+	allAgents: AgentConfig[];
 	found: NonNullable<ReturnType<typeof findChild>>;
 	orchestrator: Orchestrator;
 	runtime: SessionRuntime;
@@ -587,7 +620,11 @@ async function collectChild(
 		const cached = ctx.orchestrator.cachedCollect(ctx.name);
 		if (cached) return ok(renderCollect(ctx.name, cached));
 
-		const agentDef = ctx.agents.find((a) => a.name === ctx.found.child.agent);
+		const agentDef = findControlAgent(
+			ctx.agents,
+			ctx.allAgents,
+			ctx.found.child.agent,
+		);
 		const timeoutMs = agentDef?.timeoutMs ?? DEFAULTS.turnTimeoutMs;
 		const collected = await ctx.orchestrator.collect(ctx.name, { timeoutMs });
 		await persistChild(ctx.store, ctx.found.runId, ctx.orchestrator, ctx.name);
@@ -647,7 +684,11 @@ async function reviveChild(
 		);
 	}
 
-	const agentDef = ctx.agents.find((a) => a.name === found.child.agent);
+	const agentDef = findControlAgent(
+		ctx.agents,
+		ctx.allAgents,
+		found.child.agent,
+	);
 	if (!agentDef) {
 		return fail(
 			`agent "${found.child.agent}" is no longer defined`,
@@ -693,7 +734,9 @@ async function launchFamily(input: {
 	store: RunStore;
 	cwd: string;
 	agents: AgentConfig[];
+	allAgents: AgentConfig[];
 	settings: ReturnType<typeof resolveSubagentSettings>;
+	team: ActiveTeam;
 	runtime: SessionRuntime;
 	layout: SessionLayout;
 	onUpdate?: AgentToolUpdateCallback;
@@ -736,13 +779,16 @@ async function launchFamily(input: {
 		maxSpawns: settings.maxSubagentSpawnsPerSession ?? null,
 		workspaceId: process.env.HERDR_WORKSPACE_ID,
 		parentPaneId: process.env.HERDR_PANE_ID,
+		...teamForChildren(input.team),
 	});
 
 	const session: LaunchSession = {
 		params,
 		store,
 		agents,
+		allAgents: input.allAgents,
 		settings,
+		team: input.team,
 		runId: run.runId,
 		orchestrator,
 		runtime,
@@ -819,7 +865,9 @@ interface LaunchSession {
 	params: SubagentParams;
 	store: RunStore;
 	agents: AgentConfig[];
+	allAgents: AgentConfig[];
 	settings: ReturnType<typeof resolveSubagentSettings>;
+	team: ActiveTeam;
 	runId: string;
 	orchestrator: Orchestrator;
 	runtime: SessionRuntime;
@@ -840,7 +888,15 @@ async function launchStep(
 ): Promise<void> {
 	const agent = findAgent(session.agents, step.agent);
 	if (!agent) {
-		session.results.push(unknownAgentLine(session.agents, step.agent));
+		session.results.push(
+			unknownAgentLineForCatalog(
+				session.agents,
+				session.allAgents,
+				step.agent,
+				session.team,
+				session.settings,
+			),
+		);
 		return;
 	}
 	if (agent.disabled) {
@@ -942,9 +998,32 @@ async function launchStep(
 export function unknownAgentLine(
 	agents: AgentConfig[],
 	requested: string,
+	teamName?: string,
 ): string {
 	const available = agents.map((a) => a.name).join(", ") || "none";
+	if (teamName) {
+		return `✗ unknown agent "${requested}" in team "${teamName}". Available: ${available}. Switch with /subagents-team use ${teamName} (or "default").`;
+	}
 	return `✗ unknown agent "${requested}". Available: ${available}`;
+}
+
+/** Apply launchStep's team-specific wording only for an actual team-filtered role. */
+export function unknownAgentLineForCatalog(
+	agents: AgentConfig[],
+	allAgents: AgentConfig[],
+	requested: string,
+	team: ActiveTeam,
+	settings: ReturnType<typeof loadSubagentSettings>,
+): string {
+	const roleExists = Boolean(findAgent(allAgents, requested));
+	const hasSelectedTeam =
+		team.name !== DEFAULT_TEAM &&
+		Object.hasOwn(settings.teams ?? {}, team.name);
+	return unknownAgentLine(
+		agents,
+		requested,
+		roleExists && hasSelectedTeam ? team.name : undefined,
+	);
 }
 
 /**
@@ -1202,8 +1281,11 @@ function followJob(
 
 function followChild(ctx: ChildContext, opts: { watch: boolean }): void {
 	const timeoutMs =
-		ctx.agents.find((a) => a.name === ctx.found.child.agent)?.timeoutMs ??
-		DEFAULTS.turnTimeoutMs;
+		findControlAgent(
+			ctx.agents,
+			ctx.allAgents,
+			ctx.found.child.agent,
+		)?.timeoutMs ?? DEFAULTS.turnTimeoutMs;
 	followJob(ctx.runtime, {
 		name: ctx.name,
 		runId: ctx.found.runId,
@@ -1317,10 +1399,11 @@ export async function waitAction(input: {
 	params: SubagentParams;
 	runtime: SessionRuntime;
 	agents: AgentConfig[];
+	allAgents?: AgentConfig[];
 	store: RunStore;
 	cwd: string;
 }): Promise<AgentToolResult<unknown>> {
-	const { params, runtime, agents, store, cwd } = input;
+	const { params, runtime, agents, allAgents = agents, store, cwd } = input;
 	const jobs = runtime.activeJobs();
 	let targets = resolveWaitTargets(
 		{ name: params.name, all: params.all },
@@ -1350,7 +1433,7 @@ export async function waitAction(input: {
 			...targets.names.map((name) => {
 				const role = jobs.find((job) => job.name === name)?.agent;
 				return (
-					agents.find((a) => a.name === role)?.timeoutMs ??
+					findControlAgent(agents, allAgents, role)?.timeoutMs ??
 					DEFAULTS.turnTimeoutMs
 				);
 			}),
@@ -1359,22 +1442,71 @@ export async function waitAction(input: {
 	return ok(renderWait(results));
 }
 
-function listAgents(agents: AgentConfig[]): AgentToolResult<unknown> {
+export function renderAgentList(
+	agents: AgentConfig[],
+	team: ActiveTeam,
+	teamWarnings: string[],
+): string {
+	const lines =
+		team.name !== DEFAULT_TEAM || teamWarnings.length > 0
+			? [
+					`Active team: ${team.name} (source: ${team.source})`,
+					...teamWarnings.map((warning) => `Warning: ${warning}`),
+					"",
+				]
+			: [];
 	if (agents.length === 0) {
-		return ok(
+		lines.push(
 			"No agents found. Add definitions to ~/.pi/agent/agents/*.md or .pi/agents/*.md.",
 		);
+		return lines.join("\n");
 	}
-	const lines = agents.map((a) => {
-		const model = a.model ? ` (model: ${a.model})` : "";
-		// A frontmatter key that is accepted but does nothing is worse than an
-		// unknown one, because the user believes it is in effect.
-		const inert = a.unenforcedFields?.length
-			? `\n    ⚠ not enforced yet: ${a.unenforcedFields.join(", ")}`
-			: "";
-		return `${a.name} [${a.source}] — ${a.description}${model}${inert}`;
-	});
-	return ok(lines.join("\n"));
+	lines.push(
+		...agents.map((a) => {
+			const model = a.model ? ` (model: ${a.model})` : "";
+			// A frontmatter key that is accepted but does nothing is worse than an
+			// unknown one, because the user believes it is in effect.
+			const inert = a.unenforcedFields?.length
+				? `\n    ⚠ not enforced yet: ${a.unenforcedFields.join(", ")}`
+				: "";
+			return `${a.name} [${a.source}] — ${a.description}${model}${inert}`;
+		}),
+	);
+	return lines.join("\n");
+}
+
+/** Keep team details out of the legacy roster unless they add useful context. */
+export function renderParentRoster(
+	agents: AgentConfig[],
+	team: ActiveTeam,
+	teamWarnings: string[],
+): string {
+	const teamLines =
+		team.name !== DEFAULT_TEAM || teamWarnings.length > 0
+			? [
+					`Active subagent team: ${team.name}`,
+					...teamWarnings.map((warning) => `Team warning: ${warning}`),
+				]
+			: [];
+	return [...teamLines, formatAgentRoster(agents)].join("\n");
+}
+
+/** Only selected teams and explicit env overrides need to reach child processes. */
+function teamForChildren(team: ActiveTeam): { team?: ActiveTeam } {
+	return team.name !== DEFAULT_TEAM || team.source === "env" ? { team } : {};
+}
+
+/** Prefer a role under the active team, then fall back for existing children. */
+function findControlAgent(
+	agents: AgentConfig[],
+	allAgents: AgentConfig[],
+	roleName: string | undefined,
+): AgentConfig | undefined {
+	if (!roleName) return undefined;
+	return (
+		agents.find((agent) => agent.name === roleName) ??
+		allAgents.find((agent) => agent.name === roleName)
+	);
 }
 
 function findChild(

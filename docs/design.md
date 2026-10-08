@@ -601,6 +601,13 @@ preset 规则：
   "subagents": {
     "defaultModel": "cb/glm-5.3-flash",
     "defaultProvider": "cb",
+    "team": "frontend",
+    "teams": {
+      "frontend": {
+        "description": "UI work",
+        "members": ["designer", "prototype", { "agent": "worker", "model": "cb/kimi-k3" }]
+      }
+    },
     "agentOverrides": { "reviewer": { "model": "cb/claude-opus-5" } },
     "agentOverridesByProvider": { "cb": { "worker": { "model": "cb/glm-5.3-flash" } } },
     "presets": {
@@ -622,6 +629,14 @@ preset 规则：
   }
 }
 ```
+
+Team selection is resolved as `PI_SUBAGENTS_TEAM` > `subagents.team` >
+`default`. `default` keeps every discovered role; named teams select ordered
+string/object members, with `*` expanding all roles once and later object
+members applying the normal agent-override fields. Project team entries replace
+same-named user entries. Non-default team names are passed to child pane/tab
+processes as `PI_SUBAGENTS_TEAM`; `/subagents-team` manages project or user
+settings.
 
 ### 6.4 模型档位 profile（对齐 pi-subagents）
 

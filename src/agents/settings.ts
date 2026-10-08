@@ -6,13 +6,18 @@
  */
 
 import * as fs from "node:fs";
-import type {
-	HerdrSettings,
-	ModelScopeConfig,
-	OnBlockedPolicy,
-	Placement,
-	SubagentsSettings,
+import {
+	AGENT_KINDS,
+	type AgentOverride,
+	type HerdrSettings,
+	type ModelScopeConfig,
+	type OnBlockedPolicy,
+	type Placement,
+	type SubagentsSettings,
+	type TeamConfig,
+	type TeamMember,
 } from "../shared/types.ts";
+import { OVERRIDE_FIELDS } from "./overrides.ts";
 import { parseModelScopeConfig } from "./model-scope.ts";
 import { parsePresets } from "./presets.ts";
 
@@ -204,6 +209,8 @@ export function parseSubagentSettings(
 		parseOnBlocked(input.defaultOnBlocked, filePath),
 	);
 	setIf(out, "agentOverrides", parseAgentOverrides(input.agentOverrides, filePath));
+	setIf(out, "teams", parseTeams(input.teams, filePath));
+	setIf(out, "team", requiredString(input.team, "team", filePath));
 	setIf(out, "disableBuiltins", requiredBoolean(input.disableBuiltins, "disableBuiltins", filePath));
 	setIf(out, "disableThinking", requiredBoolean(input.disableThinking, "disableThinking", filePath));
 
@@ -268,33 +275,143 @@ function requiredBoolean(
 	return value;
 }
 
+/** True for a non-array JSON-style object. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function overrideFieldExpected(field: string): string | undefined {
+	if (["description", "model", "preset", "output", "systemPrompt"].includes(field)) return "a string";
+	if (field === "thinking") return "a string or false";
+	if (field === "kind") return `one of: ${AGENT_KINDS.join(", ")}`;
+	if (field === "placement") return "a valid placement";
+	if (field === "onBlocked") return "a valid onBlocked policy";
+	if (field === "systemPromptMode") return "replace or append";
+	if (["inheritProjectContext", "inheritSkills", "defaultProgress", "async", "completionGuard", "allowNestedSubagents", "disabled", "worktree", "steer"].includes(field)) return "a boolean";
+	if (["timeoutMs", "toolTimeoutMs", "maxSubagentDepth"].includes(field)) return "a number";
+	if (field === "skills") return "an array of strings or false";
+	if (["tools", "extensions", "subagentOnlyExtensions", "skillPath", "defaultReads", "fallbackModels", "alias"].includes(field)) return "an array of strings";
+	return undefined;
+}
+
+function isValidOverrideField(field: string, value: unknown): boolean {
+	if (["description", "model", "preset", "output", "systemPrompt"].includes(field)) return typeof value === "string";
+	if (field === "thinking") return typeof value === "string" || value === false;
+	if (field === "kind") return typeof value === "string" && (AGENT_KINDS as readonly string[]).includes(value);
+	if (field === "placement") return typeof value === "string" && VALID_PLACEMENTS.has(value);
+	if (field === "onBlocked") return typeof value === "string" && VALID_ON_BLOCKED_POLICIES.has(value);
+	if (field === "systemPromptMode") return value === "replace" || value === "append";
+	if (["inheritProjectContext", "inheritSkills", "defaultProgress", "async", "completionGuard", "allowNestedSubagents", "disabled", "worktree", "steer"].includes(field)) return typeof value === "boolean";
+	if (["timeoutMs", "toolTimeoutMs", "maxSubagentDepth"].includes(field)) return typeof value === "number";
+	if (field === "skills") return value === false || isStringArray(value);
+	if (["tools", "extensions", "subagentOnlyExtensions", "skillPath", "defaultReads", "fallbackModels", "alias"].includes(field)) return isStringArray(value);
+	return true;
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+/** Validate the types of the supported fields in one override object. */
+function parseAgentOverride(
+	value: unknown,
+	field: string,
+	filePath: string,
+): AgentOverride {
+	if (!isRecord(value)) {
+		throw new Error(
+			`Subagent settings in '${filePath}' have invalid '${field}'; expected an object of agent fields.`,
+		);
+	}
+	for (const [key, member] of Object.entries(value)) {
+		const expected = overrideFieldExpected(key);
+		if (
+			expected &&
+			(OVERRIDE_FIELDS as readonly string[]).includes(key) &&
+			!isValidOverrideField(key, member)
+		) {
+			throw new Error(
+				`Subagent settings in '${filePath}' have invalid '${field}.${key}'; expected ${expected}.`,
+			);
+		}
+	}
+	return value as AgentOverride;
+}
+
 /**
- * Validate `agentOverrides`.
- *
- * Each value must be an object. A scalar used to pass validation and was then
- * ignored by the field-by-field merge, so the override looked configured while
- * doing nothing (the F45 failure mode).
+ * Validate `agentOverrides`; scalar entries or invalid supported fields must not
+ * pass validation and then disappear during the field-by-field merge.
  */
 function parseAgentOverrides(
 	value: unknown,
 	filePath: string,
 ): SubagentsSettings["agentOverrides"] {
 	if (value === undefined) return undefined;
-	if (!value || typeof value !== "object" || Array.isArray(value)) {
+	if (!isRecord(value)) {
 		throw new Error(
 			`Subagent settings in '${filePath}' have invalid 'agentOverrides'; expected an object.`,
 		);
 	}
-	for (const [name, override] of Object.entries(
-		value as Record<string, unknown>,
-	)) {
-		if (!override || typeof override !== "object" || Array.isArray(override)) {
+	for (const [name, override] of Object.entries(value)) {
+		if (!isRecord(override)) {
 			throw new Error(
 				`Subagent settings in '${filePath}' have invalid 'agentOverrides.${name}'; expected an object of agent fields.`,
 			);
 		}
 	}
 	return value as SubagentsSettings["agentOverrides"];
+}
+
+type InvalidTeamSetting = (field: string, expected: string) => never;
+
+function parseTeamMember(
+	value: unknown,
+	field: string,
+	filePath: string,
+	bad: InvalidTeamSetting,
+): TeamMember {
+	if (typeof value === "string") {
+		if (!value.trim()) bad(field, "expected a non-empty string or agent object");
+		return value.trim();
+	}
+	if (!isRecord(value)) bad(field, "expected a non-empty string or agent object");
+	const agent = requiredString(value.agent, `${field}.agent`, filePath);
+	if (!agent) bad(`${field}.agent`, "expected a non-empty string");
+	const { agent: _agent, ...override } = value;
+	return { agent, ...parseAgentOverride(override, field, filePath) };
+}
+
+/** Validate the named team map and its ordered member references. */
+function parseTeams(
+	value: unknown,
+	filePath: string,
+): SubagentsSettings["teams"] {
+	if (value === undefined) return undefined;
+	const bad: InvalidTeamSetting = (field, expected) => {
+		throw new Error(`Subagent settings in '${filePath}' have invalid '${field}'; ${expected}.`);
+	};
+	if (!isRecord(value)) bad("teams", "expected an object");
+	const out = Object.create(null) as Record<string, TeamConfig>;
+	for (const [name, raw] of Object.entries(value)) {
+		const field = `teams.${name}`;
+		if (name === "default") bad(field, "'default' is reserved");
+		if (name === "__proto__") bad(field, "'__proto__' is not allowed");
+		if (!isRecord(raw)) bad(field, "expected an object");
+		if (!Array.isArray(raw.members) || raw.members.length === 0) {
+			bad(`${field}.members`, "expected a non-empty array");
+		}
+		const members = raw.members.map((member, index) =>
+			parseTeamMember(member, `${field}.members[${index}]`, filePath, bad),
+		);
+		if (raw.description !== undefined && typeof raw.description !== "string") {
+			bad(`${field}.description`, "expected a string");
+		}
+		out[name] = {
+			...(raw.description !== undefined ? { description: raw.description } : {}),
+			members,
+		};
+	}
+	return out;
 }
 
 /**
@@ -320,8 +437,9 @@ export function loadSubagentSettings(
 
 /**
  * Merge project settings over user settings.
- * `herdr`, `agentOverrides` and `presets` shallow-merge;
- * `modelScope` is replaced wholesale.
+ * `herdr`, `agentOverrides`, `teams` and `presets` shallow-merge;
+ * `modelScope` is replaced wholesale. A project team with the same name
+ * replaces the user's complete team definition.
  */
 export function resolveSubagentSettings(
 	user: SubagentsSettings,
@@ -352,6 +470,14 @@ export function resolveSubagentSettings(
 			...project.agentOverrides,
 		};
 	}
+
+	if (project.teams) {
+		out.teams = {
+			...(user.teams ?? {}),
+			...project.teams,
+		};
+	}
+	if (project.team !== undefined) out.team = project.team;
 
 	if (project.herdr) {
 		out.herdr = { ...(user.herdr ?? {}), ...project.herdr };

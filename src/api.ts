@@ -82,6 +82,14 @@ export {
 	parseSubagentSettings,
 	resolveSubagentSettings,
 } from "./agents/settings.ts";
+export {
+	applyTeam,
+	listTeamNames,
+	resolveActiveTeamName,
+	DEFAULT_TEAM,
+	TEAM_ENV,
+} from "./agents/teams.ts";
+export type { ActiveTeam } from "./agents/teams.ts";
 export type { LoadSettingsOptions } from "./agents/settings.ts";
 export { getAgentDir } from "./agents/paths.ts";
 
@@ -112,7 +120,14 @@ export {
 	refreshProviderModelCatalog,
 	resolveProfilePaths,
 } from "./profiles/profiles.ts";
-export { registerProfileCommands, sendSlashText } from "./extension/slash.ts";
+export {
+	parseTeamCommandArgs,
+	registerProfileCommands,
+	registerTeamCommand,
+	renderTeamStatus,
+	sendSlashText,
+	updateSubagentSettingsFile,
+} from "./extension/slash.ts";
 export {
 	aggregateSubagentRuns,
 	formatSubagentSummary,
@@ -266,6 +281,9 @@ export type {
 	AcceptanceResult,
 	AgentConfig,
 	AgentDiscoveryResult,
+	AgentOverride,
+	TeamConfig,
+	TeamMember,
 	AgentInfo,
 	AgentKind,
 	AgentScope,

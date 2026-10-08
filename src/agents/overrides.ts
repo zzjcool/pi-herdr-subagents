@@ -8,15 +8,16 @@
 
 import type {
 	AgentConfig,
+	AgentOverride,
 	ModelSourceInfo,
 	OnBlockedPolicy,
 	SubagentsSettings,
 } from "../shared/types.ts";
 
-type Override = NonNullable<SubagentsSettings["agentOverrides"]>[string];
+type Override = AgentOverride;
 
 /** Every field an override may set. Kept explicit so typos are caught at review time. */
-const OVERRIDE_FIELDS = [
+export const OVERRIDE_FIELDS = [
 	// scalars
 	"description",
 	"model",
