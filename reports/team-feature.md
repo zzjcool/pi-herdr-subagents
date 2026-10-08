@@ -8145,5 +8145,5 @@ WORKTREE UNCHANGED BY TEMP-COPY MUTATION: yes
 
 ### MR/PR 与未决问题
 
-- MR/PR: **待创建**。
+- MR/PR: https://github.com/zzjcool/pi-herdr-subagents/pull/3
 - 未决问题：无；最终验证序列中 typecheck、571 个 unit tests、102 个 integration tests 全部通过。
