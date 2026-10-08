@@ -30,6 +30,7 @@ whole launch path.
 - [Presets (kind+model+thinking)](#presets-kindmodelthinking)
 - [Model profiles (cheap / medium / strong)](#model-profiles-cheap--medium--strong)
 - [Settings](#settings)
+- [Teams](#teams)
 - [Custom agents](#custom-agents)
 - [Isolation](#isolation)
 - [Success and failure](#success-and-failure)
@@ -364,6 +365,13 @@ Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
   "subagents": {
     "defaultModel": "provider/id",
     "defaultOnBlocked": "auto-approve",
+    "team": "frontend",
+    "teams": {
+      "frontend": {
+        "description": "UI work",
+        "members": ["designer", "prototype", { "agent": "worker", "model": "provider/strong" }]
+      }
+    },
     "disableBuiltins": false,
     "maxSubagentSpawnsPerSession": 8,
     "agentOverrides": {
@@ -388,6 +396,8 @@ Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
 | --- | --- |
 | `defaultModel` | Fallback model for roles that do not pin one |
 | `defaultOnBlocked` | Fallback `onBlocked` for roles that do not set one (default `auto-approve`; `forward` restores a human confirm in the parent TUI) |
+| `team` | Project/user-selected team name; `PI_SUBAGENTS_TEAM` takes precedence |
+| `teams` | Named role lists; project entries with the same name replace the user entry |
 | `presets` | Named kind+model+thinking bundles, referenced via `preset:` — they beat `agentOverrides`, lose to the tool `model` |
 | `agentOverrides` | Per-role field overlay (`model`, `thinking`, `preset`, `tools`, `disabled`, …) |
 | `agentOverridesByProvider` | Same overlay, keyed by the **parent** provider id |
@@ -400,6 +410,45 @@ Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
 Run records and child session jsonl live under `<cwd>/.pi-subagents/`. That
 directory is the resume credential; do not delete it while you still want to
 `resume` a child.
+
+## Teams
+
+Teams select a named subset of discovered roles without changing the role files:
+
+```json
+{
+  "subagents": {
+    "teams": {
+      "frontend": {
+        "description": "UI work",
+        "members": [
+          "designer",
+          "prototype",
+          { "agent": "worker", "model": "provider/strong" }
+        ]
+      },
+      "full+": { "members": ["*", { "agent": "worker", "model": "provider/strong" }] }
+    },
+    "team": "frontend"
+  }
+}
+```
+
+Use `/subagents-team` to show the active team, `/subagents-team list` to list
+teams, `/subagents-team use <name>` to select one in project settings, and add
+`--global` to write user settings. `/subagents-team create <name> a,b,c`
+creates a team. The selection priority is
+`PI_SUBAGENTS_TEAM` > `subagents.team` > `default`; whitespace-only environment
+values are ignored. `default` means all discovered roles and returns the
+unfiltered catalog. A missing selected team also falls back to all roles with a
+warning.
+
+A string member names a role, and `"*"` expands to every discovered role once,
+preserving first-seen order. An object member reuses the normal
+`agentOverrides` fields (including `model`, `thinking`, `kind`, and `disabled`);
+its fields are applied after earlier members, so later objects win. The active
+team name is injected into child pane/tab processes as `PI_SUBAGENTS_TEAM` for
+non-default teams, so nested children inherit the same selection.
 
 ## Custom agents
 

@@ -12,6 +12,7 @@
  *   /subagents-agents [user|project|both]
  */
 
+import * as path from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -32,13 +33,64 @@ import {
 	PROFILES_DIR_NAME,
 	readSubagentProfile,
 	refreshProviderModelCatalog,
+	readSettingsFile,
+	writeJsonFile,
 	type ModelRegistryLike,
 } from "../profiles/profiles.ts";
 import { classifyModelOrigin, resolveStepModel } from "../agents/step-model.ts";
 import { checkModelScope } from "../agents/model-scope.ts";
 import { nativeModelFor } from "../runs/kind.ts";
+import {
+	DEFAULT_TEAM,
+	TEAM_ENV,
+	listTeamNames,
+	type ActiveTeam,
+} from "../agents/teams.ts";
+import { getAgentDir } from "../agents/paths.ts";
 
 export const SLASH_TEXT_RESULT_TYPE = "subagent-slash-text";
+
+export type TeamCommandArgs =
+	| { action: "show" }
+	| { action: "list" }
+	| { action: "use"; name: string; global: boolean }
+	| { action: "create"; name: string; members: string[]; global: boolean };
+
+/** Pure parser for /subagents-team arguments. */
+export function parseTeamCommandArgs(
+	args: string,
+): { ok: true; value: TeamCommandArgs } | { ok: false; message: string } {
+	const usage =
+		"Usage: /subagents-team [list|use <name> [--global]|create <name> a,b,c [--global]]";
+	const trimmed = args.trim();
+	if (!trimmed) return { ok: true, value: { action: "show" } };
+	const tokens = trimmed.split(/\s+/).filter(Boolean);
+	const action = tokens.shift();
+	if (action === "list" && tokens.length === 0)
+		return { ok: true, value: { action: "list" } };
+	if (action !== "use" && action !== "create")
+		return { ok: false, message: usage };
+	const global = tokens.includes("--global");
+	const rest = tokens.filter((token) => token !== "--global");
+	if (tokens.filter((token) => token === "--global").length > 1)
+		return { ok: false, message: usage };
+	if (action === "use") {
+		if (rest.length !== 1 || !rest[0]?.trim())
+			return { ok: false, message: usage };
+		return { ok: true, value: { action, name: rest[0].trim(), global } };
+	}
+	if (rest.length < 2 || !rest[0]?.trim())
+		return { ok: false, message: usage };
+	const memberText = rest.slice(1).join(" ");
+	const rawMembers = memberText.split(",");
+	const members = rawMembers.map((member) => member.trim());
+	if (members.some((member) => !member))
+		return { ok: false, message: usage };
+	return {
+		ok: true,
+		value: { action, name: rest[0].trim(), members, global },
+	};
+}
 
 export interface ProfileCommandDeps {
 	getModelRegistry?: () => ModelRegistryLike | undefined;
@@ -153,6 +205,18 @@ function providerCompletions(
 
 function notifyError(ctx: ExtensionCommandContext, error: unknown): void {
 	ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+}
+
+function assertCreatableTeamName(
+	name: string,
+	...catalogs: Array<Record<string, unknown>>
+): void {
+	if (name === DEFAULT_TEAM || name === "__proto__") {
+		throw new Error(`Team name "${name}" is reserved.`);
+	}
+	if (catalogs.some((teams) => Object.hasOwn(teams, name))) {
+		throw new Error(`Team "${name}" already exists; edit it manually instead.`);
+	}
 }
 
 async function maybeSwitchSessionModel(
@@ -447,6 +511,8 @@ export function parseAgentsScopeArg(
  */
 export function renderAgentsListing(input: {
 	agents: AgentConfig[];
+	team?: ActiveTeam;
+	teamWarnings?: string[];
 	scope: AgentScope;
 	projectAgentsDir: string | null;
 	builtinAgentsDir: string;
@@ -456,6 +522,11 @@ export function renderAgentsListing(input: {
 }): string {
 	const { agents, scope } = input;
 	const lines: string[] = ["Subagent roles", `Scope: ${scope}`];
+	const teamWarnings = input.teamWarnings ?? [];
+	if (input.team && (input.team.name !== DEFAULT_TEAM || teamWarnings.length > 0)) {
+		lines.push(`Active team: ${input.team.name} (source: ${input.team.source})`);
+	}
+	lines.push(...teamWarnings.map((warning) => `Warning: ${warning}`));
 
 	const groupOrder: Array<AgentConfig["source"]> = ["builtin", "user", "project"];
 	for (const group of groupOrder) {
@@ -606,9 +677,25 @@ export interface AgentsCommandDeps {
 	}) => {
 		agents: AgentConfig[];
 		settings: SubagentsSettings;
+		team?: ActiveTeam;
+		teamWarnings?: string[];
 		projectAgentsDir: string | null;
 		builtinAgentsDir: string;
 		userAgentsDir?: string;
+	};
+}
+
+export interface TeamCommandDeps {
+	loadCatalog: (input: {
+		sessionCwd: string;
+		runCwd: string;
+		scope: AgentScope | undefined;
+	}) => {
+		agents: AgentConfig[];
+		allAgents: AgentConfig[];
+		settings: SubagentsSettings;
+		team: ActiveTeam;
+		teamWarnings: string[];
 	};
 }
 
@@ -643,10 +730,16 @@ export function registerAgentsCommand(
 					const dispatchModel = ctx.model
 						? `${ctx.model.provider}/${ctx.model.id}`
 						: undefined;
+					const teamWarnings = catalog.teamWarnings ?? [];
 					sendSlashText(
 						pi,
 						renderAgentsListing({
 							agents: catalog.agents,
+							...(catalog.team &&
+							(catalog.team.name !== DEFAULT_TEAM || teamWarnings.length > 0)
+								? { team: catalog.team }
+								: {}),
+							teamWarnings,
 							scope: parsed.scope ?? "user",
 							projectAgentsDir: catalog.projectAgentsDir,
 							builtinAgentsDir: catalog.builtinAgentsDir,
@@ -656,6 +749,159 @@ export function registerAgentsCommand(
 							settings: catalog.settings,
 							...(dispatchModel ? { dispatchModel } : {}),
 						}),
+					);
+				});
+			} catch (error) {
+				notifyError(ctx, error);
+			}
+		},
+	});
+}
+
+/** Render the current team status for the no-argument command. */
+export function renderTeamStatus(input: {
+	agents: AgentConfig[];
+	team: ActiveTeam;
+	warnings?: string[];
+}): string {
+	const members = input.agents.map((agent) => agent.name);
+	const source = input.team.source;
+	const lines = [
+		`Active subagent team: ${input.team.name}`,
+		`Source: ${source}`,
+		`Members (${members.length}): ${members.join(", ") || "(none)"}`,
+	];
+	for (const warning of input.warnings ?? []) lines.push(`Warning: ${warning}`);
+	return lines.join("\n");
+}
+
+/** Preserve all unrelated settings while changing one subagents field. */
+export function updateSubagentSettingsFile(
+	filePath: string,
+	update: (subagents: Record<string, unknown>) => void,
+): void {
+	const document = readSettingsFile(filePath);
+	const raw = document.subagents;
+	if (
+		raw !== undefined &&
+		(!raw || typeof raw !== "object" || Array.isArray(raw))
+	) {
+		throw new Error(`Settings file '${filePath}' has an invalid 'subagents' object.`);
+	}
+	const subagents = { ...(raw as Record<string, unknown> | undefined) };
+	update(subagents);
+	document.subagents = subagents;
+	writeJsonFile(filePath, document);
+}
+
+/** Register /subagents-team [list|use|create]. */
+export function registerTeamCommand(
+	pi: ExtensionAPI,
+	deps: TeamCommandDeps,
+): void {
+	pi.registerCommand("subagents-team", {
+		description: "Show, list, switch, or create subagent teams",
+		handler: async (args, ctx) => {
+			const parsed = parseTeamCommandArgs(args);
+			if (parsed.ok === false) {
+				ctx.ui.notify(parsed.message, "error");
+				return;
+			}
+			try {
+				await withSlashStatus(ctx, "Loading subagent teams…", async () => {
+					const catalog = deps.loadCatalog({
+						sessionCwd: ctx.cwd,
+						runCwd: ctx.cwd,
+						scope: undefined,
+					});
+					const team = catalog.team;
+					const warnings = catalog.teamWarnings;
+					const settingsPath = (global: boolean): string =>
+						path.join(
+							global ? getAgentDir() : ctx.cwd,
+							...(global ? [] : [".pi"]),
+							"settings.json",
+						);
+					if (parsed.value.action === "show") {
+						sendSlashText(
+							pi,
+							renderTeamStatus({
+								agents: catalog.agents,
+								team,
+								warnings,
+							}),
+						);
+						return;
+					}
+					if (parsed.value.action === "list") {
+						const names = listTeamNames(catalog.settings);
+						const lines = ["Subagent teams"];
+						for (const name of names) {
+							const teams = catalog.settings.teams ?? {};
+							const config = Object.hasOwn(teams, name) ? teams[name] : undefined;
+							const marker = name === team.name ? "* " : "  ";
+							const description =
+								name === DEFAULT_TEAM
+									? "all discovered agents"
+									: config?.description ?? "(no description)";
+							const count =
+								name === DEFAULT_TEAM
+									? catalog.allAgents.length
+									: config?.members.length ?? 0;
+							lines.push(`${marker}${name} — ${description} (${count} members)`);
+						}
+						if (!names.includes(team.name)) {
+							lines.push(`* ${team.name} — (not defined; using all agents)`);
+						}
+						if (warnings.length) lines.push(...warnings.map((w) => `Warning: ${w}`));
+						sendSlashText(pi, lines.join("\n"));
+						return;
+					}
+
+					const command = parsed.value;
+					const available = listTeamNames(catalog.settings);
+					const target = settingsPath(command.global);
+					if (command.action === "use") {
+						const teams = catalog.settings.teams ?? {};
+						if (
+							command.name !== DEFAULT_TEAM &&
+							!Object.hasOwn(teams, command.name)
+						) {
+							throw new Error(
+								`Unknown team "${command.name}". Available: ${available.join(", ")}.`,
+							);
+						}
+						updateSubagentSettingsFile(target, (subagents) => {
+							subagents.team = command.name;
+						});
+						const envNotice = process.env[TEAM_ENV]?.trim()
+							? ` Environment ${TEAM_ENV} is set and overrides this setting.`
+							: "";
+						sendSlashText(
+							pi,
+							`Subagent team set to "${command.name}" in ${target}.${envNotice} Next prompt will use it.`,
+						);
+						return;
+					}
+					updateSubagentSettingsFile(target, (subagents) => {
+						const fileTeams = subagents.teams;
+						if (
+							fileTeams !== undefined &&
+							(!fileTeams || typeof fileTeams !== "object" || Array.isArray(fileTeams))
+						) {
+							throw new Error(`Settings file '${target}' has an invalid 'subagents.teams' object.`);
+						}
+						const teams = Object.assign(
+							Object.create(null) as Record<string, unknown>,
+							fileTeams as Record<string, unknown> | undefined,
+						);
+						assertCreatableTeamName(command.name, catalog.settings.teams ?? {}, teams);
+						teams[command.name] = { members: command.members };
+						subagents.teams = teams;
+					});
+					sendSlashText(
+						pi,
+						`Created subagent team ${command.name}. Select it with /subagents-team use ${command.name}`,
 					);
 				});
 			} catch (error) {

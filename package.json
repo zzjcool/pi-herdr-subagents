@@ -32,9 +32,6 @@
     ],
     "skills": [
       "./skills"
-    ],
-    "prompts": [
-      "./prompts"
     ]
   },
   "files": [
@@ -42,7 +39,6 @@
     "src/**/*.ts",
     "agents/**/*.md",
     "skills/**/*",
-    "prompts/**/*.md",
     "docs/**/*.md",
     "README.md",
     "CONTRIBUTING.md",

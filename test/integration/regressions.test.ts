@@ -502,6 +502,120 @@ test("regression: lineage also survives the new-tab fallback", async () => {
 	}
 });
 
+test("regression: active team env reaches split and tab children, but default omits it", async () => {
+	const saved = process.env.HERDR_PANE_ID;
+	const splitDir = mkdtempSync(path.join(tmpdir(), "regress-team-split-"));
+	const teamTabDir = mkdtempSync(path.join(tmpdir(), "regress-team-tab-"));
+	const defaultSplitDir = mkdtempSync(path.join(tmpdir(), "regress-team-default-split-"));
+	const defaultDir = mkdtempSync(path.join(tmpdir(), "regress-team-default-tab-"));
+	const defaultEnvDir = mkdtempSync(path.join(tmpdir(), "regress-team-default-env-"));
+	try {
+		process.env.HERDR_PANE_ID = "w1:p1";
+		const splitFake = new FakeHerdr();
+		splitFake.addRootPane("w1");
+		const splitOrchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(splitFake)),
+			runDir: splitDir,
+			cwd: "/tmp",
+			team: { name: "frontend", source: "settings" },
+			sleep: async (ms) => splitFake.advance(ms),
+		});
+		await splitOrchestrator.launch({ agent: agent({ name: "worker" }), task: "one" });
+		await splitOrchestrator.launch({ agent: agent({ name: "worker" }), task: "two" });
+		const split = splitFake.commands.find(
+			(command) => command.args[0] === "pane" && command.args[1] === "split",
+		);
+		assert.ok(split, "team split must have happened");
+		assert.match(split.args.join(" "), /PI_SUBAGENTS_TEAM=frontend/);
+
+		delete process.env.HERDR_PANE_ID;
+		const teamTabFake = new FakeHerdr();
+		teamTabFake.addRootPane("w1");
+		const teamTabOrchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(teamTabFake)),
+			runDir: teamTabDir,
+			cwd: "/tmp",
+			team: { name: "frontend", source: "settings" },
+			sleep: async (ms) => teamTabFake.advance(ms),
+		});
+		await teamTabOrchestrator.launch({
+			agent: agent({ name: "worker", placement: "new-tab" }),
+			task: "tab",
+		});
+		const teamTab = teamTabFake.commands.find(
+			(command) => command.args[0] === "tab" && command.args[1] === "create",
+		);
+		assert.ok(teamTab, "team tab must have been created");
+		assert.match(teamTab.args.join(" "), /PI_SUBAGENTS_TEAM=frontend/);
+
+		const defaultSplitFake = new FakeHerdr();
+		defaultSplitFake.addRootPane("w1");
+		const defaultSplitOrchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(defaultSplitFake)),
+			runDir: defaultSplitDir,
+			cwd: "/tmp",
+			sleep: async (ms) => defaultSplitFake.advance(ms),
+		});
+		await defaultSplitOrchestrator.launch({ agent: agent({ name: "worker" }), task: "one" });
+		await defaultSplitOrchestrator.launch({ agent: agent({ name: "worker" }), task: "two" });
+		const defaultSplit = defaultSplitFake.commands.find(
+			(command) => command.args[0] === "pane" && command.args[1] === "split",
+		);
+		assert.ok(defaultSplit, "default split must have happened");
+		assert.doesNotMatch(defaultSplit.args.join(" "), /PI_SUBAGENTS_TEAM=/);
+		const defaultTypeTab = defaultSplitFake.commands.find(
+			(command) => command.args[0] === "tab" && command.args[1] === "create",
+		);
+		assert.ok(defaultTypeTab, "default type tab must have been created");
+		assert.doesNotMatch(defaultTypeTab.args.join(" "), /PI_SUBAGENTS_TEAM=/);
+
+		const defaultFake = new FakeHerdr();
+		defaultFake.addRootPane("w1");
+		const defaultOrchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(defaultFake)),
+			runDir: defaultDir,
+			cwd: "/tmp",
+			sleep: async (ms) => defaultFake.advance(ms),
+		});
+		await defaultOrchestrator.launch({
+			agent: agent({ name: "worker", placement: "new-tab" }),
+			task: "default",
+		});
+		const defaultTab = defaultFake.commands.find(
+			(command) => command.args[0] === "tab" && command.args[1] === "create",
+		);
+		assert.ok(defaultTab, "default new tab must have been created");
+		assert.doesNotMatch(defaultTab.args.join(" "), /PI_SUBAGENTS_TEAM=/);
+
+		const defaultEnvFake = new FakeHerdr();
+		defaultEnvFake.addRootPane("w1");
+		const defaultEnvOrchestrator = new Orchestrator({
+			client: createHerdrClient(createFakeRunner(defaultEnvFake)),
+			runDir: defaultEnvDir,
+			cwd: "/tmp",
+			team: { name: "default", source: "env" },
+			sleep: async (ms) => defaultEnvFake.advance(ms),
+		});
+		await defaultEnvOrchestrator.launch({
+			agent: agent({ name: "worker", placement: "new-tab" }),
+			task: "environment default",
+		});
+		const defaultEnvTab = defaultEnvFake.commands.find(
+			(command) => command.args[0] === "tab" && command.args[1] === "create",
+		);
+		assert.ok(defaultEnvTab, "env-selected default tab must have been created");
+		assert.match(defaultEnvTab.args.join(" "), /PI_SUBAGENTS_TEAM=default/);
+	} finally {
+		if (saved === undefined) delete process.env.HERDR_PANE_ID;
+		else process.env.HERDR_PANE_ID = saved;
+		rmSync(splitDir, { recursive: true, force: true });
+		rmSync(teamTabDir, { recursive: true, force: true });
+		rmSync(defaultSplitDir, { recursive: true, force: true });
+		rmSync(defaultDir, { recursive: true, force: true });
+		rmSync(defaultEnvDir, { recursive: true, force: true });
+	}
+});
+
 test("regression: nesting beyond maxDepth is refused", async () => {
 	const runDir = mkdtempSync(path.join(tmpdir(), "regress-depth-"));
 	try {

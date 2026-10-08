@@ -638,6 +638,17 @@ export interface HerdrSettings {
 	sessionRetentionMaxBytesPerRun?: number;
 }
 
+export type AgentOverride = Partial<AgentConfig> & { disabled?: boolean };
+
+export type TeamMember =
+	| string
+	| ({ agent: string } & AgentOverride);
+
+export interface TeamConfig {
+	description?: string;
+	members: TeamMember[];
+}
+
 export interface SubagentsSettings {
 	defaultModel?: string;
 	defaultProvider?: string;
@@ -649,7 +660,9 @@ export interface SubagentsSettings {
 		 * dialog nobody is watching.
 		 */
 	defaultOnBlocked?: OnBlockedPolicy;
-	agentOverrides?: Record<string, Partial<AgentConfig> & { disabled?: boolean }>;
+	agentOverrides?: Record<string, AgentOverride>;
+	teams?: Record<string, TeamConfig>;
+	team?: string;
 	/**
 	 * Named kind+model+thinking bundles, referenced by `preset:` (frontmatter,
 	 * agentOverrides, or tool param). A preset wins over `agentOverrides` and

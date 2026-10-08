@@ -32,6 +32,11 @@ import {
 	TOOL_TIMEOUT_MS_ENV,
 } from "../extension/budget.ts";
 import { modelCandidates } from "../agents/model-resolution.ts";
+import {
+	DEFAULT_TEAM,
+	TEAM_ENV,
+	type ActiveTeam,
+} from "../agents/teams.ts";
 import { nativeModelFor } from "./kind.ts";
 import {
 	countAssistantMessages,
@@ -136,6 +141,8 @@ export interface OrchestratorDeps {
 	 * another parent in the same Space does not adopt this tab.
 	 */
 	parentPaneId?: string;
+	/** Active team selection to inherit into child panes. */
+	team?: ActiveTeam;
 	/**
 	 * Root of the cursor chat stores, overriding `~/.cursor/chats` — injects
 	 * the fake's store root in tests.
@@ -358,6 +365,7 @@ export class Orchestrator {
 	private readonly workspaceId?: string;
 	/** Parent pane id used to uniquify type-tab labels across parent Pis. */
 	private readonly parentPaneId?: string;
+	private readonly team?: ActiveTeam;
 	/** Per-kind integration guard outcome, so one session probes/installs once. */
 	private readonly integrationChecked = new Map<AgentKind, boolean>();
 	/** Last type-tab used by a child of this orchestrator. */
@@ -396,6 +404,7 @@ export class Orchestrator {
 		const rawParentPaneId =
 			deps.parentPaneId ?? process.env.HERDR_PANE_ID;
 		this.parentPaneId = rawParentPaneId?.trim() || undefined;
+		this.team = deps.team;
 	}
 
 	/** The lineage path a child of this process would receive. */
@@ -1109,6 +1118,12 @@ export class Orchestrator {
 			[CHILD_ENV]: "1",
 			[CHILD_ROLE_ENV]: agent?.name ?? "",
 		};
+		if (
+			this.team &&
+			(this.team.name !== DEFAULT_TEAM || this.team.source === "env")
+		) {
+			env[TEAM_ENV] = this.team.name;
+		}
 		if (agent?.acceptance?.role) {
 			env[CHILD_ACCEPTANCE_ROLE_ENV] = agent.acceptance.role;
 		}
