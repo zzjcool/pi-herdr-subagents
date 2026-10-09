@@ -55,6 +55,7 @@ import {
 	registerProfileCommands,
 	registerAgentsCommand,
 	registerTeamCommand,
+	registerToggleCommand,
 } from "./src/extension/slash.ts";
 import { registerSummaryCommand } from "./src/extension/summary.ts";
 import {
@@ -261,6 +262,37 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	});
 	registerSummaryCommand(pi);
 
+	// ── Master switch ────────────────────────────────────────────────────
+	// Session-level override over `subagents.enabled` (user+project settings).
+	// `undefined` means "follow settings" so /reload picks up file changes;
+	// the toggle command is what writes to this variable.
+	let sessionEnabledOverride: boolean | undefined;
+	/** Effective enabled state: session override > merged settings. */
+	const subagentsEnabled = (cwd: string): boolean =>
+		sessionEnabledOverride ??
+		loadSubagentSettings({
+			userSettingsPath: path.join(getAgentDir(), "settings.json"),
+			projectSettingsPath: path.join(cwd, ".pi", "settings.json"),
+		}).enabled !==
+		false;
+
+	registerToggleCommand(pi, {
+		sessionEnabled: () => subagentsEnabled(lastCwd),
+		setSessionEnabled: (enabled) => {
+			sessionEnabledOverride = enabled;
+		},
+		settingsEnabled: (cwd) =>
+			loadSubagentSettings({
+				userSettingsPath: path.join(getAgentDir(), "settings.json"),
+				projectSettingsPath: path.join(cwd, ".pi", "settings.json"),
+			}).enabled !== false,
+		runningChildren: () =>
+			runtime
+				.activeJobs()
+				.filter((job) => job.state === "working" || job.state === "blocked")
+				.length,
+	});
+
 	// The human-facing roster: what the model gets injected into its system
 	// prompt each turn, but on demand and with resolved models. The catalog
 	// loading is the same function the tool uses, so the two listings cannot
@@ -291,6 +323,17 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 			ctx: ExtensionContext,
 		): Promise<AgentToolResult<unknown>> {
 			runtime.bind(ctx);
+			// Master switch: refuse NEW launches with a pointer to the toggle;
+			// control actions (status/collect/wait/…) must stay available so a
+			// disable with live children remains observable and collectable.
+			const action = params.action ?? "launch";
+			if (!subagentsEnabled(ctx.cwd) && (action === "launch" || !action)) {
+				return fail(
+					"subagents are disabled (subagents.enabled: false or /subagents-toggle off). " +
+						"Existing children are unaffected; re-enable with /subagents-toggle on.",
+					ErrorCodes.DISABLED,
+				);
+			}
 			const client = createHerdrClient();
 			if (!(await client.available())) {
 				return fail(
@@ -299,7 +342,6 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 				);
 			}
 
-			const action = params.action ?? "launch";
 			const cwd = params.cwd ?? ctx.cwd;
 			const store = new RunStore({ rootDir: path.join(cwd, ".pi-subagents") });
 			const catalog = loadCatalog(ctx.cwd, cwd, params.agentScope);
@@ -348,6 +390,9 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", (event, ctx) => {
 		if (isChild && !allowNested) return;
+		// Master switch: when disabled, stop injecting the playbook and the
+		// roster so the model is not coached toward a tool that will refuse.
+		if (!subagentsEnabled(ctx?.cwd ?? lastCwd)) return;
 		const tools = event.systemPromptOptions?.selectedTools;
 		if (Array.isArray(tools) && !tools.includes("subagent")) return;
 		if (ctx?.cwd) lastCwd = ctx.cwd;
@@ -361,8 +406,13 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 		};
 	});
 
-	pi.on("tool_call", (event) => {
+	pi.on("tool_call", (event, ctx) => {
 		if (event.toolName !== "bash") return;
+		// Master switch: when disabled, the user (or the model) may legitimately
+		// drive herdr by hand; the guard only makes sense while we own dispatch.
+		// Prefer the event's own ctx over lastCwd: it cannot go stale between
+		// the bindUi events that maintain lastCwd.
+		if (!subagentsEnabled(ctx?.cwd ?? lastCwd)) return;
 		const command =
 			typeof event.input.command === "string" ? event.input.command : "";
 		const reason = forbiddenDispatchReason(command);

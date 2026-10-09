@@ -615,6 +615,7 @@ preset 规则：
       "strong": { "kind": "pi", "model": "cb/kimi-k3", "thinking": "high" }
     },
     "modelScope": { "enforce": true, "allow": ["cb/*"] },
+    "enabled": true,
     "disableBuiltins": false,
     "disableThinking": false,
     "maxSubagentSpawnsPerSession": 8,
@@ -637,6 +638,16 @@ members applying the normal agent-override fields. Project team entries replace
 same-named user entries. Non-default team names are passed to child pane/tab
 processes as `PI_SUBAGENTS_TEAM`; `/subagents-team` manages project or user
 settings.
+
+### 6.4 总开关 `subagents.enabled`
+
+解析顺序：会话内覆盖（`/subagents-toggle`，仅内存，`/reload` 后回落） >
+项目 `.pi/settings.json` > 用户 `~/.pi/agent/settings.json` > 默认 `true`。
+
+关闭后：launch 拒绝（`DISABLED` 错误码，指向 `/subagents-toggle on`）；
+system prompt 不再注入 playbook/roster；bash 派发 guard 放行手动 herdr
+命令。已有 children 不受影响——正常完成并通知，`status`/`collect`/
+`wait`/`resume`/`steer` 继续可用。
 
 ### 6.4 模型档位 profile（对齐 pi-subagents）
 

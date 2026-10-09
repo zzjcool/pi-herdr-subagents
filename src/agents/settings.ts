@@ -199,6 +199,8 @@ export function parseSubagentSettings(
 	const input = raw as Record<string, unknown>;
 	const out: SubagentsSettings = {};
 
+	setIf(out, "enabled", requiredBoolean(input.enabled, "enabled", filePath));
+
 	// Each reader validates one field and returns `undefined` when absent, so a
 	// missing key and a rejected key stay distinguishable (only the latter throws).
 	setIf(out, "defaultModel", requiredString(input.defaultModel, "defaultModel", filePath));
@@ -446,6 +448,8 @@ export function resolveSubagentSettings(
 	project: SubagentsSettings,
 ): SubagentsSettings {
 	const out: SubagentsSettings = { ...user };
+
+	if (project.enabled !== undefined) out.enabled = project.enabled;
 
 	if (project.defaultModel !== undefined)
 		out.defaultModel = project.defaultModel;

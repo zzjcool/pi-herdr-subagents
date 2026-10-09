@@ -658,6 +658,13 @@ export interface TeamConfig {
 }
 
 export interface SubagentsSettings {
+	/**
+	 * Master switch (default true). `false` stops new launches, system-prompt
+	 * roster injection, and the bash dispatch guard. Already-running children
+	 * are untouched: control actions (status/collect/wait/…) stay available.
+	 * Project `.pi/settings.json` wins over the user file.
+	 */
+	enabled?: boolean;
 	defaultModel?: string;
 	defaultProvider?: string;
 	/**
@@ -744,6 +751,7 @@ export class SubagentError extends Error {
 
 export const ErrorCodes = {
 	HERDR_UNAVAILABLE: "HERDR_UNAVAILABLE",
+	DISABLED: "DISABLED",
 	PANE_BUSY: "PANE_BUSY",
 	START_FAILED: "START_FAILED",
 	START_TIMEOUT: "START_TIMEOUT",

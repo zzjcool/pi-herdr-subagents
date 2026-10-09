@@ -30,6 +30,7 @@ whole launch path.
 - [Presets (kind+model+thinking)](#presets-kindmodelthinking)
 - [Model profiles (cheap / medium / strong)](#model-profiles-cheap--medium--strong)
 - [Settings](#settings)
+- [Master switch](#master-switch)
 - [Teams](#teams)
 - [Custom agents](#custom-agents)
 - [Isolation](#isolation)
@@ -333,7 +334,7 @@ pane in the current working directory, or `/subagents-summary <name>` for one
 child's detailed state, timing, usage, and session path. Child names are
 available through command completion.
 
-You can still hand-write the same mapping:
+you can still hand-write the same mapping:
 
 ```json
 {
@@ -348,6 +349,29 @@ You can still hand-write the same mapping:
   }
 }
 ```
+
+## Master switch
+
+Two levels, both temporary-by-design:
+
+- **Session** — `/subagents-toggle` flips the switch for the current session
+  only. No files change; `/reload` restores whatever the settings say.
+  `/subagents-toggle` (no args) shows the current state; `on`/`off` are
+  explicit; the status line also warns how many children are still running.
+- **Project / user settings** — `"subagents": { "enabled": false }` in
+  `<repo>/.pi/settings.json` (project wins over `~/.pi/agent/settings.json`)
+  persists the off state across sessions.
+
+While disabled:
+
+- New launches are refused with a pointer to `/subagents-toggle on`.
+- The system-prompt roster/playbook injection stops (next turn), so the model
+  is not coached toward a tool that refuses.
+- The bash guard stops blocking manual `herdr` commands — you are free to
+  drive herdr by hand.
+- **Existing children are untouched**: they keep running and notify normally,
+  and `status`/`collect`/`wait`/`resume`/`steer` keep working, so a disable
+  mid-flight stays observable.
 
 ## Settings
 
@@ -401,6 +425,7 @@ Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
 | `presets` | Named kind+model+thinking bundles, referenced via `preset:` — they beat `agentOverrides`, lose to the tool `model` |
 | `agentOverrides` | Per-role field overlay (`model`, `thinking`, `preset`, `tools`, `disabled`, …) |
 | `agentOverridesByProvider` | Same overlay, keyed by the **parent** provider id |
+| `enabled` | Master switch: `false` disables launches, roster injection, and the bash guard (see [Master switch](#master-switch)) |
 | `modelScope.allow` | Glob list of `provider/id` the parent may assign. Explicit tool `model` is an error if it misses; inherited is a warning |
 | `disableBuiltins` | Do not load the five shipped roles |
 | `maxSubagentSpawnsPerSession` | Hard cap on how many children this session may start |

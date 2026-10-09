@@ -699,6 +699,124 @@ export interface TeamCommandDeps {
 	};
 }
 
+/** Parsed `/subagents-toggle` arguments. `on`/`off` are explicit; `flip` inverts. */
+export type ToggleCommandArgs =
+	| { action: "show" }
+	| { action: "flip" }
+	| { action: "on" }
+	| { action: "off" };
+
+/** Pure parser for `/subagents-toggle` arguments. */
+export function parseToggleCommandArgs(
+	args: string,
+): { ok: true; value: ToggleCommandArgs } | { ok: false; message: string } {
+	const usage = "Usage: /subagents-toggle [on|off]";
+	const trimmed = args.trim();
+	if (!trimmed) return { ok: true, value: { action: "show" } };
+	const tokens = trimmed.split(/\s+/).filter(Boolean);
+	if (tokens.length > 1) return { ok: false, message: usage };
+	const action = tokens[0];
+	if (action === "on" || action === "off")
+		return { ok: true, value: { action } };
+	if (action === "flip") return { ok: true, value: { action: "flip" } };
+	return { ok: false, message: usage };
+}
+
+export interface ToggleCommandDeps {
+	/** Whether subagents are currently enabled in THIS session (session-level override included). */
+	sessionEnabled: () => boolean;
+	/** Flip the session-level override (toggle only; never touches settings files). */
+	setSessionEnabled: (enabled: boolean) => void;
+	/** Effective `subagents.enabled` from merged settings, for display. */
+	settingsEnabled: (cwd: string) => boolean;
+	/** Count of currently running children, to warn before turning off mid-flight. */
+	runningChildren: () => number;
+}
+
+/** Render the status line shown after `/subagents-toggle`. */
+export function renderToggleStatus(input: {
+	enabled: boolean;
+	settingsEnabled: boolean;
+	outcome: "shown" | "flipped" | "already-on" | "already-off";
+	running: number;
+}): string {
+	const state = input.enabled ? "enabled" : "disabled";
+	const origin = input.enabled === input.settingsEnabled
+		? "matches settings"
+		: "session override (settings unchanged; /reload restores them)";
+	const lines = [`Subagents are ${state} — ${origin}.`];
+	switch (input.outcome) {
+		case "flipped":
+			lines.push(
+				input.enabled
+					? "New launches are accepted again; the roster returns with the next turn."
+					: "No new launches; the roster and the bash dispatch guard are off from the next turn. Existing children are untouched — status/collect/wait keep working.",
+			);
+			break;
+		case "already-on":
+			lines.push("Already enabled — nothing to do.");
+			break;
+		case "already-off":
+			lines.push("Already disabled — nothing to do.");
+			break;
+		default:
+			break;
+	}
+	if (input.running > 0)
+		lines.push(
+			`${input.running} child${input.running === 1 ? "" : "ren"} still running; they finish and notify normally.`,
+		);
+	return lines.join("\n");
+}
+
+/** Register `/subagents-toggle [on|off]`: session-level enable/disable without touching files. */
+export function registerToggleCommand(
+	pi: ExtensionAPI,
+	deps: ToggleCommandDeps,
+): void {
+	pi.registerCommand("subagents-toggle", {
+		description:
+			"Temporarily disable/enable subagents for this session (no files are changed)",
+		getArgumentCompletions: (prefix) => {
+			if (prefix.includes(" ")) return null;
+			return ["on", "off"]
+				.flatMap((value) => (value.startsWith(prefix) ? [{ value, label: value }] : []));
+		},
+		handler: async (args, ctx) => {
+			const parsed = parseToggleCommandArgs(args);
+			if (parsed.ok === false) {
+				ctx.ui.notify(parsed.message, "error");
+				return;
+			}
+			const enabled = deps.sessionEnabled();
+			const running = deps.runningChildren();
+			let outcome: "shown" | "flipped" | "already-on" | "already-off" = "shown";
+			let next = enabled;
+			const action = parsed.value.action;
+			if (action === "flip") {
+				next = !enabled;
+				outcome = "flipped";
+			} else if (action === "on") {
+				next = true;
+				outcome = enabled ? "already-on" : "flipped";
+			} else if (action === "off") {
+				next = false;
+				outcome = enabled ? "flipped" : "already-off";
+			}
+			if (parsed.value.action !== "show") deps.setSessionEnabled(next);
+			sendSlashText(
+				pi,
+				renderToggleStatus({
+					enabled: next,
+					settingsEnabled: deps.settingsEnabled(ctx.cwd),
+					outcome,
+					running,
+				}),
+			);
+		},
+	});
+}
+
 /** Register /subagents-agents [user|project|both] on a Pi extension. */
 export function registerAgentsCommand(
 	pi: ExtensionAPI,
