@@ -68,6 +68,12 @@ export interface BuildArgsInput {
 	/** Isolated worktree branch the child should commit and MR from. */
 	worktreeBranch?: string;
 	/**
+	 * Extra child-side context from `subagents.childContext`, appended to the
+	 * system prompt after the role's own prompt (pi) or before the task
+	 * (other kinds). Pre-resolved text; `@path` forms are handled upstream.
+	 */
+	childContext?: string;
+	/**
 	 * When false, omit `@task.md`. The orchestrator always delivers the task
 	 * with `herdr agent prompt` so every kind shares the same control plane.
 	 */
@@ -160,17 +166,30 @@ function pushSystemPromptArgs(
 	input: BuildArgsInput,
 ): void {
 	const systemPrompt = input.agent.systemPrompt?.trim();
-	if (!systemPrompt) return;
+	const childContext = input.childContext?.trim();
+	if (!systemPrompt && !childContext) return;
 
+	// The child-guard extension, the role prompt, and the settings-injected
+	// context are three separate sources with one ordering rule: frozen guards
+	// (the extension) < role prompt < machine-specific context (settings). The
+	// system-prompt FILE carries role + settings context so a single
+	// `--append-system-prompt` flag delivers both.
 	const file = path.join(input.tempDir, "system-prompt.md");
-	fs.writeFileSync(file, systemPrompt, { mode: 0o600 });
-	tempFiles.push(file);
-	args.push(
-		input.agent.systemPromptMode === "replace"
-			? "--system-prompt"
-			: "--append-system-prompt",
+	fs.writeFileSync(
 		file,
+		[systemPrompt, childContext].filter(Boolean).join("\n\n"),
+		{ mode: 0o600 },
 	);
+	tempFiles.push(file);
+	// A settings-injected child context must not REPLACE the role prompt, so
+	// when a role prompt is present the mode is always the role's own; only a
+	// context-only child falls back to append (the safe default).
+	const mode = systemPrompt
+		? input.agent.systemPromptMode
+		: input.agent.systemPromptMode === "replace"
+			? "append"
+			: input.agent.systemPromptMode;
+	args.push(mode === "replace" ? "--system-prompt" : "--append-system-prompt", file);
 }
 
 /**

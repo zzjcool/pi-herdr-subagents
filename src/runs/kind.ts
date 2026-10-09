@@ -116,11 +116,14 @@ function composePrompt(input: BuildArgsInput): string {
 		allowNested: input.allowNestedSubagents === true,
 		...(input.worktreeBranch ? { worktreeBranch: input.worktreeBranch } : {}),
 	});
-	// Pi gets the system prompt via `--system-prompt` on start. Other CLIs
-	// have no equivalent flag, so it rides along in the Herdr prompt.
+	// Pi gets the system prompt (and settings-injected child context) via
+	// `--system-prompt` on start. Other CLIs have no equivalent flag, so both
+	// ride along in the Herdr prompt, role prompt first.
 	if (input.agent.kind === "pi") return task;
-	const system = input.agent.systemPrompt?.trim();
-	return system ? `${system}\n\n${task}` : task;
+	const parts = [input.agent.systemPrompt?.trim(), input.childContext?.trim()]
+		.filter(Boolean)
+		.join("\n\n");
+	return parts ? `${parts}\n\n${task}` : task;
 }
 
 /**

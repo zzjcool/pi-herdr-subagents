@@ -405,6 +405,8 @@ Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
       "cb": { "worker": { "model": "cb/glm-5.3" } }
     },
     "modelScope": { "allow": ["cb/*", "openai/*"] },
+    "parentContext": "@~/.pi/agent/subagents-parent-context.md",
+    "childContext": "@~/.pi/agent/subagents-child-context.md",
     "herdr": {
       "defaultPlacement": "split-down",
       "maxConcurrentAgents": 6,
@@ -426,6 +428,8 @@ Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
 | `agentOverrides` | Per-role field overlay (`model`, `thinking`, `preset`, `tools`, `disabled`, …) |
 | `agentOverridesByProvider` | Same overlay, keyed by the **parent** provider id |
 | `enabled` | Master switch: `false` disables launches, roster injection, and the bash guard (see [Master switch](#master-switch)) |
+| `parentContext` | Extra parent-side context appended after the playbook + roster every turn. Inline markdown or `@path` file reference(s) (string or array). Use this instead of polluting the global AGENTS.md with machine-specific dispatch discipline |
+| `childContext` | Extra context injected into every child's system prompt (pi: appended after the role prompt; cursor and other kinds: rides along in the task prompt). Same value forms as `parentContext` — put worker guardrails (retry budget, advisor escalation) here |
 | `modelScope.allow` | Glob list of `provider/id` the parent may assign. Explicit tool `model` is an error if it misses; inherited is a warning |
 | `disableBuiltins` | Do not load the five shipped roles |
 | `maxSubagentSpawnsPerSession` | Hard cap on how many children this session may start |

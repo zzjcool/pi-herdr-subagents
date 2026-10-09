@@ -665,6 +665,20 @@ export interface SubagentsSettings {
 	 * Project `.pi/settings.json` wins over the user file.
 	 */
 	enabled?: boolean;
+	/**
+	 * Extra parent-side context appended after the playbook + roster each
+	 * turn. Inline markdown or `@path` file reference(s) (string or array).
+	 * Lets machine-specific dispatch discipline live here instead of the
+	 * user's global AGENTS.md. Project settings replace the user value.
+	 */
+	parentContext?: string;
+	/**
+	 * Extra context injected into every child's system prompt (pi kinds:
+	 * `--append-system-prompt` after the role prompt; other kinds: rides along
+	 * in the task prompt, like the role system prompt does). Same value forms
+	 * as `parentContext`. Project settings replace the user value.
+	 */
+	childContext?: string;
 	defaultModel?: string;
 	defaultProvider?: string;
 	/**

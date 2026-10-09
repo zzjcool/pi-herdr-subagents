@@ -144,6 +144,11 @@ export interface OrchestratorDeps {
 	/** Active team selection to inherit into child panes. */
 	team?: ActiveTeam;
 	/**
+	 * Extra child-side context from `subagents.childContext`, appended to
+	 * every child's system prompt after the role prompt.
+	 */
+	childContext?: string;
+	/**
 	 * Root of the cursor chat stores, overriding `~/.cursor/chats` — injects
 	 * the fake's store root in tests.
 	 */
@@ -383,6 +388,8 @@ export class Orchestrator {
 	/** Parent pane id used to uniquify type-tab labels across parent Pis. */
 	private readonly parentPaneId?: string;
 	private readonly team?: ActiveTeam;
+	/** Extra child-side context from `subagents.childContext`. */
+	private readonly childContext?: string;
 	/** Per-kind integration guard outcome, so one session probes/installs once. */
 	private readonly integrationChecked = new Map<AgentKind, boolean>();
 	/** Last type-tab used by a child of this orchestrator. */
@@ -422,6 +429,7 @@ export class Orchestrator {
 			deps.parentPaneId ?? process.env.HERDR_PANE_ID;
 		this.parentPaneId = rawParentPaneId?.trim() || undefined;
 		this.team = deps.team;
+		this.childContext = deps.childContext?.trim() || undefined;
 	}
 
 	/** The lineage path a child of this process would receive. */
@@ -979,6 +987,7 @@ export class Orchestrator {
 				cwd: input.cwd,
 				allowNestedSubagents: input.agent.allowNestedSubagents,
 				includeTask: false,
+				childContext: this.childContext,
 				...(input.worktreeBranch
 					? { worktreeBranch: input.worktreeBranch }
 					: {}),

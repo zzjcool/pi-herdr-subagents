@@ -368,6 +368,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 					team,
 					runtime,
 					layout,
+					settings,
 				});
 			}
 
@@ -397,12 +398,13 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 		if (Array.isArray(tools) && !tools.includes("subagent")) return;
 		if (ctx?.cwd) lastCwd = ctx.cwd;
 		const catalog = loadCatalog(lastCwd, lastCwd, undefined);
+		const parentContext = catalog.settings.parentContext?.trim();
 		return {
 			systemPrompt: `${event.systemPrompt}\n\n${PARENT_PLAYBOOK}\n\n${renderParentRoster(
 				catalog.agents,
 				catalog.team,
 				catalog.teamWarnings,
-			)}`,
+			)}${parentContext ? `\n\n${parentContext}` : ""}`,
 		};
 	});
 
@@ -526,6 +528,7 @@ async function controlAction(input: {
 	team: ActiveTeam;
 	runtime: SessionRuntime;
 	layout: SessionLayout;
+	settings: ReturnType<typeof loadSubagentSettings>;
 }): Promise<AgentToolResult<unknown>> {
 	const { action, params, store, cwd } = input;
 
@@ -569,6 +572,7 @@ async function controlAction(input: {
 		layout: input.layout,
 		workspaceId: process.env.HERDR_WORKSPACE_ID,
 		parentPaneId: process.env.HERDR_PANE_ID,
+		childContext: input.settings.childContext,
 		...teamForChildren(input.team),
 	});
 	orchestrator.restore(found.run);
@@ -835,6 +839,7 @@ async function launchFamily(input: {
 		maxSpawns: settings.maxSubagentSpawnsPerSession ?? null,
 		workspaceId: process.env.HERDR_WORKSPACE_ID,
 		parentPaneId: process.env.HERDR_PANE_ID,
+		childContext: settings.childContext,
 		...teamForChildren(input.team),
 	});
 

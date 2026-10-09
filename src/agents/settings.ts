@@ -6,6 +6,7 @@
  */
 
 import * as fs from "node:fs";
+import * as path from "node:path";
 import {
 	AGENT_KINDS,
 	type AgentOverride,
@@ -17,6 +18,7 @@ import {
 	type TeamConfig,
 	type TeamMember,
 } from "../shared/types.ts";
+import { parseContextSetting } from "./context.ts";
 import { OVERRIDE_FIELDS } from "./overrides.ts";
 import { parseModelScopeConfig } from "./model-scope.ts";
 import { parsePresets } from "./presets.ts";
@@ -200,6 +202,24 @@ export function parseSubagentSettings(
 	const out: SubagentsSettings = {};
 
 	setIf(out, "enabled", requiredBoolean(input.enabled, "enabled", filePath));
+	setIf(
+		out,
+		"parentContext",
+		parseContextSetting(
+			input.parentContext,
+			"parentContext",
+			path.dirname(filePath),
+		),
+	);
+	setIf(
+		out,
+		"childContext",
+		parseContextSetting(
+			input.childContext,
+			"childContext",
+			path.dirname(filePath),
+		),
+	);
 
 	// Each reader validates one field and returns `undefined` when absent, so a
 	// missing key and a rejected key stay distinguishable (only the latter throws).
@@ -450,6 +470,10 @@ export function resolveSubagentSettings(
 	const out: SubagentsSettings = { ...user };
 
 	if (project.enabled !== undefined) out.enabled = project.enabled;
+	if (project.parentContext !== undefined)
+		out.parentContext = project.parentContext;
+	if (project.childContext !== undefined)
+		out.childContext = project.childContext;
 
 	if (project.defaultModel !== undefined)
 		out.defaultModel = project.defaultModel;
