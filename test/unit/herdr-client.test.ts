@@ -431,14 +431,32 @@ test("tabList(workspaceId) does not return a tab from another Space", async () =
 // mid-invocation; `agent get` calls with no per-call timeout never settled, so
 // the parent's wait/collect tool calls never returned a toolResult.
 
+/** Created fake bins, cleaned up after the whole wedge-proofing group. */
+const fakeHerdrBins: string[] = [];
+
 function fakeHerdrBin(): string {
 	// A stand-in binary that ignores its argv and hangs forever — exactly what
-	// a wedged herdr CLI looks like to the runner.
+	// a wedged herdr CLI looks like to the runner. `exec` (not a bare sleep)
+	// keeps the process a SINGLE one, so the runner's SIGKILL reaps it — a bare
+	// `sleep` child would survive the kill and hold the stdio pipes open,
+	// stalling node's event loop for the full sleep duration.
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hung-herdr-"));
+	fakeHerdrBins.push(dir);
 	const bin = path.join(dir, "herdr");
-	fs.writeFileSync(bin, "#!/bin/sh\nsleep 100\n", { mode: 0o755 });
+	fs.writeFileSync(bin, "#!/bin/sh\nexec sleep 100\n", { mode: 0o755 });
 	return bin;
 }
+
+// node:test runs these in one process; the bins are reaped once at the end.
+process.on("exit", () => {
+	for (const dir of fakeHerdrBins) {
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+		} catch {
+			/* best-effort cleanup */
+		}
+	}
+});
 
 test("createHerdrClient defaults: a wedged CLI call settles within the default command timeout", async () => {
 	const client = createHerdrClient({ bin: fakeHerdrBin(), defaultTimeoutMs: 150 });
@@ -463,10 +481,11 @@ test("legacy runner position still works and stays unbounded (back-compat)", asy
 test("no-options createHerdrClient caps a wedged CLI at the default command timeout", async () => {
 	// The production wiring shape: NO defaultTimeoutMs override — the client
 	// must attach the default cap itself (index.ts calls createHerdrClient()
-	// bare). The full 15s default is exercised in real life; here the same
-	// code path is proven with the hung binary and the assertion that the
-	// call settles AT ALL (a pre-fix build hangs forever and fails the test
-	// via node:test's unsettled-promise detection).
+	// bare). A pre-fix build hangs forever and fails the test via node:test's
+	// unsettled-promise detection; a post-fix one settles at ~15s. The full
+	// default fires here on purpose: this is the one test that proves the
+	// production value end-to-end (a shorter override is covered by the 150ms
+	// test above).
 	const client = createHerdrClient({ bin: fakeHerdrBin() });
 	const res = await client.agentGet("w-1");
 	assert.ok(!res.ok, "the call must settle");

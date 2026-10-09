@@ -180,6 +180,21 @@ const defaultSleep = (ms: number) =>
 	new Promise<void>((r) => setTimeout(r, ms));
 
 /**
+ * Whether an `agent get` result definitively reports the agent as gone.
+ *
+ * ONLY `NOT_FOUND` counts. A transport failure, a wedged or timed-out CLI
+ * (HERDR_ERROR from the command timeout) says nothing about the child: the
+ * agent may be perfectly alive while our control channel is broken. Callers
+ * that act on "gone" (aborted verdicts, retire, relaunch) MUST use this, or a
+ * host-side incident retires a live child (hw 2026-10-09).
+ */
+function agentGone(
+	res: { ok: true } | { ok: false; error: { code: string } },
+): boolean {
+	return !res.ok && res.error.code === ErrorCodes.NOT_FOUND;
+}
+
+/**
  * Await a teardown call whose failure is genuinely ignorable.
  *
  * Recycling is best-effort by design: a pane may already be gone, and the
@@ -1437,10 +1452,16 @@ export class Orchestrator {
 			};
 		}
 		const agentState = await this.client.agentGet(child.name);
-		if (agentState.ok) {
+		if (agentState.ok || !agentGone(agentState)) {
+			// Not found means gone; any OTHER failure (a wedged/timed-out CLI,
+			// transport error) says nothing about the child, so assume alive.
+			// Reporting `aborted` here would retire a LIVE child (F29 is only a
+			// verdict for a genuinely missing agent).
 			return {
 				status: "running",
-				reason: `collect timed out after ${timeoutMs}ms; the agent is still alive`,
+				reason: agentState.ok
+					? `collect timed out after ${timeoutMs}ms; the agent is still alive`
+					: `collect timed out after ${timeoutMs}ms; agent status unavailable (${agentState.error.code}), assuming alive`,
 				model: child.model ?? null,
 			};
 		}
@@ -1519,8 +1540,15 @@ export class Orchestrator {
 				}
 				return "settled";
 			}
-			if (await this.isAgentGone(child.name)) return "gone";
-			if (await this.isAgentBlocked(child.name)) return "blocked";
+			// `agent wait` failed. Distinguish "agent gone" from a transient CLI
+			// failure (a wedged/timed-out command surfaces as a generic error):
+			// ONE extra agentGet answers both presence questions, instead of two
+			// calls that — under a wedged CLI — each burn the full command
+			// timeout and stretch one loop iteration past the deadline.
+			const afterFailure = await this.agentPresence(child.name);
+			if (afterFailure === "gone") return "gone";
+			if (afterFailure === "blocked") return "blocked";
+			if (this.now() >= deadline) return "timeout";
 			await this.sleep(this.pollIntervalMs);
 		}
 		return "timeout";
@@ -1647,7 +1675,7 @@ export class Orchestrator {
 	): Promise<"blocked" | "gone" | "live"> {
 		const agentState = await this.client.agentGet(name);
 		if (!agentState.ok) {
-			return agentState.error.code === ErrorCodes.NOT_FOUND ? "gone" : "live";
+			return agentGone(agentState) ? "gone" : "live";
 		}
 		return agentState.value.agent_status === "blocked" ? "blocked" : "live";
 	}
@@ -1714,12 +1742,25 @@ export class Orchestrator {
 		if (!timedOut || execution.status !== "aborted") return execution;
 
 		const agentState = await this.client.agentGet(name);
-		if (!agentState.ok) return execution;
+		// Only a definitive NOT_FOUND means the agent is gone. Any other error
+		// (a wedged/timed-out CLI) must NOT flip `aborted` back — but it also
+		// must not CONFIRM it: agentStatus.ok means alive (the running branch),
+		// while a transport failure leaves the derived outcome standing, which
+		// is the pre-timeout behaviour for a hard kill (F29).
+		if (!agentState.ok) {
+			return agentGone(agentState)
+				? execution
+				: {
+						...execution,
+					status: "running",
+					reason: `collect timed out after ${timeoutMs}ms; agent status unavailable (${agentState.error.code}), assuming alive`,
+				};
+		}
 
 		return {
 			...execution,
 			status: "running",
-			reason: `collect timed out after ${timeoutMs}ms; the agent is still alive`,
+				reason: `collect timed out after ${timeoutMs}ms; the agent is still alive`,
 		};
 	}
 
@@ -1811,7 +1852,11 @@ export class Orchestrator {
 		const tabId = child.tabId;
 		if (paneId) {
 			const alive = await this.client.agentGet(name);
-			if (alive.ok) {
+			// Only skip the graceful ctrl+d when the agent is DEFINITIVELY gone
+			// (NOT_FOUND). A wedged/timed-out `agent get` says nothing — skipping
+			// ctrl+d then force-closing the pane would kill a live agent mid-turn
+			// (the session file survives, F12, but unsaved turn state does not).
+			if (alive.ok || !agentGone(alive)) {
 				await bestEffort(this.client.agentSendKeys(name, "ctrl+d"));
 				await this.sleep(600);
 				await bestEffort(this.client.agentSendKeys(name, "ctrl+d"));

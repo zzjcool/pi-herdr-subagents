@@ -305,6 +305,65 @@ test("collect reports `running` (not aborted) when the agent is still alive", as
 	}
 });
 
+test("collect keeps the pane and reports `running` when the herdr CLI itself is wedged (hw 2026-10-09)", async () => {
+	// Incident regression: a fork storm on the host wedged every herdr CLI
+	// invocation. With the command timeout in place those calls settle with
+	// HERDR_ERROR — and collect MUST treat that as "status unavailable",
+	// never as "agent gone": the child is alive, only our control channel is
+	// broken. `aborted` here would make the runtime retire a live child.
+	const runDir = mkdtempSync(path.join(tmpdir(), "orch-wedged-"));
+	try {
+		const fake = new FakeHerdr({});
+		fake.addRootPane("w1");
+		// Wrap the fake runner: `agent get`/`agent wait` settle as a timeout
+		// kill (code -2, the runner's timeout signature) while everything else
+		// hits the healthy fake — exactly a wedged control plane.
+		const base = createFakeRunner(fake);
+		const wedged: typeof base = async (args, opts) => {
+			if (args[0] === "agent" && (args[1] === "get" || args[1] === "wait")) {
+				return {
+					stdout: "",
+					stderr: `\n[timeout after ${opts?.timeoutMs ?? 15_000}ms]`,
+					code: -2,
+				};
+			}
+			return base(args, opts);
+		};
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(wedged),
+			runDir,
+			cwd: "/tmp/project",
+			sleep: async () => {},
+		});
+
+		const handle = await orchestrator.launch({ agent: agent(), task: "t" });
+		writeFileSync(
+			handle.sessionFile,
+			transcript([{ role: "user", text: "go" }]),
+		);
+
+		const before = fake.panes.size;
+		const result = await orchestrator.collect(handle.name, {
+			timeoutMs: 1_000,
+		});
+		assert.equal(
+			result.execution.status,
+			"running",
+			`a wedged CLI must not read as aborted (got: ${result.execution.reason})`,
+		);
+		assert.match(result.execution.reason ?? "", /unavailable|timed out/);
+		// The pane must survive: retiring a live child because OUR channel
+		// broke loses unsaved turn state.
+		assert.equal(
+			fake.panes.size,
+			before,
+			"collect must not close the pane when the CLI is wedged",
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
 test("collect turns a self-reported verdict into acceptance (F33)", async () => {
 	const h = harness();
 	try {
@@ -1621,6 +1680,60 @@ test("U7: a still-growing session file extends the collect deadline instead of r
 		assert.ok(
 			elapsed > timeoutMs,
 			`the deadline must have been extended (elapsed ${elapsed}ms)`,
+		);
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("collect on a non-pi child without turns keeps the pane when the herdr CLI is wedged (executionFromPane path)", async () => {
+	// The pi path (resolveExecution) is covered by the wedged test above; this
+	// pins the OTHER branch — a kind with no session jsonl reaches
+	// executionFromPane, whose pre-fix reading of a timed-out `agent get` was
+	// `aborted: herdr agent gone`, retiring a live child (hw 2026-10-09).
+	const runDir = mkdtempSync(path.join(tmpdir(), "orch-wedged-nonpi-"));
+	try {
+		const fake = new FakeHerdr({});
+		fake.addRootPane("w1");
+		const base = createFakeRunner(fake);
+		const wedged: typeof base = async (args, opts) => {
+			if (args[0] === "agent" && (args[1] === "get" || args[1] === "wait")) {
+				return {
+					stdout: "",
+					stderr: `\n[timeout after ${opts?.timeoutMs ?? 15_000}ms]`,
+					code: -2,
+				};
+			}
+			return base(args, opts);
+		};
+		const orchestrator = new Orchestrator({
+			client: createHerdrClient(wedged),
+			runDir,
+			cwd: "/tmp/project",
+			sleep: async () => {},
+		});
+
+		// claude kind writes no session jsonl (F7), so collect falls through to
+		// executionFromPane.
+		const handle = await orchestrator.launch({
+			agent: agent({ kind: "claude" }),
+			task: "t",
+		});
+
+		const before = fake.panes.size;
+		const result = await orchestrator.collect(handle.name, {
+			timeoutMs: 1_000,
+		});
+		assert.equal(
+			result.execution.status,
+			"running",
+			`a wedged CLI must not read as aborted (got: ${result.execution.reason})`,
+		);
+		assert.match(result.execution.reason ?? "", /unavailable|timed out/);
+		assert.equal(
+			fake.panes.size,
+			before,
+			"collect must not close the pane when the CLI is wedged",
 		);
 	} finally {
 		rmSync(runDir, { recursive: true, force: true });

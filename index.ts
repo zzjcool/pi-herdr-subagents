@@ -700,6 +700,17 @@ async function reviveChild(
 				`${action === "resume" ? "Resumed" : "Continued"} ${name} (live agent prompted).`,
 			);
 		}
+		// Only a DEFINITIVE not-found means the agent exited and must be
+		// relaunched. Any other failure (a wedged or timed-out herdr CLI) says
+		// nothing about the child — relaunching now would collide with the live
+		// agent holding the name (F16) or spawn a duplicate.
+		if (agentState.error.code !== ErrorCodes.NOT_FOUND) {
+			return fail(
+				`${action} failed: cannot determine whether ${name} is alive ` +
+					`(herdr: ${agentState.error.message}). Retry shortly.`,
+				agentState.error.code,
+			);
+		}
 
 		const handle = await orchestrator.launch({
 			agent: agentDef,

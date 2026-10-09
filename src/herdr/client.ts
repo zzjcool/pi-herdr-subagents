@@ -23,10 +23,10 @@ import {
 	type PaneInfo,
 	type ProcessInfo,
 	type ReadSource,
+	DEFAULTS,
 	SubagentError,
 	type TabInfo,
 } from "../shared/types.ts";
-import { DEFAULTS } from "../shared/types.ts";
 import { createCommandRunner, type RunnerOptions } from "./runner.ts";
 
 interface HerdrEnvelope {
@@ -352,7 +352,11 @@ async function paneReadCall(
 	const args = ["pane", "read", paneId];
 	if (opts.source) args.push("--source", opts.source);
 	if (opts.lines) args.push("--lines", String(opts.lines));
-	// F6: `pane read` emits PLAIN TEXT, not JSON.
+	// F6: `pane read` emits PLAIN TEXT, not JSON. An explicit per-call cap so
+	// the call cannot hang even under a legacy/wedged runner; the runner's own
+	// `defaultTimeoutMs` (if the caller pinned one, including 0) still wins
+	// because a shorter of the two applies — pass the default only as the
+	// per-call value, and let the runner's undefined-vs-set logic decide.
 	const { stdout, stderr, code } = await runner(args, {
 		timeoutMs: DEFAULTS.commandTimeoutMs,
 	});
@@ -571,6 +575,8 @@ function createMetaApi(
 ): Pick<HerdrClient, "version" | "available" | "integrationStatus" | "integrationInstall"> {
 	return {
 		async version() {
+			// Explicit cap: version() may be called through a legacy bare runner
+			// (createHerdrClient(runner)) that carries no defaultTimeoutMs.
 			const { stdout, code } = await runner(["--version"], {
 				timeoutMs: DEFAULTS.commandTimeoutMs,
 			});
