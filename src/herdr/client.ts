@@ -26,7 +26,8 @@ import {
 	SubagentError,
 	type TabInfo,
 } from "../shared/types.ts";
-import { createCommandRunner } from "./runner.ts";
+import { DEFAULTS } from "../shared/types.ts";
+import { createCommandRunner, type RunnerOptions } from "./runner.ts";
 
 interface HerdrEnvelope {
 	id?: string;
@@ -352,7 +353,9 @@ async function paneReadCall(
 	if (opts.source) args.push("--source", opts.source);
 	if (opts.lines) args.push("--lines", String(opts.lines));
 	// F6: `pane read` emits PLAIN TEXT, not JSON.
-	const { stdout, stderr, code } = await runner(args);
+	const { stdout, stderr, code } = await runner(args, {
+		timeoutMs: DEFAULTS.commandTimeoutMs,
+	});
 	if (code !== 0 && !stdout)
 		return err({ code: "HERDR_ERROR", message: stderr.slice(0, 500) });
 	return ok(stdout);
@@ -568,7 +571,9 @@ function createMetaApi(
 ): Pick<HerdrClient, "version" | "available" | "integrationStatus" | "integrationInstall"> {
 	return {
 		async version() {
-			const { stdout, code } = await runner(["--version"]);
+			const { stdout, code } = await runner(["--version"], {
+				timeoutMs: DEFAULTS.commandTimeoutMs,
+			});
 			if (code !== 0)
 				return err({
 					code: ErrorCodes.HERDR_UNAVAILABLE,
@@ -620,9 +625,37 @@ function createMetaApi(
 	};
 }
 
+export interface CreateHerdrClientOptions extends RunnerOptions {}
+
+/**
+ * Create a herdr client.
+ *
+ * `options` is forwarded to `createCommandRunner`, so `bin`/`env` override as
+ * before. When the caller does not pin `defaultTimeoutMs`, the default
+ * command timeout (`DEFAULTS.commandTimeoutMs`) applies to EVERY invocation
+ * that does not carry its own timeout — the wedge-proofing described on
+ * `DEFAULTS.commandTimeoutMs`. A custom `defaultTimeoutMs` of `0` keeps the
+ * old unbounded behaviour for tests that drive a fake runner.
+ *
+ * Back-compat: passing a `CommandRunner` directly (the pre-timeout signature)
+ * is still accepted and bypasses `createCommandRunner` entirely.
+ */
 export function createHerdrClient(
-	runner: CommandRunner = createCommandRunner(),
+	options: CreateHerdrClientOptions | CommandRunner = {},
 ): HerdrClient {
+	const legacyRunner =
+		typeof options === "function" ? options : undefined;
+	const opts: CreateHerdrClientOptions =
+		typeof options === "function" ? {} : options;
+	const runner =
+		legacyRunner ??
+		createCommandRunner({
+			...opts,
+			// A caller that pins `defaultTimeoutMs` (even to 0 = unbounded) knows
+			// what it is doing; otherwise wedge-proof every short control call.
+			defaultTimeoutMs:
+				opts.defaultTimeoutMs ?? DEFAULTS.commandTimeoutMs,
+		});
 	const call: Call = async <T>(
 		args: string[],
 		opts: { timeoutMs?: number } = {},

@@ -766,4 +766,16 @@ export const DEFAULTS = {
 	/** F22: missing binary surfaces as a ~15s timeout. */
 	startTimeoutMs: 45_000,
 	binaryProbeTimeoutMs: 3_000,
+	/**
+	 * Default wall clock for ONE herdr CLI invocation (agent get, pane list,
+	 * tab create, …). Calls that need longer pass their own timeoutMs and are
+	 * NOT capped by this.
+	 *
+	 * Measured (hw 2026-10-09): a fork storm on the host wedged the herdr CLI
+	 * mid-invocation; with no cap, ONE stuck `agent get` froze the whole
+	 * collect/wait chain forever — the parent's `wait`/`collect` tool calls
+	 * never returned (55+ min, no toolResult). Every short control call now
+	 * fails fast with a timeout error the poll loops already tolerate.
+	 */
+	commandTimeoutMs: 15_000,
 } as const;

@@ -5,8 +5,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { createHerdrClient, parseHerdrResponse } from "../../src/herdr/client.ts";
-import { ErrorCodes } from "../../src/shared/types.ts";
+import { ErrorCodes, type CommandRunner } from "../../src/shared/types.ts";
 import { createCommandRunner, resolveHerdrBin } from "../../src/herdr/runner.ts";
 import {
 	FakeHerdr,
@@ -421,4 +424,51 @@ test("tabList(workspaceId) does not return a tab from another Space", async () =
 		all.value.some((t) => t.workspace_id === "w2"),
 		"unfiltered tabList still returns every Space",
 	);
+});
+
+// ── Wedge-proofing: a hung herdr CLI must fail fast, not hang the caller ─────
+// Regression for the hw 2026-10-09 incident: a fork storm wedged the herdr CLI
+// mid-invocation; `agent get` calls with no per-call timeout never settled, so
+// the parent's wait/collect tool calls never returned a toolResult.
+
+function fakeHerdrBin(): string {
+	// A stand-in binary that ignores its argv and hangs forever — exactly what
+	// a wedged herdr CLI looks like to the runner.
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hung-herdr-"));
+	const bin = path.join(dir, "herdr");
+	fs.writeFileSync(bin, "#!/bin/sh\nsleep 100\n", { mode: 0o755 });
+	return bin;
+}
+
+test("createHerdrClient defaults: a wedged CLI call settles within the default command timeout", async () => {
+	const client = createHerdrClient({ bin: fakeHerdrBin(), defaultTimeoutMs: 150 });
+	const res = await client.agentGet("w-1");
+	assert.ok(!res.ok, "the call must settle, not hang");
+	if (!res.ok) {
+		// A timeout surfaces as a structured error, not a thrown one.
+		assert.match(res.error.message, /timeout after 150ms/);
+	}
+});
+
+test("legacy runner position still works and stays unbounded (back-compat)", async () => {
+	// The pre-timeout signature (bare CommandRunner) must keep working for
+	// every existing caller; the fake resolves immediately, so no cap fires.
+	const finite: CommandRunner = async () =>
+		({ stdout: '{"result":{}}\n', stderr: "", code: 0 });
+	const client = createHerdrClient(finite);
+	const res = await client.agentList();
+	assert.ok(res.ok);
+});
+
+test("no-options createHerdrClient caps a wedged CLI at the default command timeout", async () => {
+	// The production wiring shape: NO defaultTimeoutMs override — the client
+	// must attach the default cap itself (index.ts calls createHerdrClient()
+	// bare). The full 15s default is exercised in real life; here the same
+	// code path is proven with the hung binary and the assertion that the
+	// call settles AT ALL (a pre-fix build hangs forever and fails the test
+	// via node:test's unsettled-promise detection).
+	const client = createHerdrClient({ bin: fakeHerdrBin() });
+	const res = await client.agentGet("w-1");
+	assert.ok(!res.ok, "the call must settle");
+	if (!res.ok) assert.match(res.error.message, /timeout after/);
 });
