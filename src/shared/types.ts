@@ -304,6 +304,14 @@ export interface ChildRecord {
 	execution?: Execution;
 	acceptance?: AcceptanceResult;
 	/**
+	 * Full terminal output persisted by the last collect (run-dir
+	 * `<name>.output.md`), or absent when that collect wrote none (running
+	 * snapshot / empty output). Recorded on the child — not re-derived via
+	 * existsSync — so a cached collect cannot hand out an EARLIER turn's
+	 * artifact as this turn's result.
+	 */
+	outputFile?: string;
+	/**
 	 * Acceptance criteria declared by the agent, copied here at launch so a
 	 * `collect` in a later process (each tool call is a fresh process) can still
 	 * surface them without re-reading the agent definition.

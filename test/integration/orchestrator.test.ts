@@ -22,6 +22,7 @@ import {
 	existsSync,
 	writeFileSync,
 	statSync,
+	readFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -242,6 +243,39 @@ test("collect derives success from the session, not agent_status (F26)", async (
 	}
 });
 
+test("collect persists the full output to <name>.output.md and reports its path", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
+		const long = `${"y".repeat(9000)}\n{"ok": true, "reason": "long"}`;
+		writeFileSync(
+			handle.sessionFile,
+			transcript([
+				{ role: "user", text: "go" },
+				{ role: "assistant", stopReason: "stop", text: long },
+			]),
+		);
+		const result = await h.orchestrator.collect(handle.name);
+		assert.equal(result.execution.status, "success");
+		// The full text — beyond any preview cap — lands on disk, and the
+		// collect result names the file so a truncated notice has a one-step
+		// recovery instead of a manual jsonl re-parse.
+		assert.ok(result.outputFile, "collect must report an outputFile");
+		assert.ok(result.outputFile.endsWith(".output.md"));
+		assert.equal(
+			readFileSync(result.outputFile, "utf-8").trim(),
+			long,
+			"the persisted artifact must carry the full output verbatim",
+		);
+		// The cached (post-retire) collect path reports it too.
+		const cached = h.orchestrator.cachedCollect(handle.name);
+		assert.ok(cached?.outputFile);
+		assert.equal(cached?.outputFile, result.outputFile);
+	} finally {
+		h.cleanup();
+	}
+});
+
 test("collect reports failure for an LLM error even though herdr says done (F26)", async () => {
 	const h = harness();
 	try {
@@ -300,6 +334,72 @@ test("collect reports `running` (not aborted) when the agent is still alive", as
 		});
 		assert.equal(result.execution.status, "running");
 		assert.match(result.execution.reason ?? "", /timed out|still alive/);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("a running snapshot writes no output artifact and clears none (no stale vintage)", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
+		writeFileSync(
+			handle.sessionFile,
+			transcript([
+				{ role: "user", text: "go" },
+				{ role: "assistant", stopReason: "stop", text: "first answer" },
+			]),
+		);
+		// Turn 1 settles with output → artifact on disk, recorded on the child.
+		const first = await h.orchestrator.collect(handle.name);
+		assert.ok(first.outputFile);
+		assert.ok(existsSync(first.outputFile!));
+
+		// Turn 2 goes live again (steer, no reply yet): the running snapshot
+		// must NOT write a partial artifact NOR report the stale turn-1 file.
+		writeFileSync(handle.sessionFile, transcript([{ role: "user", text: "again" }]));
+		const running = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 2_000,
+		});
+		assert.equal(running.execution.status, "running");
+		assert.equal(running.outputFile, undefined);
+		const cached = h.orchestrator.cachedCollect(handle.name);
+		assert.equal(cached?.outputFile, undefined, "cached collect must not resurrect the stale artifact");
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("an empty terminal output clears an earlier turn's artifact (vintage mismatch)", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
+		writeFileSync(
+			handle.sessionFile,
+			transcript([
+				{ role: "user", text: "go" },
+				{ role: "assistant", stopReason: "stop", text: "first answer" },
+			]),
+		);
+		const first = await h.orchestrator.collect(handle.name);
+		assert.ok(first.outputFile);
+		assert.ok(existsSync(first.outputFile!));
+
+		// Turn 2 terminates with NO text (hard kill: user row, no assistant).
+		writeFileSync(handle.sessionFile, transcript([{ role: "user", text: "again" }]));
+		await h.client.agentSendKeys(handle.name, "ctrl+d");
+		const second = await h.orchestrator.collect(handle.name, {
+			timeoutMs: 2_000,
+		});
+		assert.equal(second.execution.status, "aborted");
+		assert.equal(second.outputFile, undefined);
+		assert.equal(
+			existsSync(first.outputFile!),
+			false,
+			"a stale artifact must be removed once this turn produced no output",
+		);
+		const cached = h.orchestrator.cachedCollect(handle.name);
+		assert.equal(cached?.outputFile, undefined);
 	} finally {
 		h.cleanup();
 	}
@@ -1051,6 +1151,13 @@ test("every kind starts via herdr then gets the task as agent prompt", async () 
 		assert.equal(collected.execution.status, "success");
 		assert.match(collected.output, /CURSOR_OK/);
 		assert.equal(collected.acceptance.status, "accepted");
+		// The chat-store path (the one that made manual recovery painful: SQLite
+		// parsing) must persist the SAME full-text artifact as the jsonl path.
+		assert.ok(collected.outputFile, "cursor collect must report an outputFile");
+		assert.match(
+			readFileSync(collected.outputFile!, "utf-8"),
+			/CURSOR_OK[\s\S]*"ok": true/,
+		);
 		assert.match(startArgv, /--trust/);
 	} finally {
 		h.cleanup();

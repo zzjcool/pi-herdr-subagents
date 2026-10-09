@@ -175,9 +175,19 @@ test("previewOutput truncates long text", () => {
 	const long = "x".repeat(5000);
 	const preview = previewOutput(long, 100);
 	assert.equal(preview.length < long.length, true);
-	assert.match(preview, /…$/);
+	// Without a hint the suffix still names the recovery move.
+	assert.match(preview, /…\(preview truncated — collect for the full text\)$/);
 	assert.equal(previewOutput("  hi  "), "hi");
 	assert.equal(previewOutput("   "), "(no output)");
+});
+
+test("previewOutput names the session file when hinted", () => {
+	const long = "x".repeat(5000);
+	const preview = previewOutput(long, 100, { sessionFile: "/runs/r1/w1.jsonl" });
+	assert.match(
+		preview,
+		/…\(preview truncated — full text: \/runs\/r1\/w1\.jsonl\)$/,
+	);
 });
 
 test("deliverCompletion sends subagent-notify with followUp wakeup", () => {
@@ -306,6 +316,60 @@ function groupedEntry(over: Partial<GroupedEntry> = {}): GroupedEntry {
 		...over,
 	};
 }
+
+test("formatCompletionNotice: a truncated preview names the full-output file", () => {
+	// The whole point of the artifact: the notice must point the parent at a
+	// one-step recovery (read the file), not a jsonl/chat-store re-derivation.
+	const long = `${"z".repeat(5_000)}\n{"ok": true, "reason": "found"}`;
+	const notice = formatCompletionNotice({
+		name: "search-0",
+		agent: "search",
+		execution: { status: "success" },
+		output: long,
+		outputFile: "/runs/r-1/search-0.output.md",
+		sessionFile: "/runs/r-1/search-0.jsonl",
+		acceptance: { status: "accepted", level: "attested" },
+	});
+	assert.match(
+		notice.content,
+		/…\(preview truncated — full text: \/runs\/r-1\/search-0\.output\.md\)/,
+	);
+	assert.match(notice.content, /Full output: \/runs\/r-1\/search-0\.output\.md/);
+});
+
+test("formatCompletionNotice: no outputFile, no hint suffix beyond the collect pointer", () => {
+	const notice = formatCompletionNotice({
+		name: "search-0",
+		execution: { status: "success" },
+		output: `${"z".repeat(5_000)}`,
+	});
+	assert.doesNotMatch(notice.content, /full text: \/runs/);
+	assert.match(
+		notice.content,
+		/…\(preview truncated — collect search-0 for the full text\)/,
+	);
+});
+
+test("formatGroupedNotice: per-entry Full output lines", () => {
+	const notice = formatGroupedNotice({
+		runId: "r-1",
+		entries: [
+			groupedEntry({
+				name: "search-0",
+				output: "s".repeat(5_000),
+				outputFile: "/runs/r-1/search-0.output.md",
+			}),
+			groupedEntry({ name: "worker-1", output: "short" }),
+		],
+	});
+	assert.match(
+		notice.content,
+		/…\(preview truncated — full text: \/runs\/r-1\/search-0\.output\.md\)/,
+	);
+	assert.match(notice.content, /Full output: \/runs\/r-1\/search-0\.output\.md/);
+	// Entries without an artifact must not grow a dangling pointer line.
+	assert.doesNotMatch(notice.content, /Full output: undefined/);
+});
 
 test("formatGroupedNotice: multiple entries merge into one notice with a header", () => {
 	const notice = formatGroupedNotice({

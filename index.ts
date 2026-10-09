@@ -1534,6 +1534,7 @@ function renderCollect(
 	collected: {
 		execution: { status: string; reason?: string };
 		output: string;
+		outputFile?: string;
 		acceptance: {
 			status: string;
 			level?: string;
@@ -1572,6 +1573,10 @@ function renderCollect(
 	}
 
 	lines.push(collected.output || "(no output)");
+	if (collected.outputFile)
+		lines.push(
+			`full output: ${collected.outputFile} (read this file when the output above is truncated)`,
+		);
 	return lines.join("\n");
 }
 

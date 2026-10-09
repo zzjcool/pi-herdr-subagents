@@ -153,6 +153,8 @@ export interface OrchestratorDeps {
 export interface CollectResult {
 	execution: Execution;
 	output: string;
+	/** Full output persisted to disk (`.output.md` in the run dir), when any. */
+	outputFile?: string;
 	usage: Usage | null;
 	model: string | null;
 	acceptance: AcceptanceResult;
@@ -1393,13 +1395,66 @@ export class Orchestrator {
 		child.acceptance = acceptance;
 		this.onChildUpdate(child);
 
+		// Persist the FULL output next to the session file. The parent's
+		// completion notice carries only a bounded preview; without a durable
+		// full-text artifact the parent must re-derive the text from the session
+		// jsonl (pi) or the SQLite chat store (cursor) by hand — every time.
+		// A `running` snapshot is a mid-turn partial, not a result: skip it so
+		// the file on disk is always a terminal answer. An EMPTY terminal output
+		// must also clear any EARLIER turn's artifact (stale vintage would hand
+		// the previous answer to a later cached collect as this turn's result).
+		let outputFile: string | undefined;
+		if (execution.status === "running") {
+			child.outputFile = undefined;
+		} else {
+			outputFile = this.writeOutputFile(child, output);
+			// Record the truth on the child: cachedCollect reads this, never a
+			// bare existsSync (which cannot tell turns apart).
+			child.outputFile = outputFile;
+		}
+		this.onChildUpdate(child);
+
 		return {
 			execution,
 			output,
+			...(outputFile ? { outputFile } : {}),
 			usage: parsed.usage,
 			model: parsed.model ?? child.model ?? null,
 			acceptance,
 		};
+	}
+
+	/** Path of a child's persisted full-output artifact. */
+	private outputFileFor(name: string): string {
+		return path.join(this.runDir, `${name}.output.md`);
+	}
+
+	/** Write the terminal output to disk; undefined when empty or unwritable.
+	 *
+	 * A terminal-but-empty output returns undefined AFTER removing a stale
+	 * artifact from an earlier turn, so the run dir and ChildRecord agree. */
+	private writeOutputFile(
+		child: ChildRecord,
+		output: string,
+	): string | undefined {
+		const file = this.outputFileFor(child.name);
+		const trimmed = output.trim();
+		if (!trimmed) {
+			try {
+				fs.rmSync(file, { force: true });
+			} catch {
+				// best-effort: the record no longer names it either way
+			}
+			return undefined;
+		}
+		try {
+			fs.writeFileSync(file, `${trimmed}\n`, { mode: 0o600 });
+			return file;
+		} catch {
+			// Best-effort: the preview still carries the text head, and the
+			// session file remains the fallback source.
+			return undefined;
+		}
 	}
 
 	private async readPaneOutput(child: ChildRecord): Promise<string> {
@@ -1485,7 +1540,10 @@ export class Orchestrator {
 		const parsed = fs.existsSync(child.sessionFile)
 			? parseSessionFile(child.sessionFile)
 			: emptyParsedSession();
-		return {
+		// Read the recorded truth, not existsSync: the file on disk may be an
+		// EARLIER turn's artifact (this turn's collect wrote none), and a fresh
+		// `running` snapshot must not resurrect it either.
+		const cached: CollectResult = {
 			execution: child.execution,
 			output: parsed.output,
 			usage: parsed.usage ?? child.execution.usage ?? null,
@@ -1494,6 +1552,8 @@ export class Orchestrator {
 				child.acceptance ?? { status: "unknown", level: "none" },
 			...(child.state === "blocked" ? { blocked: true } : {}),
 		};
+		if (child.outputFile) cached.outputFile = child.outputFile;
+		return cached;
 	}
 
 	/** Unblock a child after the parent approved the pending tool. */

@@ -27,6 +27,8 @@ export interface CompletionInput {
 	agent?: string;
 	execution: { status: string; reason?: string };
 	output: string;
+	/** Full output on disk; the truncated preview names this path. */
+	outputFile?: string;
 	sessionFile?: string;
 	acceptance?: { status: string; level?: string };
 	recycled?: boolean;
@@ -142,10 +144,21 @@ export function completionStatusOf(
 	return "failed";
 }
 
-export function previewOutput(text: string, max = PREVIEW_CHARS): string {
+export function previewOutput(
+	text: string,
+	max = PREVIEW_CHARS,
+	hints?: { sessionFile?: string; name?: string },
+): string {
 	const trimmed = text.trim() || "(no output)";
 	if (trimmed.length <= max) return trimmed;
-	return `${trimmed.slice(0, max)}\n…`;
+	// The preview is a hook, not the payload: name the recovery move so the
+	// parent model does not re-derive it (or, worse, re-launch a search that
+	// already finished — a duplicate child for a result already on disk).
+	const who = hints?.name ? ` ${hints.name}` : "";
+	const where = hints?.sessionFile
+		? ` — full text: ${hints.sessionFile}`
+		: ` — collect${who} for the full text`;
+	return `${trimmed.slice(0, max)}\n…(preview truncated${where})`;
 }
 
 export function formatCompletionNotice(input: CompletionInput): CompletionNotice {
@@ -166,7 +179,13 @@ export function formatCompletionNotice(input: CompletionInput): CompletionNotice
 	const acceptance = input.acceptance
 		? `acceptance: ${input.acceptance.status}${input.acceptance.level ? ` (${input.acceptance.level})` : ""}`
 		: undefined;
-	const preview = previewOutput(input.output);
+	const previewHints: { name?: string; sessionFile?: string } = {};
+	if (input.name) previewHints.name = input.name;
+	// Prefer the durable full-text artifact over the session file as the
+	// recovery pointer: one `read` beats re-deriving from jsonl/chat store.
+	if (input.outputFile) previewHints.sessionFile = input.outputFile;
+	else if (input.sessionFile) previewHints.sessionFile = input.sessionFile;
+	const preview = previewOutput(input.output, PREVIEW_CHARS, previewHints);
 	const content = [
 		`Background task ${status}: **${label}**`,
 		"",
@@ -174,6 +193,7 @@ export function formatCompletionNotice(input: CompletionInput): CompletionNotice
 		acceptance,
 		"",
 		preview,
+		input.outputFile ? `Full output: ${input.outputFile}` : undefined,
 		input.sessionFile ? "" : undefined,
 		input.sessionFile ? `Session file: ${input.sessionFile}` : undefined,
 		input.recycled === false
@@ -289,7 +309,17 @@ export function formatGroupedNotice(
 		// be released while this pane is still open, so no blanket footer.
 		const recycled = entry.recycled === false ? "" : " (pane recycled)";
 		lines.push(`- ${label}: ${entry.status}${reason}${acceptance}${recycled}`);
-		lines.push(`  ${previewOutput(entry.output, perEntryMax)}`);
+		// Prefer the durable full-text artifact over the session file as the
+		// recovery pointer: one `read` beats re-deriving from jsonl/chat store.
+		const fullText = entry.outputFile ?? entry.sessionFile;
+		const previewHints: { name?: string; sessionFile?: string } = {};
+		if (entry.name) previewHints.name = entry.name;
+		if (fullText) previewHints.sessionFile = fullText;
+		lines.push(
+			`  ${previewOutput(entry.output, perEntryMax, previewHints)}`,
+		);
+		if (entry.outputFile)
+			lines.push(`  Full output: ${entry.outputFile}`);
 	}
 	if (stillRunning.length > 0) {
 		lines.push(

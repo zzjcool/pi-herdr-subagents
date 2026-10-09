@@ -38,6 +38,8 @@ import { DEFAULTS, type AgentKind } from "../shared/types.ts";
 export interface CollectSnapshot {
 	execution: { status: string; reason?: string };
 	output: string;
+	/** Full output persisted to disk; named in the notice so a truncated preview has a one-step recovery. */
+	outputFile?: string;
 	acceptance: {
 		status: string;
 		level?: string;
@@ -500,6 +502,7 @@ export function createSessionRuntime(deps: SessionRuntimeDeps): SessionRuntime {
 								agent: job.agent,
 								execution: snapshot.execution,
 								output: snapshot.output,
+								...(snapshot.outputFile ? { outputFile: snapshot.outputFile } : {}),
 								sessionFile: job.sessionFile,
 								acceptance: snapshot.acceptance,
 								recycled: shouldRecycleAfterCollect(
