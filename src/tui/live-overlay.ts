@@ -86,9 +86,11 @@ export function createLiveOverlay(source: LiveOverlaySource): LiveOverlayControl
 				throw new TypeError("nodeId must be a non-empty string");
 			}
 			current?.close();
+			let createdComponent: LiveOverlayComponent | undefined;
 			const component = createSession(source, nodeId, options, () => {
-				if (current === component) current = undefined;
+				if (current === createdComponent) current = undefined;
 			});
+			createdComponent = component;
 			current = component;
 			return component;
 		},
@@ -140,7 +142,8 @@ function createSession(
 	let subscription: LiveOverlaySubscription | undefined;
 	let overlayHandle: OverlayHandle | undefined;
 	let lastTextLine = -1;
-	let turn = source.getNode(nodeId)?.turn ?? source.getNode(nodeId)?.turns ?? 0;
+	const initialNode = source.getNode(nodeId);
+	let turn = initialNode?.turn ?? initialNode?.turns ?? 0;
 	let statusOverride: string | undefined;
 	let settledAt: number | undefined;
 
@@ -148,7 +151,7 @@ function createSession(
 		if (typeof value !== "string") return "";
 		return stripTerminalSequences(value)
 			.replace(/\r\n?/g, "\n")
-			.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+			.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 	};
 
 	const keepActivityBounded = (): void => {
