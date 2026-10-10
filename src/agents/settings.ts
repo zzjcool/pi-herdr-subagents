@@ -18,7 +18,10 @@ import {
 	type TeamConfig,
 	type TeamMember,
 } from "../shared/types.ts";
-import { parseContextSetting } from "./context.ts";
+import {
+	parseContextSetting,
+	readConventionContext,
+} from "./context.ts";
 import { OVERRIDE_FIELDS } from "./overrides.ts";
 import { parseModelScopeConfig } from "./model-scope.ts";
 import { parsePresets } from "./presets.ts";
@@ -28,6 +31,9 @@ const VALID_PLACEMENTS: ReadonlySet<string> = new Set([
 	"split-right",
 	"new-tab",
 ]);
+
+const PARENT_CONTEXT_CONVENTION = "subagents-parent-context.md";
+const CHILD_CONTEXT_CONVENTION = "subagents-child-context.md";
 
 export interface LoadSettingsOptions {
 	userSettingsPath: string;
@@ -185,41 +191,57 @@ function parseOnBlocked(
 	return value as OnBlockedPolicy;
 }
 
+/** Resolve an explicit context setting or fall back to its convention file. */
+function contextSettingValue(
+	input: Record<string, unknown>,
+	field: "parentContext" | "childContext",
+	conventionFilename: string,
+	baseDir: string,
+): string | undefined {
+	const value = input[field];
+	if (value === false) return undefined;
+	if (value !== undefined) return parseContextSetting(value, field, baseDir);
+	return readConventionContext(baseDir, conventionFilename);
+}
+
 /** Extract and validate the `subagents` object from a parsed settings document. */
 export function parseSubagentSettings(
 	doc: Record<string, unknown> | undefined,
 	filePath: string,
 ): SubagentsSettings {
-	if (!doc) return {};
-	const raw = doc.subagents;
-	if (raw === undefined) return {};
-	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+	const raw = doc?.subagents;
+	if (
+		raw !== undefined &&
+		(!raw || typeof raw !== "object" || Array.isArray(raw))
+	) {
 		throw new Error(
 			`Subagent settings in '${filePath}' have invalid 'subagents'; expected an object.`,
 		);
 	}
-	const input = raw as Record<string, unknown>;
+	const input =
+		raw === undefined ? {} : (raw as Record<string, unknown>);
 	const out: SubagentsSettings = {};
+	const baseDir = path.dirname(filePath);
 
 	setIf(out, "enabled", requiredBoolean(input.enabled, "enabled", filePath));
-	setIf(
-		out,
+
+	setIf(out, "parentContext", contextSettingValue(
+		input,
 		"parentContext",
-		parseContextSetting(
-			input.parentContext,
-			"parentContext",
-			path.dirname(filePath),
-		),
-	);
-	setIf(
-		out,
+		PARENT_CONTEXT_CONVENTION,
+		baseDir,
+	));
+	setIf(out, "childContext", contextSettingValue(
+		input,
 		"childContext",
-		parseContextSetting(
-			input.childContext,
-			"childContext",
-			path.dirname(filePath),
-		),
-	);
+		CHILD_CONTEXT_CONVENTION,
+		baseDir,
+	));
+
+	// Convention files are tied to the settings directory, not the presence of
+	// a document or `subagents` object. Read them before returning for either
+	// absent case; `enabled` has already been validated when it is present.
+	if (raw === undefined) return out;
 
 	// Each reader validates one field and returns `undefined` when absent, so a
 	// missing key and a rejected key stay distinguishable (only the latter throws).

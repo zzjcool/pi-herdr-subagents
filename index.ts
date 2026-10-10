@@ -268,13 +268,23 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	// the toggle command is what writes to this variable.
 	let sessionEnabledOverride: boolean | undefined;
 	/** Effective enabled state: session override > merged settings. */
-	const subagentsEnabled = (cwd: string): boolean =>
-		sessionEnabledOverride ??
-		loadSubagentSettings({
-			userSettingsPath: path.join(getAgentDir(), "settings.json"),
-			projectSettingsPath: path.join(cwd, ".pi", "settings.json"),
-		}).enabled !==
-		false;
+	const subagentsEnabled = (cwd: string): boolean => {
+		if (sessionEnabledOverride !== undefined) return sessionEnabledOverride;
+		try {
+			return (
+				loadSubagentSettings({
+					userSettingsPath: path.join(getAgentDir(), "settings.json"),
+					projectSettingsPath: path.join(cwd, ".pi", "settings.json"),
+				}).enabled !== false
+			);
+		} catch (error) {
+			console.warn(
+				"[pi-herdr-subagents] Unable to load settings while checking whether subagents are enabled; defaulting to enabled.",
+				error,
+			);
+			return true;
+		}
+	};
 
 	registerToggleCommand(pi, {
 		sessionEnabled: () => subagentsEnabled(lastCwd),

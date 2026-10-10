@@ -47,6 +47,14 @@ test("enabled: rejects non-booleans with the file path", () => {
 		() => parseSubagentSettings({ subagents: { enabled: 0 } }, "/s.json"),
 		/invalid 'enabled'; expected a boolean/,
 	);
+	assert.throws(
+		() =>
+			parseSubagentSettings(
+				{ subagents: { enabled: 42, parentContext: 123 } },
+				"/s.json",
+			),
+		/invalid 'enabled'; expected a boolean/,
+	);
 });
 
 test("enabled: project wins over user", () => {

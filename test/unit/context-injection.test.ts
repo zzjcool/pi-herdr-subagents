@@ -1,12 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import {
 	parseContextSetting,
+	readConventionContext,
 	resolveContextValue,
 } from "../../src/agents/context.ts";
+import herdrSubagents from "../../index.ts";
 import {
 	loadSubagentSettings,
 	resolveSubagentSettings,
@@ -30,6 +38,68 @@ function agent(over: Partial<AgentConfig> = {}): AgentConfig {
 	};
 }
 
+type ExtensionEvent = (...args: unknown[]) => unknown;
+
+function withRegisteredExtension<T>(
+	agentDir: string,
+	run: (events: Map<string, ExtensionEvent>) => T,
+): T {
+	const previous = {
+		agentDir: process.env.PI_CODING_AGENT_DIR,
+		child: process.env.PI_SUBAGENT_CHILD,
+		nested: process.env.PI_SUBAGENT_ALLOW_NESTED,
+		extraAgents: process.env.PI_HERDR_SUBAGENTS_EXTRA_AGENT_DIRS,
+	};
+	try {
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		delete process.env.PI_SUBAGENT_CHILD;
+		delete process.env.PI_SUBAGENT_ALLOW_NESTED;
+		delete process.env.PI_HERDR_SUBAGENTS_EXTRA_AGENT_DIRS;
+
+		const events = new Map<string, ExtensionEvent>();
+		const pi = {
+			registerMessageRenderer() {},
+			registerTool() {},
+			registerCommand() {},
+			sendMessage() {},
+			events: { emit() {} },
+			on(name: string, handler: unknown) {
+				events.set(name, handler as ExtensionEvent);
+			},
+		};
+		herdrSubagents(pi as never);
+		return run(events);
+	} finally {
+		if (previous.agentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previous.agentDir;
+		if (previous.child === undefined) delete process.env.PI_SUBAGENT_CHILD;
+		else process.env.PI_SUBAGENT_CHILD = previous.child;
+		if (previous.nested === undefined)
+			delete process.env.PI_SUBAGENT_ALLOW_NESTED;
+		else process.env.PI_SUBAGENT_ALLOW_NESTED = previous.nested;
+		if (previous.extraAgents === undefined)
+			delete process.env.PI_HERDR_SUBAGENTS_EXTRA_AGENT_DIRS;
+		else process.env.PI_HERDR_SUBAGENTS_EXTRA_AGENT_DIRS = previous.extraAgents;
+	}
+}
+
+function invokeBeforeAgentStart(
+	events: Map<string, ExtensionEvent>,
+	cwd: string,
+): string {
+	const handler = events.get("before_agent_start");
+	assert.ok(handler, "before_agent_start handler must be registered");
+	const result = handler(
+		{ systemPrompt: "base prompt", systemPromptOptions: {} },
+		{ cwd },
+	);
+	assert.ok(result && typeof result === "object");
+	assert.ok("systemPrompt" in result);
+	const systemPrompt = (result as { systemPrompt?: unknown }).systemPrompt;
+	assert.equal(typeof systemPrompt, "string");
+	return systemPrompt as string;
+}
+
 // ── context.ts: value forms ─────────────────────────────────────────────
 
 test("parseContextSetting passes inline markdown through", () => {
@@ -37,6 +107,21 @@ test("parseContextSetting passes inline markdown through", () => {
 		parseContextSetting("be kind", "parentContext", "/base"),
 		"be kind",
 	);
+});
+
+test("readConventionContext ignores missing, unreadable, and blank files", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-reader-"));
+	try {
+		mkdirSync(path.join(dir, "unreadable.md"));
+		writeFileSync(path.join(dir, "blank.md"), " \n\t");
+		writeFileSync(path.join(dir, "present.md"), "  convention text  \n");
+		assert.equal(readConventionContext(dir, "missing.md"), undefined);
+		assert.equal(readConventionContext(dir, "unreadable.md"), undefined);
+		assert.equal(readConventionContext(dir, "blank.md"), undefined);
+		assert.equal(readConventionContext(dir, "present.md"), "convention text");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("parseContextSetting resolves @file references against baseDir", () => {
@@ -119,6 +204,389 @@ test("settings load parentContext/childContext with @file resolution", () => {
 		});
 		assert.equal(settings.parentContext, "parent inline");
 		assert.equal(settings.childContext, "policy text");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("settings inject adjacent convention contexts when subagents key is absent", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-user-"));
+	const agentDir = path.join(dir, "agent");
+	const projectRoot = path.join(dir, "project");
+	mkdirSync(agentDir);
+	mkdirSync(projectRoot);
+	const userSettingsPath = path.join(agentDir, "settings.json");
+	try {
+		writeFileSync(userSettingsPath, JSON.stringify({ unrelated: true }));
+		writeFileSync(
+			path.join(agentDir, "subagents-parent-context.md"),
+			"user parent convention text",
+		);
+		writeFileSync(
+			path.join(agentDir, "subagents-child-context.md"),
+			"user child convention text",
+		);
+
+		const settings = loadSubagentSettings({ userSettingsPath });
+		assert.equal(settings.parentContext, "user parent convention text");
+		assert.equal(settings.childContext, "user child convention text");
+
+		const systemPrompt = withRegisteredExtension(agentDir, (events) =>
+			invokeBeforeAgentStart(events, projectRoot),
+		);
+		assert.ok(systemPrompt.includes("user parent convention text"));
+		assert.ok(!systemPrompt.includes("user child convention text"));
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("settings missing file still reads its directory convention context", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-missing-settings-"));
+	try {
+		writeFileSync(
+			path.join(dir, "subagents-parent-context.md"),
+			"from a directory without settings",
+		);
+		assert.equal(
+			loadSubagentSettings({
+				userSettingsPath: path.join(dir, "settings.json"),
+			}).parentContext,
+			"from a directory without settings",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("explicit @path context takes precedence over an adjacent convention file", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-explicit-"));
+	try {
+		writeFileSync(
+			path.join(dir, "settings.json"),
+			JSON.stringify({ subagents: { parentContext: "@explicit.md" } }),
+		);
+		writeFileSync(path.join(dir, "explicit.md"), "explicit context");
+		writeFileSync(
+			path.join(dir, "subagents-parent-context.md"),
+			"convention context",
+		);
+		assert.equal(
+			loadSubagentSettings({
+				userSettingsPath: path.join(dir, "settings.json"),
+			}).parentContext,
+			"explicit context",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("false disables same-layer convention context injection", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-false-"));
+	const agentDir = path.join(dir, "agent");
+	const projectRoot = path.join(dir, "project");
+	mkdirSync(agentDir);
+	mkdirSync(projectRoot);
+	const userSettingsPath = path.join(agentDir, "settings.json");
+	try {
+		writeFileSync(
+			userSettingsPath,
+			JSON.stringify({
+				subagents: { parentContext: false, childContext: false },
+			}),
+		);
+		writeFileSync(
+			path.join(agentDir, "subagents-parent-context.md"),
+			"parent must not be injected",
+		);
+		writeFileSync(
+			path.join(agentDir, "subagents-child-context.md"),
+			"child must not be injected",
+		);
+		const settings = loadSubagentSettings({ userSettingsPath });
+		assert.equal(settings.parentContext, undefined);
+		assert.equal(settings.childContext, undefined);
+
+		const systemPrompt = withRegisteredExtension(agentDir, (events) =>
+			invokeBeforeAgentStart(events, projectRoot),
+		);
+		assert.ok(!systemPrompt.includes("parent must not be injected"));
+		assert.ok(!systemPrompt.includes("child must not be injected"));
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("an empty adjacent convention file is silently ignored", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-empty-"));
+	try {
+		writeFileSync(path.join(dir, "settings.json"), JSON.stringify({}));
+		writeFileSync(
+			path.join(dir, "subagents-parent-context.md"),
+			" \n\t",
+		);
+		assert.doesNotThrow(() => {
+			assert.equal(
+				loadSubagentSettings({
+					userSettingsPath: path.join(dir, "settings.json"),
+				}).parentContext,
+				undefined,
+			);
+		});
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("project convention context loads when project settings omit subagents", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-project-"));
+	const userDir = path.join(dir, "user");
+	const projectPiDir = path.join(dir, "project", ".pi");
+	mkdirSync(userDir);
+	mkdirSync(projectPiDir, { recursive: true });
+	try {
+		writeFileSync(path.join(userDir, "settings.json"), JSON.stringify({}));
+		writeFileSync(path.join(projectPiDir, "settings.json"), JSON.stringify({}));
+		writeFileSync(
+			path.join(projectPiDir, "subagents-parent-context.md"),
+			"project convention context",
+		);
+		assert.equal(
+			loadSubagentSettings({
+				userSettingsPath: path.join(userDir, "settings.json"),
+				projectSettingsPath: path.join(projectPiDir, "settings.json"),
+			}).parentContext,
+			"project convention context",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("project convention contexts win when both layers have only convention files", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-both-layers-"));
+	const userDir = path.join(dir, "user");
+	const projectPiDir = path.join(dir, "project", ".pi");
+	mkdirSync(userDir);
+	mkdirSync(projectPiDir, { recursive: true });
+	try {
+		writeFileSync(path.join(userDir, "settings.json"), JSON.stringify({}));
+		writeFileSync(path.join(projectPiDir, "settings.json"), JSON.stringify({}));
+		writeFileSync(
+			path.join(userDir, "subagents-parent-context.md"),
+			"user parent convention context",
+		);
+		writeFileSync(
+			path.join(userDir, "subagents-child-context.md"),
+			"user child convention context",
+		);
+		writeFileSync(
+			path.join(projectPiDir, "subagents-parent-context.md"),
+			"project parent convention context",
+		);
+		writeFileSync(
+			path.join(projectPiDir, "subagents-child-context.md"),
+			"project child convention context",
+		);
+
+		const settings = loadSubagentSettings({
+			userSettingsPath: path.join(userDir, "settings.json"),
+			projectSettingsPath: path.join(projectPiDir, "settings.json"),
+		});
+		assert.equal(settings.parentContext, "project parent convention context");
+		assert.equal(settings.childContext, "project child convention context");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("project false context suppresses its convention without masking user explicit value", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-project-false-"));
+	const userDir = path.join(dir, "user");
+	const projectPiDir = path.join(dir, "project", ".pi");
+	mkdirSync(userDir);
+	mkdirSync(projectPiDir, { recursive: true });
+	try {
+		writeFileSync(
+			path.join(userDir, "settings.json"),
+			JSON.stringify({ subagents: { parentContext: "user explicit context" } }),
+		);
+		writeFileSync(
+			path.join(projectPiDir, "settings.json"),
+			JSON.stringify({ subagents: { parentContext: false } }),
+		);
+		writeFileSync(
+			path.join(projectPiDir, "subagents-parent-context.md"),
+			"project convention suppressed by false",
+		);
+
+		assert.equal(
+			loadSubagentSettings({
+				userSettingsPath: path.join(userDir, "settings.json"),
+				projectSettingsPath: path.join(projectPiDir, "settings.json"),
+			}).parentContext,
+			"user explicit context",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("project explicit context overrides user convention context", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-project-explicit-"));
+	const userDir = path.join(dir, "user");
+	const projectPiDir = path.join(dir, "project", ".pi");
+	mkdirSync(userDir);
+	mkdirSync(projectPiDir, { recursive: true });
+	try {
+		writeFileSync(path.join(userDir, "settings.json"), JSON.stringify({}));
+		writeFileSync(
+			path.join(userDir, "subagents-parent-context.md"),
+			"user convention context",
+		);
+		writeFileSync(
+			path.join(projectPiDir, "settings.json"),
+			JSON.stringify({ subagents: { parentContext: "project explicit context" } }),
+		);
+		assert.equal(
+			loadSubagentSettings({
+				userSettingsPath: path.join(userDir, "settings.json"),
+				projectSettingsPath: path.join(projectPiDir, "settings.json"),
+			}).parentContext,
+			"project explicit context",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("project convention still replaces a user explicit context wholesale", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-project-wholesale-"));
+	const userDir = path.join(dir, "user");
+	const projectPiDir = path.join(dir, "project", ".pi");
+	mkdirSync(userDir);
+	mkdirSync(projectPiDir, { recursive: true });
+	try {
+		writeFileSync(
+			path.join(userDir, "settings.json"),
+			JSON.stringify({ subagents: { parentContext: "user explicit context" } }),
+		);
+		writeFileSync(path.join(projectPiDir, "settings.json"), JSON.stringify({}));
+		writeFileSync(
+			path.join(projectPiDir, "subagents-parent-context.md"),
+			"project convention wins",
+		);
+		assert.equal(
+			loadSubagentSettings({
+				userSettingsPath: path.join(userDir, "settings.json"),
+				projectSettingsPath: path.join(projectPiDir, "settings.json"),
+			}).parentContext,
+			"project convention wins",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("user false suppresses its convention when project settings have no context", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-false-project-"));
+	const userDir = path.join(dir, "user");
+	const projectPiDir = path.join(dir, "project", ".pi");
+	mkdirSync(userDir);
+	mkdirSync(projectPiDir, { recursive: true });
+	try {
+		writeFileSync(
+			path.join(userDir, "settings.json"),
+			JSON.stringify({ subagents: { parentContext: false } }),
+		);
+		writeFileSync(
+			path.join(userDir, "subagents-parent-context.md"),
+			"user convention is disabled",
+		);
+		writeFileSync(path.join(projectPiDir, "settings.json"), JSON.stringify({}));
+		assert.equal(
+			loadSubagentSettings({
+				userSettingsPath: path.join(userDir, "settings.json"),
+				projectSettingsPath: path.join(projectPiDir, "settings.json"),
+			}).parentContext,
+			undefined,
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("before_agent_start still fails loudly for a broken explicit context reference", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-before-start-broken-"));
+	const agentDir = path.join(dir, "agent");
+	const projectRoot = path.join(dir, "project");
+	mkdirSync(agentDir);
+	mkdirSync(projectRoot);
+	try {
+		writeFileSync(
+			path.join(agentDir, "settings.json"),
+			JSON.stringify({ subagents: { parentContext: "@missing-context.md" } }),
+		);
+		const originalWarn = console.warn;
+		try {
+			console.warn = () => {};
+			assert.throws(
+				() =>
+					withRegisteredExtension(agentDir, (events) =>
+						invokeBeforeAgentStart(events, projectRoot),
+					),
+				/parentContext.*missing-context\.md.*cannot be read/,
+			);
+		} finally {
+			console.warn = originalWarn;
+		}
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("enabled check defaults to true when explicit context settings are broken", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-enabled-broken-"));
+	const agentDir = path.join(dir, "agent");
+	const projectRoot = path.join(dir, "project");
+	mkdirSync(agentDir);
+	mkdirSync(projectRoot);
+	try {
+		writeFileSync(
+			path.join(agentDir, "settings.json"),
+			JSON.stringify({ subagents: { parentContext: "@missing-context.md" } }),
+		);
+
+		const warnings: string[] = [];
+		const originalWarn = console.warn;
+		let result: unknown;
+		try {
+			console.warn = (...args: unknown[]) => {
+				warnings.push(args.map(String).join(" "));
+			};
+			result = withRegisteredExtension(agentDir, (events) => {
+				const handler = events.get("tool_call");
+				assert.ok(handler, "tool_call handler must be registered");
+				return handler(
+					{
+						toolName: "bash",
+						input: { command: "herdr agent start worker" },
+					},
+					{ cwd: projectRoot },
+				);
+			});
+		} finally {
+			console.warn = originalWarn;
+		}
+
+		assert.ok(result && typeof result === "object");
+		assert.equal((result as { block?: unknown }).block, true);
+		assert.match(
+			warnings.join(" "),
+			/pi-herdr-subagents|defaulting/,
+			"a warning should explain the settings fallback",
+		);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
