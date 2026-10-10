@@ -17,7 +17,9 @@ whole launch path.
 
 > **Name note.** This package was formerly published as
 > `@zzjcool/pi-herdr-subagents` (through 0.14.3). It was renamed to
-> `pi-herdr-swarm`, first published as 0.9.0 — the previous name collided with
+> `@zzjcool/pi-herdr-subagents` (through 0.14.3). It was renamed to
+> `pi-herdr-swarm`, first published as 0.15.0 (continuing the old package's
+> version line) — the previous name collided with
 > an unrelated
 > project on npm. To migrate: `pi uninstall` the old package, then
 > `pi install npm:pi-herdr-swarm`.

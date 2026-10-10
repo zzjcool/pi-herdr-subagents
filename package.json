@@ -1,6 +1,6 @@
 {
   "name": "pi-herdr-swarm",
-  "version": "0.9.0",
+  "version": "0.15.0",
   "description": "Herdr-backed subagents for Pi: visible, steerable, resumable child agents in Herdr panes",
   "type": "module",
   "license": "MIT",
