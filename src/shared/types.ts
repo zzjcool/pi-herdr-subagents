@@ -6,7 +6,7 @@
  *   - Additive changes (new optional fields) are allowed.
  *   - Breaking changes require coordinating all modules.
  *
- * Design authority: herdr-subagents-design.md (33 measured findings F1-F33).
+ * Design authority: pi-herdr-swarm design.md (docs/design.md) (33 measured findings F1-F33).
  */
 
 // =============================================================================
