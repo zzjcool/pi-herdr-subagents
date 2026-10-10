@@ -65,7 +65,10 @@ import {
 	TOOL_DESCRIPTION,
 } from "./src/extension/playbook.ts";
 import { getAgentDir } from "./src/agents/paths.ts";
-import { Orchestrator } from "./src/runs/orchestrator.ts";
+import {
+	effectiveMaxDepth,
+	Orchestrator,
+} from "./src/runs/orchestrator.ts";
 import {
 	createSessionLayout,
 	type SessionLayout,
@@ -580,6 +583,7 @@ async function controlAction(input: {
 		runDir: store.runDir(found.runId),
 		cwd,
 		layout: input.layout,
+		maxDepth: effectiveMaxDepth(input.settings.legion?.maxDepth),
 		workspaceId: process.env.HERDR_WORKSPACE_ID,
 		parentPaneId: process.env.HERDR_PANE_ID,
 		childContext: input.settings.childContext,
@@ -827,9 +831,11 @@ async function launchFamily(input: {
 		details: {},
 	});
 
+	const maxDepth = effectiveMaxDepth(settings.legion?.maxDepth);
 	const run = store.createRun({
 		task: plan.task,
 		cwd,
+		maxDepth,
 		herdr: {
 			...(process.env.HERDR_WORKSPACE_ID
 				? { workspaceId: process.env.HERDR_WORKSPACE_ID }
@@ -844,6 +850,7 @@ async function launchFamily(input: {
 		runDir: store.runDir(run.runId),
 		cwd,
 		layout,
+		maxDepth,
 		// Enforce the session spawn budget so a runaway fan-out cannot exhaust
 		// the machine (ErrorCodes.BUDGET_EXCEEDED).
 		maxSpawns: settings.maxSubagentSpawnsPerSession ?? null,

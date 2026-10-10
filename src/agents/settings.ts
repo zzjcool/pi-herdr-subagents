@@ -9,8 +9,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import {
 	AGENT_KINDS,
+	DEFAULT_LEGION_SETTINGS,
 	type AgentOverride,
 	type HerdrSettings,
+	type LegionSettings,
 	type ModelScopeConfig,
 	type OnBlockedPolicy,
 	type Placement,
@@ -177,6 +179,192 @@ function parseHerdrSettings(
 	return out;
 }
 
+const LEGION_PHASES = [
+	"planning",
+	"implementing",
+	"reviewing",
+	"verifying",
+] as const;
+
+const LEGION_EXPLICIT_FIELDS = Symbol("legionExplicitFields");
+const LEGION_SETTING_FIELDS = [
+	"maxDepth",
+	"maxChildrenPerNode",
+	"maxActiveNodes",
+	"phaseTimeouts",
+	"verifyCommandTimeoutMs",
+	"mailRatePer5Min",
+	"usagePollMs",
+	"orphanStaleMs",
+] as const satisfies readonly (keyof LegionSettings)[];
+
+interface LegionExplicitFields {
+	fields: Set<keyof LegionSettings>;
+	phaseTimeouts: Set<(typeof LEGION_PHASES)[number]>;
+}
+
+type TrackedLegionSettings = LegionSettings & {
+	[LEGION_EXPLICIT_FIELDS]?: LegionExplicitFields;
+};
+
+function parseLegionSettings(
+	value: unknown,
+	filePath: string,
+): LegionSettings | undefined {
+	if (value === undefined) return undefined;
+	if (!isRecord(value)) {
+		throw new Error(
+			`Subagent settings in '${filePath}' have invalid 'legion'; expected an object.`,
+		);
+	}
+	const input = value;
+	const out: LegionSettings = {
+		...DEFAULT_LEGION_SETTINGS,
+		phaseTimeouts: { ...DEFAULT_LEGION_SETTINGS.phaseTimeouts },
+	};
+	const phaseFields = new Set<(typeof LEGION_PHASES)[number]>();
+
+	const maxDepth = nonNegativeInt(input.maxDepth, "legion.maxDepth", filePath);
+	if (maxDepth !== undefined) out.maxDepth = maxDepth;
+	const maxChildrenPerNode = nonNegativeInt(
+		input.maxChildrenPerNode,
+		"legion.maxChildrenPerNode",
+		filePath,
+	);
+	if (maxChildrenPerNode !== undefined)
+		out.maxChildrenPerNode = maxChildrenPerNode;
+	const maxActiveNodes = nonNegativeInt(
+		input.maxActiveNodes,
+		"legion.maxActiveNodes",
+		filePath,
+	);
+	if (maxActiveNodes !== undefined) out.maxActiveNodes = maxActiveNodes;
+
+	if (input.phaseTimeouts !== undefined) {
+		if (!isRecord(input.phaseTimeouts)) {
+			throw new Error(
+				`Subagent settings in '${filePath}' have invalid 'legion.phaseTimeouts'; expected an object.`,
+			);
+		}
+		const timeouts: NonNullable<LegionSettings["phaseTimeouts"]> = {
+			...DEFAULT_LEGION_SETTINGS.phaseTimeouts,
+		};
+		for (const phase of LEGION_PHASES) {
+			const timeout = positiveInt(
+				input.phaseTimeouts[phase],
+				`legion.phaseTimeouts.${phase}`,
+				filePath,
+			);
+			if (timeout !== undefined) {
+				timeouts[phase] = timeout;
+				if (Object.hasOwn(input.phaseTimeouts, phase))
+					phaseFields.add(phase);
+			}
+		}
+		out.phaseTimeouts = timeouts;
+	}
+
+	const verifyCommandTimeoutMs = positiveInt(
+		input.verifyCommandTimeoutMs,
+		"legion.verifyCommandTimeoutMs",
+		filePath,
+	);
+	if (verifyCommandTimeoutMs !== undefined)
+		out.verifyCommandTimeoutMs = verifyCommandTimeoutMs;
+	const mailRatePer5Min = nonNegativeInt(
+		input.mailRatePer5Min,
+		"legion.mailRatePer5Min",
+		filePath,
+	);
+	if (mailRatePer5Min !== undefined)
+		out.mailRatePer5Min = mailRatePer5Min;
+	const usagePollMs = positiveInt(
+		input.usagePollMs,
+		"legion.usagePollMs",
+		filePath,
+	);
+	if (usagePollMs !== undefined) out.usagePollMs = usagePollMs;
+	const orphanStaleMs = positiveInt(
+		input.orphanStaleMs,
+		"legion.orphanStaleMs",
+		filePath,
+	);
+	if (orphanStaleMs !== undefined) out.orphanStaleMs = orphanStaleMs;
+
+	Object.defineProperty(out, LEGION_EXPLICIT_FIELDS, {
+		value: {
+			fields: new Set(
+				LEGION_SETTING_FIELDS.filter((field) => Object.hasOwn(input, field)),
+			),
+			phaseTimeouts: phaseFields,
+		} satisfies LegionExplicitFields,
+	});
+	return out;
+}
+
+function legionExplicitFields(
+	settings: LegionSettings | undefined,
+): LegionExplicitFields {
+	if (!settings) return { fields: new Set(), phaseTimeouts: new Set() };
+	const tracked = settings as TrackedLegionSettings;
+	const explicit = tracked[LEGION_EXPLICIT_FIELDS];
+	if (explicit) return explicit;
+	return {
+		fields: new Set(
+			LEGION_SETTING_FIELDS.filter((field) => Object.hasOwn(settings, field)),
+		),
+		phaseTimeouts: new Set(
+			LEGION_PHASES.filter((phase) =>
+				Object.hasOwn(settings.phaseTimeouts ?? {}, phase),
+			),
+		),
+	};
+}
+
+function mergeLegionSettings(
+	user: LegionSettings | undefined,
+	project: LegionSettings | undefined,
+): LegionSettings | undefined {
+	if (!user && !project) return undefined;
+	const userExplicit = legionExplicitFields(user);
+	const projectExplicit = legionExplicitFields(project);
+	const out: TrackedLegionSettings = {
+		...DEFAULT_LEGION_SETTINGS,
+		...(user ?? {}),
+		phaseTimeouts: {
+			...DEFAULT_LEGION_SETTINGS.phaseTimeouts,
+			...(user?.phaseTimeouts ?? {}),
+		},
+	};
+
+	if (project) {
+		for (const field of projectExplicit.fields) {
+			if (field === "phaseTimeouts") continue;
+			Object.assign(out, { [field]: project[field] });
+		}
+		const phaseTimeouts = { ...(out.phaseTimeouts ?? {}) };
+		for (const phase of projectExplicit.phaseTimeouts) {
+			const timeout = project.phaseTimeouts?.[phase];
+			if (timeout !== undefined) phaseTimeouts[phase] = timeout;
+		}
+		out.phaseTimeouts = phaseTimeouts;
+	}
+
+	Object.defineProperty(out, LEGION_EXPLICIT_FIELDS, {
+		value: {
+			fields: new Set([
+				...userExplicit.fields,
+				...projectExplicit.fields,
+			]),
+			phaseTimeouts: new Set([
+				...userExplicit.phaseTimeouts,
+				...projectExplicit.phaseTimeouts,
+			]),
+		} satisfies LegionExplicitFields,
+	});
+	return out;
+}
+
 function parseOnBlocked(
 	value: unknown,
 	filePath: string,
@@ -270,6 +458,8 @@ export function parseSubagentSettings(
 
 	const herdr = parseHerdrSettings(input.herdr, filePath);
 	if (herdr) out.herdr = herdr;
+	const legion = parseLegionSettings(input.legion, filePath);
+	if (legion !== undefined) out.legion = legion;
 
 	readJoinFields(input, out, filePath);
 
@@ -481,9 +671,10 @@ export function loadSubagentSettings(
 
 /**
  * Merge project settings over user settings.
- * `herdr`, `agentOverrides`, `teams` and `presets` shallow-merge;
- * `modelScope` is replaced wholesale. A project team with the same name
- * replaces the user's complete team definition.
+ * `herdr`, `legion`, `agentOverrides`, `teams` and `presets` shallow-merge;
+ * `legion.phaseTimeouts` also merges per phase. `modelScope` is replaced
+ * wholesale. A project team with the same name replaces the user's complete
+ * team definition.
  */
 export function resolveSubagentSettings(
 	user: SubagentsSettings,
@@ -531,6 +722,10 @@ export function resolveSubagentSettings(
 
 	if (project.herdr) {
 		out.herdr = { ...(user.herdr ?? {}), ...project.herdr };
+	}
+
+	if (project.legion !== undefined || user.legion !== undefined) {
+		out.legion = mergeLegionSettings(user.legion, project.legion);
 	}
 
 	if (project.presets) {

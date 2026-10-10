@@ -646,6 +646,42 @@ export interface HerdrSettings {
 	sessionRetentionMaxBytesPerRun?: number;
 }
 
+export interface LegionPhaseTimeouts {
+	planning?: number;
+	implementing?: number;
+	reviewing?: number;
+	verifying?: number;
+}
+
+/** Settings for the v2 legion tree, incrementally consumed by its milestones. */
+export interface LegionSettings {
+	maxDepth?: number;
+	maxChildrenPerNode?: number;
+	maxActiveNodes?: number;
+	phaseTimeouts?: LegionPhaseTimeouts;
+	verifyCommandTimeoutMs?: number;
+	mailRatePer5Min?: number;
+	usagePollMs?: number;
+	orphanStaleMs?: number;
+}
+
+/** Defaults from the frozen v2 contract §11.4. */
+export const DEFAULT_LEGION_SETTINGS = {
+	maxDepth: 4,
+	maxChildrenPerNode: 8,
+	maxActiveNodes: 30,
+	phaseTimeouts: {
+		planning: 900_000,
+		implementing: 3_600_000,
+		reviewing: 1_800_000,
+		verifying: 900_000,
+	},
+	verifyCommandTimeoutMs: 600_000,
+	mailRatePer5Min: 10,
+	usagePollMs: 30_000,
+	orphanStaleMs: 90_000,
+} as const satisfies Required<LegionSettings>;
+
 export type AgentOverride = Partial<AgentConfig> & { disabled?: boolean };
 
 export type TeamMember =
@@ -712,6 +748,7 @@ export interface SubagentsSettings {
 	disableThinking?: boolean;
 	maxSubagentSpawnsPerSession?: number;
 	herdr?: HerdrSettings;
+	legion?: LegionSettings;
 	/** Completion-notice merge mode. Default "smart". */
 	joinMode?: "each" | "smart";
 	/** smart-mode group flush window (ms). Default 10000. */
