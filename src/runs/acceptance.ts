@@ -2,13 +2,13 @@
  * Post-collect verification of writer acceptance criteria.
  *
  * L2 (`{"ok": true}`) is only attested — the agent is marking its own homework.
- * When a required criterion asks for `verification-output`, this module runs a
- * command in the child's cwd and promotes the result to `verified`
- * or rejects it. Semantic criteria without that evidence stay a checklist.
- *
- * The command is the first required `verification-output` criterion's
- * `command` field, or `VERIFY_COMMAND` when none is set. Semantic `must`
- * strings are never parsed (F32 / F44).
+ * When a required criterion asks for `verification-output` **and carries an
+ * explicit `command`**, this module runs that command in the child's cwd and
+ * promotes the result to `verified` or rejects it. A criterion without a
+ * `command` stays attested with the criterion listed as pending: the parent
+ * confirms it from the child's pasted output instead of this module guessing
+ * a project-unaware command (F32 / F44: semantic `must` strings are never
+ * parsed either).
  */
 
 import { spawn } from "node:child_process";
@@ -17,7 +17,6 @@ import type {
 	AcceptanceResult,
 } from "../shared/types.ts";
 
-export const VERIFY_COMMAND = "npm run typecheck && npm test";
 export const DEFAULT_VERIFY_TIMEOUT_MS = 600_000;
 
 export interface CommandResult {
@@ -42,17 +41,34 @@ export function needsVerification(
 	);
 }
 
-/** First required verification-output command, else the frozen default. */
+/** Union of already-pending criteria and the un-runnable ones, deduped by id. */
+function mergePending(
+	acceptance: AcceptanceResult,
+	criteria: AcceptanceCriterion[] | undefined,
+): AcceptanceCriterion[] {
+	const byId = new Map(
+		(acceptance.pendingCriteria ?? []).map((c) => [c.id, c]),
+	);
+	for (const criterion of criteria ?? []) {
+		if (criterion.severity === "optional") continue;
+		if (!(criterion.evidence ?? []).includes("verification-output")) continue;
+		if (criterion.command?.trim()) continue;
+		byId.set(criterion.id, { ...criterion });
+	}
+	return [...byId.values()];
+}
+
+/** First required verification-output command, else undefined. */
 export function verifyCommandOf(
 	criteria: AcceptanceCriterion[] | undefined,
-): string {
+): string | undefined {
 	for (const criterion of criteria ?? []) {
 		if (criterion.severity === "optional") continue;
 		if (!(criterion.evidence ?? []).includes("verification-output")) continue;
 		const command = criterion.command?.trim();
 		if (command) return command;
 	}
-	return VERIFY_COMMAND;
+	return undefined;
 }
 
 export function defaultVerifyRunner(
@@ -114,6 +130,19 @@ export async function applyVerification(
 	if (!needsVerification(opts.criteria)) return acceptance;
 
 	const command = verifyCommandOf(opts.criteria);
+	// No explicit command on the criterion: do not guess one. The project's own
+	// verifier only the child/parent can know — running a hardcoded default
+	// here would verify the wrong thing on every non-Node project. Keep the
+	// result attested and surface the criteria as pending for the parent.
+	if (!command) {
+		return {
+			...acceptance,
+			level: "attested",
+			reason:
+				"verification-output criterion has no command; confirm from the child's pasted output",
+			pendingCriteria: mergePending(acceptance, opts.criteria),
+		};
+	}
 	const run = opts.run ?? defaultVerifyRunner;
 	const result = await run(command, opts.cwd, opts.timeoutMs);
 	const output = `${result.stdout}\n${result.stderr}`.trim();

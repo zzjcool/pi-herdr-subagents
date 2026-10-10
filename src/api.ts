@@ -153,7 +153,6 @@ export type {
 export { Orchestrator, preCreateSessionFile } from "./runs/orchestrator.ts";
 export type { CollectResult, OrchestratorDeps } from "./runs/orchestrator.ts";
 export {
-	VERIFY_COMMAND,
 	DEFAULT_VERIFY_TIMEOUT_MS,
 	applyVerification,
 	needsVerification,

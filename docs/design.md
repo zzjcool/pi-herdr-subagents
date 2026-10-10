@@ -24,7 +24,7 @@
 
 - 子进程强制加载 child-guard：拦 `herdr agent prompt|wait|send-keys|start`、外 pane read、只读角色写操作
 - 任务卡自动附录（禁止 wakeup、必须 `{"ok":…}`）
-- worker 的 `verification-output` 在 collect 后由插件跑 `criterion.command`（缺省 `npm run typecheck && npm test`），从 `attested` 升到 `verified` 或拒绝
+- worker 的 `verification-output` 在 collect 后由插件跑 `criterion.command`（有 command 才跑，从 `attested` 升到 `verified` 或拒绝；没 command 则保持 attested 并把标准标为 pending 交给父 agent 确认，不猜测默认命令）
 - `onBlocked: forward` 弹父会话 confirm（无 TUI 则 notify）
 - 自动 recycle；已 watch 的 `collect` 返回缓存；已回收的 `retire` 是 no-op
 - 完成通知 `deliverAs: followUp`；状态栏在输入框上方

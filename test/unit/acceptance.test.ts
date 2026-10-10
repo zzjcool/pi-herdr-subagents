@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-	VERIFY_COMMAND,
 	applyVerification,
 	defaultVerifyRunner,
 	needsVerification,
@@ -54,25 +53,35 @@ test("applyVerification skips when there is nothing to run", async () => {
 	assert.equal(out.level, "attested");
 });
 
-test("applyVerification promotes attested to verified when the command passes", async () => {
+test("applyVerification keeps attested when the criterion has no command", async () => {
+	const runs: string[] = [];
 	const out = await applyVerification(attested, {
 		cwd: "/work",
 		criteria,
-		run: async (command, cwd) => {
-			assert.equal(command, VERIFY_COMMAND);
-			assert.equal(cwd, "/work");
+		run: async (command) => {
+			runs.push(command);
 			return { code: 0, stdout: "ok\n", stderr: "" };
 		},
 	});
+	assert.equal(runs.length, 0, "must not guess a command");
 	assert.equal(out.status, "accepted");
-	assert.equal(out.level, "verified");
-	assert.match(out.reason ?? "", /verified/);
+	assert.equal(out.level, "attested");
+	assert.match(out.reason ?? "", /no command/);
+	assert.ok(
+		out.pendingCriteria?.some((c) => c.id === "typecheck-test-pass"),
+		"criterion surfaces as pending for the parent",
+	);
 });
 
 test("applyVerification rejects when the command fails", async () => {
 	const out = await applyVerification(attested, {
 		cwd: "/work",
-		criteria,
+		criteria: [
+			{
+				...criteria[0]!,
+				command: "make test",
+			},
+		],
 		run: async () => ({ code: 1, stdout: "fail\n", stderr: "boom" }),
 	});
 	assert.equal(out.status, "rejected");
@@ -97,9 +106,9 @@ test("applyVerification does not run on an already-rejected turn", async () => {
 	assert.equal(out.status, "rejected");
 });
 
-test("verifyCommandOf prefers a criterion command over the default", () => {
-	assert.equal(verifyCommandOf(undefined), VERIFY_COMMAND);
-	assert.equal(verifyCommandOf(criteria), VERIFY_COMMAND);
+test("verifyCommandOf returns the criterion command, else undefined", () => {
+	assert.equal(verifyCommandOf(undefined), undefined);
+	assert.equal(verifyCommandOf(criteria), undefined);
 	assert.equal(
 		verifyCommandOf([
 			{

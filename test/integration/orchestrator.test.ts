@@ -719,9 +719,10 @@ test("collect runs verification-output criteria and promotes attested to verifie
 					criteria: [
 						{
 							id: "typecheck-test-pass",
-							must: "npm run typecheck 与 npm test 全绿",
+							must: "项目自己的验证全绿",
 							evidence: ["verification-output"],
 							severity: "required",
+							command: "npm run typecheck && npm test",
 						},
 					],
 				},
@@ -897,6 +898,7 @@ test("launch worktree:true sets pane cwd and retire leaves the tree", {
 							must: "tests",
 							evidence: ["verification-output"],
 							severity: "required",
+							command: "npm test",
 						},
 					],
 				},

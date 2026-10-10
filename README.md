@@ -92,7 +92,7 @@ to hold.
 | Child must not ping the parent | Every child Pi loads a **child-guard** extension. `herdr agent prompt/wait/send-keys/start`, pane split, tab create/close, and reading someone else’s pane are blocked. |
 | Task-card boilerplate | A frozen appendix is appended to every child task: no wakeup, no nested agents, end with `{"ok": true\|false, "reason": "..."}`. |
 | Read-only roles | `acceptance.role: read-only` (scout, reviewer, …) may still have `bash` for `rg` / `git log` / `ls`, but writes (`rm`, `git commit`, `echo > file`, `npm install`, `sed -i`, …) are blocked. |
-| Acceptance | `{"ok": true}` is only **attested**. If a required criterion lists `evidence: [verification-output]` (the bundled `worker` does), collect then runs `criterion.command` (or `npm run typecheck && npm test` when unset) in the child’s cwd and promotes the result to **verified** or rejects it. |
+| Acceptance | `{"ok": true}` is only **attested**. If a required criterion lists `evidence: [verification-output]` **and** carries an explicit `command`, collect then runs that command in the child’s cwd and promotes the result to **verified** or rejects it. Without a `command` the result stays attested with the criterion surfaced as pending — the parent confirms it from the child’s pasted output; nothing is guessed. |
 | Tool approval (`blocked`) | `onBlocked: auto-approve` (**default**; a subagent pane has no human, so an approval dialog is a deadlock) silently approves a blocked child via `send-keys y` and keeps watching. `forward` pops a **confirm** in the parent TUI (Yes → `send-keys y`, No → deny; no TUI → a notify is queued). `notify` only notifies. The default is also what cursor children launch with: `--force` (Run Everything) unless the agent sets `forward`/`notify` — set `subagents.defaultOnBlocked` in settings.json to change the default globally. |
 | Late `collect` / `retire` | If watch already collected, `collect` returns the cached snapshot. If the pane is already gone, `retire` is a no-op that points at the session file. |
 
@@ -585,8 +585,10 @@ On top of that:
   a clean turn 2 is overall success. `toolErrors` is diagnostic only.
 - **Self-report is attested, not verified.** `{"ok": true}` is the agent
   marking its own homework. Worker’s `verification-output` criterion is the
-  exception: the plugin runs `criterion.command` (or
-  `npm run typecheck && npm test`) itself, with a timeout. `completionGuard:
+  exception: when it carries an explicit `command`, the plugin runs it itself,
+  with a timeout; without one, the criterion is surfaced as pending for the
+  parent to confirm from the pasted output — the plugin never guesses a
+  project-unaware command. `completionGuard:
   true` rejects a successful turn that forgot the `{"ok":…}` verdict.
 - **Recycle destroys live evidence** (`agent get` → `agent_not_found`). The
   plugin collects and snapshots `execution` into `.pi-subagents/run.json`
@@ -682,9 +684,10 @@ the runtime table above — trust this README and `action=list`’s
 - **`blocked` is screen-heuristic**: false positives exist; the confirm is
   paired with the collect timeout as a backstop.
 - **Verification** runs `criterion.command` when a required criterion asks
-  for `verification-output`, else `npm run typecheck && npm test`. Semantic
-  `must` strings are never NLP-parsed (F32 / F44). Other evidence types stay
-  a checklist.
+  for `verification-output` and carries one. A criterion without a `command`
+  stays attested and is surfaced as pending for the parent — semantic `must`
+  strings are never NLP-parsed (F32 / F44) and no default command is guessed.
+  Other evidence types stay a checklist.
 - **Panes are scarce**: cap fan-out (`maxSubagentSpawnsPerSession` /
   `herdr.maxConcurrentAgents`). Warm-pane pooling is not worth it (~0.9s).
 
