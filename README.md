@@ -92,7 +92,7 @@ to hold.
 | Child must not ping the parent | Every child Pi loads a **child-guard** extension. `herdr agent prompt/wait/send-keys/start`, pane split, tab create/close, and reading someone else’s pane are blocked. |
 | Task-card boilerplate | A frozen appendix is appended to every child task: no wakeup, no nested agents, end with `{"ok": true\|false, "reason": "..."}`. |
 | Read-only roles | `acceptance.role: read-only` (scout, reviewer, …) may still have `bash` for `rg` / `git log` / `ls`, but writes (`rm`, `git commit`, `echo > file`, `npm install`, `sed -i`, …) are blocked. |
-| Acceptance | `{"ok": true}` is only **attested**. If a required criterion lists `evidence: [verification-output]` (the bundled `worker` does), collect then runs `npm run typecheck && npm test` in the child’s cwd and promotes the result to **verified** or rejects it. |
+| Acceptance | `{"ok": true}` is only **attested**. If a required criterion lists `evidence: [verification-output]` (the bundled `worker` does), collect then runs `criterion.command` (or `npm run typecheck && npm test` when unset) in the child’s cwd and promotes the result to **verified** or rejects it. |
 | Tool approval (`blocked`) | `onBlocked: auto-approve` (**default**; a subagent pane has no human, so an approval dialog is a deadlock) silently approves a blocked child via `send-keys y` and keeps watching. `forward` pops a **confirm** in the parent TUI (Yes → `send-keys y`, No → deny; no TUI → a notify is queued). `notify` only notifies. The default is also what cursor children launch with: `--force` (Run Everything) unless the agent sets `forward`/`notify` — set `subagents.defaultOnBlocked` in settings.json to change the default globally. |
 | Late `collect` / `retire` | If watch already collected, `collect` returns the cached snapshot. If the pane is already gone, `retire` is a no-op that points at the session file. |
 
@@ -176,7 +176,7 @@ alone would be silently ignored.
 | --- | --- | --- |
 | `scout` | Read-only reconnaissance: map code, conventions, environment. Facts only. | attested, **read-only** bash |
 | `planner` | Turn a task into a parallelisable, verifiable plan; freeze interfaces. | attested |
-| `worker` | Implement a frozen plan on an isolated worktree; open an MR; run tests; self-report a verdict. | **verified** via `npm run typecheck && npm test` |
+| `worker` | Implement a frozen plan on an isolated worktree; open an MR; run tests; self-report a verdict. | **verified** via project’s own verifier, or the packaged `scripts/verify.sh` |
 | `reviewer` | Read-only adversarial review; findings with path + severity. | attested, **read-only** bash |
 | `advisor` | Decision counsel and final arbitration on contested options (A-vs-B rulings). Grok via cursor. | attested |
 | `designer` | Front-end UI/visual/interaction design: design tokens, full-state matrices, and the component implementation. UI layer only — business logic stays with `worker`. | **verified** via build |

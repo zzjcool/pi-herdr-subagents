@@ -38,6 +38,7 @@
     "index.ts",
     "src/**/*.ts",
     "agents/**/*.md",
+    "scripts/**/*",
     "skills/**/*",
     "docs/**/*.md",
     "README.md",
