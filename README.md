@@ -176,7 +176,7 @@ alone would be silently ignored.
 | --- | --- | --- |
 | `scout` | Read-only reconnaissance: map code, conventions, environment. Facts only. | attested, **read-only** bash |
 | `planner` | Turn a task into a parallelisable, verifiable plan; freeze interfaces. | attested |
-| `worker` | Implement a frozen plan on an isolated worktree; open an MR; run tests; self-report a verdict. | **verified** via project’s own verifier, or the packaged `scripts/verify.sh` |
+| `worker` | Implement a frozen plan on an isolated worktree; open an MR; run tests; self-report a verdict. | **verified** via the project’s own verifier |
 | `reviewer` | Read-only adversarial review; findings with path + severity. | attested, **read-only** bash |
 | `advisor` | Decision counsel and final arbitration on contested options (A-vs-B rulings). Grok via cursor. | attested |
 | `designer` | Front-end UI/visual/interaction design: design tokens, full-state matrices, and the component implementation. UI layer only — business logic stays with `worker`. | **verified** via build |

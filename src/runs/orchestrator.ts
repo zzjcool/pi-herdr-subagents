@@ -17,7 +17,6 @@
 
 import * as fs from "node:fs";
 import { randomBytes } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 import { readPaneDiagnostic } from "../herdr/client.ts";
 import { makeName } from "../shared/name.ts";
@@ -31,7 +30,6 @@ import {
 	MAX_TOOL_CALLS_ENV,
 	MAX_TURNS_ENV,
 	TOOL_TIMEOUT_MS_ENV,
-	VERIFY_SH_ENV,
 } from "../extension/budget.ts";
 import { modelCandidates } from "../agents/model-resolution.ts";
 import {
@@ -1166,17 +1164,6 @@ export class Orchestrator {
 		}
 		if (agent?.allowNestedSubagents) {
 			env[ALLOW_NESTED_ENV] = "1";
-		}
-		// Portable verification: point children at the packaged verify.sh so
-		// agent prompts never hardcode a machine-specific path.
-		const verifySh = path.join(
-			path.dirname(fileURLToPath(import.meta.url)),
-			"../../scripts/verify.sh",
-		);
-		try {
-			if (fs.statSync(verifySh).isFile()) env[VERIFY_SH_ENV] = verifySh;
-		} catch {
-			// packaged layout differs; children fall back to project commands
 		}
 		return env;
 	}

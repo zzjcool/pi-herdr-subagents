@@ -9,8 +9,6 @@ export const MAX_TOOL_CALLS_ENV = "PI_SUBAGENT_MAX_TOOL_CALLS";
 export const MAX_TURNS_ENV = "PI_SUBAGENT_MAX_TURNS";
 export const TOOL_TIMEOUT_MS_ENV = "PI_SUBAGENT_TOOL_TIMEOUT_MS";
 export const ALLOW_NESTED_ENV = "PI_SUBAGENT_ALLOW_NESTED";
-/** Absolute path to the packaged scripts/verify.sh (portable verification). */
-export const VERIFY_SH_ENV = "PI_SUBAGENT_VERIFY_SH";
 
 /** Parse a non-negative integer env value. Empty / garbage → undefined. */
 export function parseBudgetInt(raw: string | undefined): number | undefined {

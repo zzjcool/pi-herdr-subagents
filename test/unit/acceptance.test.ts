@@ -143,12 +143,3 @@ test("defaultVerifyRunner times out a hung command", async () => {
 	assert.match(result.stderr, /timed out/);
 	assert.ok(Date.now() - started < 5_000);
 });
-
-test("packaged verify.sh exists (PI_SUBAGENT_VERIFY_SH target)", async () => {
-	const { statSync } = await import("node:fs");
-	const pathMod = await import("node:path");
-	const { fileURLToPath } = await import("node:url");
-	const here = pathMod.dirname(fileURLToPath(import.meta.url));
-	const verifySh = pathMod.join(here, "../../scripts/verify.sh");
-	assert.ok(statSync(verifySh).isFile(), "scripts/verify.sh must ship in the package");
-});

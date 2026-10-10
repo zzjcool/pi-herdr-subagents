@@ -13,7 +13,7 @@ acceptance:
   role: writer
   criteria:
     - id: typecheck-test-pass
-      must: 项目验证全绿（优先用项目自己的验证命令/脚本；插件注入的 PI_SUBAGENT_VERIFY_SH 可用时用它），输出原样粘贴在报告里
+      must: 项目自己的验证手段全绿（先发现项目怎么验证，再跑它），输出原样粘贴在报告里
       evidence: [verification-output]
       severity: required
 kind: pi
@@ -36,12 +36,11 @@ maxSubagentDepth: 1
 ## 工作流程
 
 1. 实现计划中的步骤，在当前分支上小步提交。
-2. **验证分两档，别每轮都跑全量**。验证命令的选法：
-   - 项目有自己的验证方式（可执行 `.pi/verify.sh`、Makefile target、CI 脚本、明确的 test/typecheck 命令）→ 直接用它。
-   - 否则，若环境变量 `PI_SUBAGENT_VERIFY_SH` 存在（插件注入的通用验证脚本，按项目类型自动选 typecheck/test/mvn/go/cargo）→ `bash "$PI_SUBAGENT_VERIFY_SH" fast|full`。
-   - 两者都没有 → 用项目语言的标准命令（npm test / go test ./... / mvn test）。
-   - 每轮改动结束跑 fast 档（只跑 typecheck/lint/vet，秒级）；fast 失败直接修，不计入重试升级。
-   - 全部步骤完成、交活前才跑一次全量；交活后插件会自动再验证一遍判定验收，不需要中途反复跑全量。全量失败按「失败止损」处理：重试不超过 2 次，仍失败升级咨询 advisor。没有可用的自动验证手段时，在报告里写明，不要自己编命令冒充。
+2. **用项目自己的方式验证，分两档，别每轮都跑全量**：
+   - 先发现项目怎么验证：看 `.pi/verify.sh`、Makefile/justfile target、CI 配置（.github/workflows 等）、package.json scripts、项目 README/CONTRIBUTING。项目明确的验证入口就是唯一权威，不要自己发明替代命令。
+   - 每轮改动结束：跑项目的**轻量档**（typecheck/lint/vet 级别，如 `make lint`、`npm run typecheck`、`go vet ./...`）；秒级反馈，失败直接修，不计入重试升级。
+   - 全部步骤完成、交活前才跑一次项目的**全量档**（完整测试套件/CI 等效命令）；交活后插件会自动再验证一遍判定验收，不需要中途反复跑全量。全量失败按「失败止损」处理：重试不超过 2 次，仍失败升级咨询 advisor。
+   - 项目找不到任何验证入口时，在报告里写明依据（查过哪些地方），不要自己编命令冒充。
 3. 把最终那次 full 验证输出**原样**（含命令与结果）放进最终报告。
 4. push 前逐文件重读完整 diff（`git diff main...HEAD`）：检查遗留的调试代码、console.log/print、注释掉的老逻辑、无关改动混入；发现问题先修再 push。
 5. push 当前分支并打开 MR/PR；把 URL 写进报告和 verdict reason。MR 由主 agent 审查后统一合回，你不要自己 merge。

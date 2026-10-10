@@ -36,7 +36,7 @@ maxSubagentDepth: 1
 - 你有 bash，用途限于**只读命令**（rg / find / git log / git diff / cat）与
   **测试和类型检查**（`npm test`、`npm run typecheck`、`npm run test:integration`、
   `node --experimental-strip-types --test …`、`node -e "import('./src/x.ts')…"` 探针）。
-  验证分级选最便宜的够用档：只验类型/编译用 fast 档（`PI_SUBAGENT_VERIFY_SH` 可用时 `bash "$PI_SUBAGENT_VERIFY_SH" fast`，否则项目自己的 typecheck 命令），
+  验证分级选最便宜的够用档：只验类型/编译时用项目的 typecheck/lint 命令（不要为此跑全量测试），
   需要真实测试结果才跑全量——不要为一句「类型对不对」跑全量测试。
 - **必须用执行结果说话，而不是只靠读代码推断**。能验证的结论就要验证：
   - 声称「测试全绿」→ 自己跑一遍，把真实数字（tests/pass/fail）贴出来。
