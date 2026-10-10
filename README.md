@@ -405,8 +405,6 @@ Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
       "cb": { "worker": { "model": "cb/glm-5.3" } }
     },
     "modelScope": { "allow": ["cb/*", "openai/*"] },
-    "parentContext": "@~/.pi/agent/subagents-parent-context.md",
-    "childContext": "@~/.pi/agent/subagents-child-context.md",
     "herdr": {
       "defaultPlacement": "split-down",
       "maxConcurrentAgents": 6,
@@ -428,13 +426,30 @@ Read from `~/.pi/agent/settings.json` (user) and `<project>/.pi/settings.json`
 | `agentOverrides` | Per-role field overlay (`model`, `thinking`, `preset`, `tools`, `disabled`, …) |
 | `agentOverridesByProvider` | Same overlay, keyed by the **parent** provider id |
 | `enabled` | Master switch: `false` disables launches, roster injection, and the bash guard (see [Master switch](#master-switch)) |
-| `parentContext` | Extra parent-side context appended after the playbook + roster every turn. Inline markdown or `@path` file reference(s) (string or array). Use this instead of polluting the global AGENTS.md with machine-specific dispatch discipline |
-| `childContext` | Extra context injected into every child's system prompt (pi: appended after the role prompt; cursor and other kinds: rides along in the task prompt). Same value forms as `parentContext` — put worker guardrails (retry budget, advisor escalation) here |
+| `parentContext` | Extra parent-side context appended after the playbook + roster every turn. Inline markdown or `@path` file reference(s) (string or array); if omitted, uses the same-directory `subagents-parent-context.md` convention file |
+| `childContext` | Extra context injected into every child's system prompt (pi: appended after the role prompt; cursor and other kinds: rides along in the task prompt). Same value forms and precedence as `parentContext`; if omitted, uses `subagents-child-context.md` beside that settings file |
 | `modelScope.allow` | Glob list of `provider/id` the parent may assign. Explicit tool `model` is an error if it misses; inherited is a warning |
 | `disableBuiltins` | Do not load the five shipped roles |
 | `maxSubagentSpawnsPerSession` | Hard cap on how many children this session may start |
 | `herdr.maxConcurrentAgents` | Layout / density hint (default 6) |
 | `herdr.startRetries` | `agent_pane_busy` retries (default 40 × 150ms+) |
+
+### Context convention files
+
+Context can live beside settings instead of in `settings.json`: place
+`subagents-parent-context.md` and/or `subagents-child-context.md` next to the
+settings file (`~/.pi/agent/` for user settings, `<repo>/.pi/` for project
+settings). When a key is omitted, its convention file is read automatically;
+a missing, unreadable, or whitespace-only convention file is silently ignored.
+
+Within one settings layer, explicit inline text or `@path` references (including
+arrays) take precedence. `false` disables that layer's context and suppresses
+its convention file; otherwise the convention file is the default. Without any
+resolved context, that layer contributes no value. Existing cross-layer
+precedence is unchanged: a project context value—including one from a project
+convention file—replaces the user context wholesale, while a layer with no
+value leaves the other layer's context intact. Sharing these named files with
+a project means machines do not need absolute context paths in `settings.json`.
 
 Run records and child session jsonl live under `<cwd>/.pi-subagents/`. That
 directory is the resume credential; do not delete it while you still want to

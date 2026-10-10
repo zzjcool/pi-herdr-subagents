@@ -36,6 +36,23 @@ function expandHome(p: string): string {
 }
 
 /**
+ * Best-effort read of an implicit convention file. Unlike an explicit `@path`
+ * reference, a missing, unreadable, or blank convention file simply means no
+ * context was supplied.
+ */
+export function readConventionContext(
+	baseDir: string,
+	filename: string,
+): string | undefined {
+	try {
+		const text = fs.readFileSync(path.join(baseDir, filename), "utf-8").trim();
+		return text || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * Resolve one settings value into final context text.
  *
  * `baseDir` is the directory of the settings file that declared the key; it
