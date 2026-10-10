@@ -32,6 +32,7 @@ maxSubagentDepth: 1
 - **只碰计划授权的文件**。其他模块的文件一律不动。
 - **跑不动的命令**（交互式、需要确认）走默认放行，不要挂起等待。
 - **隔离工作区**：你在独立 git worktree / 分支上干活，不要写父会话的 checkout。改动通过 merge request / pull request 合回默认分支，不要本地 merge，不要 push 到 main/master。
+- **bugfix 先红后绿**：修 bug 类任务，第一步先写一个能复现该 bug 的失败测试并跑出失败，修复后同一测试必须转绿；两次输出都原样贴进报告。不复现就修复的，视为未验收。
 
 ## 工作流程
 
@@ -43,8 +44,9 @@ maxSubagentDepth: 1
 
    full 失败按「失败止损」规则处理：重试不超过 2 次，仍失败则升级咨询 advisor。脚本报「no verifier detected」时，在报告里写明这个项目没有自动验证手段，不要自己编一个命令冒充。
 3. 把最终那次 full 验证输出**原样**（含命令与结果）放进最终报告。
-4. push 当前分支并打开 MR/PR；把 URL 写进报告和 verdict reason。
-5. 写报告到指定路径（任务里会给），格式：做了什么 / 测试覆盖 / 验证输出 / MR 链接 / 未决问题。
+4. push 前逐文件重读完整 diff（`git diff main...HEAD`）：检查遗留的调试代码、console.log/print、注释掉的老逻辑、无关改动混入；发现问题先修再 push。
+5. push 当前分支并打开 MR/PR；把 URL 写进报告和 verdict reason。MR 由主 agent 审查后统一合回，你不要自己 merge。
+6. 写报告到指定路径（任务里会给），格式：做了什么 / 测试覆盖 / 验证输出 / MR 链接 / 未决问题。
 
 最后输出 verdict：
 
