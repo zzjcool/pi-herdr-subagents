@@ -381,7 +381,7 @@ interface LegionEventBus {
 }
 ```
 
-`herdr.*` 设置键移除；`Placement` 移除。
+`herdr.*` 设置键：**过渡期保留解析并标 deprecated**（用户仍在用；解析代码随 legacy 后端归档，读取处打 deprecation 警告；正式移除排 v3）；`Placement` 移除（§3.6）。
 
 ## 12. 遗留后端与迁移（方案 C，D16）
 
@@ -409,7 +409,7 @@ interface LegionEventBus {
 
 > REV-2 补充（REV-3 勘误）：M1-core 新增文件为 `src/supervisor/{types,rpc-supervisor,ui-proxy}.ts` + 平铺单测 `test/unit/supervisor.test.ts`（`npm test` 的 glob 是 `test/unit/*.test.ts`，只认 unit 目录下的平铺文件）。
 
-- **归属**：新增 `src/supervisor/{rpc-supervisor,types,ui-proxy}.ts`；重写 `src/runs/orchestrator.ts`、`index.ts`、`src/extension/child-guard.ts`、`src/extension/playbook.ts`、`src/shared/types.ts`；移动 `src/herdr/*` → `src/backends/legacy/`；删除/归档 `src/runs/layout.ts`、`src/extension/parent-label.ts`、`src/shared/cursor-chat.ts`、`src/shared/progress.ts` 的 pane 分支
+- **归属**：新增 `src/supervisor/{rpc-supervisor,types,ui-proxy}.ts`；重写 `src/runs/orchestrator.ts`、`index.ts`、`src/extension/child-guard.ts`、`src/extension/playbook.ts`、`src/shared/types.ts`；移动 `src/herdr/*` → `src/backends/legacy/`；删除/归档 `src/runs/layout.ts`、`src/extension/parent-label.ts`、`src/shared/cursor-chat.ts`、`src/shared/progress.ts` 的 pane 分支。REV-9 补充归属：`src/api.ts`（公共导出面：legacy 符号改从 `src/backends/legacy/` 重导出或标 @deprecated，layout/Placement/pane-progress 导出移除，`./api` 入口保持可用）、`test/unit/{layout,parent-label}.test.ts` 与其他直接 import src/herdr/* 的测试（随迁移改路径或归档）、`test/integration/nesting.test.ts`（若受迁移影响需适配）、`test/live/rpc-live.test.ts`（M1 验收 (a) 的 live e2e 补充用例）
 - **验收**：(a) `RpcClient` args 承载 `buildPiArgs` 全套 flag 实测通过；(b) 单层 launch→steer→collect→retire 全链路 e2e；(c) resume 复刻 ping-ok 实验（新进程同 session 上下文无损）；(d) steer 用 RPC `steer` 命令（流式中排队语义生效）；(e) blocked 审批经 ui-proxy 上浮根 TUI 可应答；(f) 改造后测试套件全绿（fake-supervisor 替换 fake-herdr，1064 行假件重写为 RPC mock）；(g) legacy 目录编译通过、不进主 bundle
 
 ### M2 军团树（组织层：db + centurion + 状态机 + 邮件）
@@ -451,3 +451,4 @@ interface LegionEventBus {
 | 2026-10-11 | REV-6 | §6.1/§11.1/§14-M0 深度语义统一为 INCL（advisor 裁决）：`maxSubagentDepth R` = 子树代数含自身（位置无关、只收紧不放宽）；launch 下发 `C子 = min(C, d+R, 4)`。否决字面 ABS（同卡多深度不可表达、会落盘 depth>maxDepth）与任务卡 C 语义（R=1 可派孙，违反验收 (a)）。M0 归属新增 package.json（测试入口 env 隔离，防 96/107 假红）与三陷阱修复要求。触发：worker-3 按 §15-2 正确拒绝 → advisor-4 裁决（含 3 个实测实现陷阱 + 用户 worker.md 迁移指引） |
 | 2026-10-11 | REV-7 | 澄清 b3 措辞（advisor 裁决的忠实转译）：『只收紧不放宽』指**继承预算不扩大**（min 强制），不是拒绝启动。X(R=2) 派 Y(R=4) 允许，Y 继承 C=2 成叶子。REV-6 转译时把「Y 派生被拒」误写为「Y 启动被拒」，与 §11.1 公式矛盾（公式下闸门 2>2 为假，启动放行）。触发：worker-6 按公式推演发现并按 §15-2 正确拒绝（零改动） |
 | 2026-10-11 | REV-8 | §11.1「超 4 截断并告警」的告警归属明确给 M1-integration（launch 路径 console.warn + 事件），M0 静默截断可接受。触发：reviewer-4 对 PR #10 的 minor finding（告警半边无主） |
+| 2026-10-11 | REV-9 | M1-integration 派工勘误三件：① §11.4 herdr.* 键改为「过渡期保留解析 + deprecated 警告，正式移除排 v3」（原「移除」与任务卡「保留 deprecated」矛盾，取后者——方案 C 过渡期语义）；② §14-M1 归属补入 `src/api.ts`（公共导出面，legacy 符号重导出/标 deprecated，layout/Placement/pane-progress 导出移除）；③ 归属补入受影响测试文件（layout/parent-label 等单测迁移或归档、nesting.test.ts 适配、rpc-live.test.ts 补 e2e 用例）。触发：worker-8 按 §15-2 正确拒绝（零改动，三个阻塞点全部属实） |
