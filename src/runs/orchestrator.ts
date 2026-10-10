@@ -183,6 +183,21 @@ const MAX_DEPTH_ENV = "PI_SUBAGENT_MAX_DEPTH";
 /** Environment variable marking a process as a subagent child. */
 const CHILD_ENV = "PI_SUBAGENT_CHILD";
 
+function parseDepthCeiling(raw: string | undefined): number | undefined {
+	if (raw === undefined || !/^\d+$/.test(raw.trim())) return undefined;
+	const value = Number(raw.trim());
+	return Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** Root/process ceiling: inherited env, settings, and the saturated path cap. */
+export function effectiveMaxDepth(settingsMaxDepth?: number): number {
+	return Math.min(
+		parseDepthCeiling(process.env[MAX_DEPTH_ENV]) ?? Number.POSITIVE_INFINITY,
+		settingsMaxDepth ?? Number.POSITIVE_INFINITY,
+		MAX_NESTED_PATH_ENTRIES,
+	);
+}
+
 const defaultSleep = (ms: number) =>
 	new Promise<void>((r) => setTimeout(r, ms));
 
@@ -413,12 +428,7 @@ export class Orchestrator {
 		// so nested subagents can be bounded and cycles are impossible.
 		this.parentPath =
 			deps.parentPath ?? parseNestedPathEnv(process.env[LINEAGE_ENV]);
-		this.maxDepth =
-			deps.maxDepth ??
-			Number(process.env[MAX_DEPTH_ENV]) ??
-			MAX_NESTED_PATH_ENTRIES;
-		if (!Number.isFinite(this.maxDepth) || this.maxDepth < 1)
-			this.maxDepth = MAX_NESTED_PATH_ENTRIES;
+		this.maxDepth = effectiveMaxDepth(deps.maxDepth);
 		this.maxSpawns = deps.maxSpawns ?? null;
 		this.layout = deps.layout ?? createSessionLayout();
 		this.verifyRunner = deps.verifyRunner;
@@ -1138,9 +1148,22 @@ export class Orchestrator {
 		name: string,
 		agent?: AgentConfig,
 	): Record<string, string> {
+		const roleDepth =
+			agent?.maxSubagentDepth === undefined
+				? Number.POSITIVE_INFINITY
+				: Number.isInteger(agent.maxSubagentDepth) &&
+						agent.maxSubagentDepth >= 1
+					? agent.maxSubagentDepth
+					: 1;
 		const env: Record<string, string> = {
 			[LINEAGE_ENV]: encodeNestedPath(this.childPath(name)),
-			[MAX_DEPTH_ENV]: String(this.maxDepth),
+			[MAX_DEPTH_ENV]: String(
+				Math.min(
+					this.maxDepth,
+					this.depth + roleDepth,
+					MAX_NESTED_PATH_ENTRIES,
+				),
+			),
 			[CHILD_ENV]: "1",
 			[CHILD_ROLE_ENV]: agent?.name ?? "",
 		};

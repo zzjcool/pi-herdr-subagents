@@ -276,7 +276,7 @@ export class RunStore {
 			herdr: input.herdr ?? {},
 			path: (input.path ?? []).slice(0, MAX_NESTED_PATH_ENTRIES),
 			depth: input.path?.length ?? 0,
-			maxDepth: input.maxDepth ?? 1,
+			maxDepth: input.maxDepth ?? MAX_NESTED_PATH_ENTRIES,
 			children: [],
 			budget: { spawned: 0, limit: null, granted: 0 },
 			createdAt: nowIso,
