@@ -358,7 +358,7 @@ interface LegionEventBus {
 
 | 项 | 默认 | 判定 |
 |---|---|---|
-| `maxDepth`（全树深度） | 4 | 硬顶 = `MAX_NESTED_PATH_ENTRIES`（血缘路径在 4 处饱和，settings/env 超 4 截断并告警）。每进程生效上限 C：根 `C = min(env 运营者覆盖, settings.legion.maxDepth, 4)`；深度 d、上限 C 的父 launch 角色 R：先过闸门 `d+1 > C` → BUDGET_EXCEEDED；再经 `PI_SUBAGENT_MAX_DEPTH` 下发 `C子 = min(C, d + R, 4)`（R 缺省=不收紧；非法值按叶子 R=1 处理；语义 = 子树代数含自身，位置无关，只收紧不放宽）。不变量：C子 ≤ C父，且每进程 depth ≤ maxDepth |
+| `maxDepth`（全树深度） | 4 | 硬顶 = `MAX_NESTED_PATH_ENTRIES`（血缘路径在 4 处饱和；settings/env 超 4 截断——告警在 M1-integration 的 launch 路径接入，M0 阶段截断静默可接受）。每进程生效上限 C：根 `C = min(env 运营者覆盖, settings.legion.maxDepth, 4)`；深度 d、上限 C 的父 launch 角色 R：先过闸门 `d+1 > C` → BUDGET_EXCEEDED；再经 `PI_SUBAGENT_MAX_DEPTH` 下发 `C子 = min(C, d + R, 4)`（R 缺省=不收紧；非法值按叶子 R=1 处理；语义 = 子树代数含自身，位置无关，只收紧不放宽）。不变量：C子 ≤ C父，且每进程 depth ≤ maxDepth |
 | `maxChildrenPerNode`（单节点扇出） | 8 | 父 supervisor 查自己子节点数 |
 | `maxActiveNodes`（全树并发 running+starting） | 30 | **全树真闸门**（替代只当 hint 的 maxConcurrentAgents）：launch 前一条 SQL，超限 BUDGET_EXCEEDED + `budget_refused` 事件 |
 
@@ -450,3 +450,4 @@ interface LegionEventBus {
 | 2026-10-11 | REV-5 | §4.2 把 `PRAGMA user_version = 1;` 落进 SQL DDL 块首行（原先只在节标题注记，实现者无 DDL 可抄，哨兵测试也只能存在性匹配）。非 schema 变更，仅语句归位。触发：reviewer-0 对 PR #6 的 major finding |
 | 2026-10-11 | REV-6 | §6.1/§11.1/§14-M0 深度语义统一为 INCL（advisor 裁决）：`maxSubagentDepth R` = 子树代数含自身（位置无关、只收紧不放宽）；launch 下发 `C子 = min(C, d+R, 4)`。否决字面 ABS（同卡多深度不可表达、会落盘 depth>maxDepth）与任务卡 C 语义（R=1 可派孙，违反验收 (a)）。M0 归属新增 package.json（测试入口 env 隔离，防 96/107 假红）与三陷阱修复要求。触发：worker-3 按 §15-2 正确拒绝 → advisor-4 裁决（含 3 个实测实现陷阱 + 用户 worker.md 迁移指引） |
 | 2026-10-11 | REV-7 | 澄清 b3 措辞（advisor 裁决的忠实转译）：『只收紧不放宽』指**继承预算不扩大**（min 强制），不是拒绝启动。X(R=2) 派 Y(R=4) 允许，Y 继承 C=2 成叶子。REV-6 转译时把「Y 派生被拒」误写为「Y 启动被拒」，与 §11.1 公式矛盾（公式下闸门 2>2 为假，启动放行）。触发：worker-6 按公式推演发现并按 §15-2 正确拒绝（零改动） |
+| 2026-10-11 | REV-8 | §11.1「超 4 截断并告警」的告警归属明确给 M1-integration（launch 路径 console.warn + 事件），M0 静默截断可接受。触发：reviewer-4 对 PR #10 的 minor finding（告警半边无主） |
