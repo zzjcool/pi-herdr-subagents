@@ -4,10 +4,12 @@
 
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { RpcClient } from "@earendil-works/pi-coding-agent";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
 	mkdtempSync,
+	readdirSync,
 	rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,11 +36,15 @@ class FakeRpcProcess implements RpcProcessHandle {
 	exitCode: number | null = null;
 	signalCode: NodeJS.Signals | null = null;
 	readonly signals: NodeJS.Signals[] = [];
+	readonly ignoredSignals = new Set<NodeJS.Signals>();
+	ignoreInputClose = false;
 	private readonly events = new EventEmitter();
 
 	constructor(pid: number) {
 		this.pid = pid;
-		this.stdin.on("finish", () => this.exit(0, null));
+		this.stdin.on("finish", () => {
+			if (!this.ignoreInputClose) this.exit(0, null);
+		});
 	}
 
 	once(
@@ -74,7 +80,7 @@ class FakeRpcProcess implements RpcProcessHandle {
 
 	kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
 		this.signals.push(signal);
-		this.exit(null, signal);
+		if (!this.ignoredSignals.has(signal)) this.exit(null, signal);
 		return true;
 	}
 
@@ -96,6 +102,8 @@ class FakeRpcClient implements RpcClientLike {
 	starts = 0;
 	stops = 0;
 	aborts = 0;
+	startError?: Error;
+	promptError?: Error;
 	statsValue: unknown = {
 		tokens: { input: 23, output: 11 },
 		cost: 0.0125,
@@ -108,6 +116,7 @@ class FakeRpcClient implements RpcClientLike {
 
 	async start(): Promise<void> {
 		this.starts += 1;
+		if (this.startError) throw this.startError;
 	}
 
 	async stop(): Promise<void> {
@@ -126,6 +135,7 @@ class FakeRpcClient implements RpcClientLike {
 
 	async prompt(message: string): Promise<void> {
 		this.prompts.push(message);
+		if (this.promptError) throw this.promptError;
 	}
 
 	async steer(message: string): Promise<void> {
@@ -202,8 +212,29 @@ function harness(options: Partial<RpcSupervisorOptions> = {}) {
 	};
 }
 
-function emitSettled(client: FakeRpcClient, aborted = false): void {
-	client.emit({ type: "agent_settled", aborted });
+function emitSettled(client: FakeRpcClient): void {
+	client.emit({ type: "agent_settled" });
+}
+
+function emitAbortRecord(
+	client: FakeRpcClient,
+	source: "turn_end" | "agent_end",
+): void {
+	const abortedMessage = { role: "assistant", stopReason: "aborted" };
+	if (source === "turn_end") {
+		client.emit({
+			type: "turn_end",
+			message: abortedMessage,
+			toolResults: [],
+		});
+	} else {
+		client.emit({
+			type: "agent_end",
+			messages: [abortedMessage],
+			willRetry: false,
+		});
+	}
+	client.emit({ type: "agent_settled" });
 }
 
 test("spawn passes the complete buildPiArgs CLI context and starts the first prompt", async () => {
@@ -242,6 +273,16 @@ test("spawn passes the complete buildPiArgs CLI context and starts the first pro
 	}
 });
 
+test("RpcClient SDK sentinel keeps the host-visible runtime process slot", () => {
+	const client = new RpcClient({ cliPath: "/tmp/pi-cli.js" });
+	assert.equal(
+		Object.hasOwn(client, "process"),
+		true,
+		"the host adapter relies on RpcClient.process remaining an own runtime field",
+	);
+	assert.equal(Reflect.get(client, "process"), null);
+});
+
 test("spawn → first prompt → agent_settled → graceful retire lifecycle", async () => {
 	const h = harness();
 	try {
@@ -261,6 +302,127 @@ test("spawn → first prompt → agent_settled → graceful retire lifecycle", a
 		assert.equal(h.supervisor.isAlive("root.worker"), false);
 	} finally {
 		h.close();
+	}
+});
+
+test("abort → waitSettled observes aborted turns from real RPC event shapes", async () => {
+	for (const source of ["turn_end", "agent_end"] as const) {
+		const h = harness();
+		const name = `root.worker-${source}`;
+		try {
+			await h.supervisor.spawnChild(testInput(h.root, name));
+			const client = h.clients[0]!;
+			const waiting = h.supervisor.waitSettled(name, 1_000);
+			await h.supervisor.abort(name);
+			assert.equal(client.aborts, 1);
+			emitAbortRecord(client, source);
+			assert.deepEqual(await waiting, {
+				settled: true,
+				abnormal: false,
+				aborted: true,
+			});
+		} finally {
+			await h.supervisor.retire(name);
+			h.close();
+		}
+	}
+});
+
+test("abnormal retire preserves the unexpected exit result for waitSettled", async () => {
+	const h = harness();
+	try {
+		await h.supervisor.spawnChild(testInput(h.root));
+		const client = h.clients[0]!;
+		client.process.exitCode = 19;
+
+		assert.equal(h.supervisor.isAlive("root.worker"), false);
+		await h.supervisor.retire("root.worker");
+		assert.deepEqual(await h.supervisor.waitSettled("root.worker"), {
+			settled: false,
+			abnormal: true,
+			reason: "Pi RPC process exited before agent_settled",
+			exitCode: 19,
+			signal: null,
+		});
+	} finally {
+		h.close();
+	}
+});
+
+test("retire resolving timeout is retryable after a child ignores SIGTERM", async () => {
+	const h = harness();
+	try {
+		await h.supervisor.spawnChild(testInput(h.root));
+		const process = h.clients[0]!.process;
+		process.ignoreInputClose = true;
+		process.ignoredSignals.add("SIGTERM");
+
+		await assert.rejects(
+			h.supervisor.retire("root.worker", { graceful: false }),
+			{ code: "RETIRE_FAILED" },
+		);
+		assert.equal(h.supervisor.isAlive("root.worker"), true);
+		assert.deepEqual(process.signals, ["SIGTERM"]);
+
+		process.ignoredSignals.delete("SIGTERM");
+		await h.supervisor.retire("root.worker", { graceful: false });
+		assert.deepEqual(process.signals, ["SIGTERM", "SIGTERM"]);
+		assert.equal(h.supervisor.isAlive("root.worker"), false);
+	} finally {
+		h.close();
+	}
+});
+
+test("simultaneous spawns of the same name reject only the duplicate", async () => {
+	const h = harness();
+	try {
+		const first = h.supervisor.spawnChild(testInput(h.root));
+		const duplicate = h.supervisor.spawnChild(testInput(h.root));
+		await assert.rejects(
+			duplicate,
+			(error: unknown) =>
+				error instanceof Error &&
+				"code" in error &&
+				error.code === "NAME_TAKEN",
+		);
+		const handle = await first;
+		assert.equal(handle.name, "root.worker");
+		assert.equal(h.clients.length, 1);
+		await h.supervisor.retire(handle.name);
+	} finally {
+		h.close();
+	}
+});
+
+test("spawn failure stops the client, removes temp files, and permits retry", async () => {
+	const root = mkdtempSync(path.join(tmpdir(), "legion-supervisor-rollback-"));
+	const clients: FakeRpcClient[] = [];
+	const supervisor = new RpcSupervisor({
+		retireTimeoutMs: 100,
+		signalTimeoutMs: 100,
+		clientFactory: (options) => {
+			const client = new FakeRpcClient(options, 20_000 + clients.length);
+			if (clients.length === 0) client.promptError = new Error("prompt rejected");
+			clients.push(client);
+			return client;
+		},
+	});
+	try {
+		await assert.rejects(
+			supervisor.spawnChild(testInput(root)),
+			/prompt rejected/,
+		);
+		assert.equal(clients[0]?.stops, 1);
+		assert.deepEqual(readdirSync(root), []);
+
+		const handle = await supervisor.spawnChild(testInput(root));
+		assert.equal(handle.name, "root.worker");
+		assert.equal(clients.length, 2);
+		await supervisor.retire(handle.name);
+		assert.deepEqual(readdirSync(root), []);
+	} finally {
+		await supervisor.retire("root.worker").catch(() => {});
+		rmSync(root, { recursive: true, force: true });
 	}
 });
 
@@ -319,6 +481,25 @@ test("steer and follow-up target an active RPC turn without starting another pro
 		emitSettled(client);
 	} finally {
 		await h.supervisor.retire("root.worker");
+		h.close();
+	}
+});
+
+test("isAlive is a pure process-state query", async () => {
+	const h = harness();
+	try {
+		await h.supervisor.spawnChild(testInput(h.root));
+		const client = h.clients[0]!;
+		client.process.exitCode = 23;
+
+		assert.equal(h.supervisor.isAlive("root.worker"), false);
+		assert.equal(
+			client.events.size,
+			1,
+			"isAlive must not detach the RPC event listener or transition child state",
+		);
+	} finally {
+		await h.supervisor.retire("root.worker").catch(() => {});
 		h.close();
 	}
 });

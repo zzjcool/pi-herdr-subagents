@@ -30,6 +30,37 @@ const piProbe = spawnSync("pi", ["--version"], {
 	encoding: "utf8",
 	timeout: 10_000,
 });
+// SAFETY: `spawnSync` errors are NodeJS.ErrnoException instances on ENOENT;
+// the Node error may also be EACCES/timeout, which is intentionally fatal below.
+const piProbeError = piProbe.error as NodeJS.ErrnoException | undefined;
+function piInstallationSkipReason(input: {
+	error?: NodeJS.ErrnoException;
+	status: number | null;
+	cliExists: boolean;
+}): string | undefined {
+	if (input.error?.code === "ENOENT") {
+		return "pi is not installed on PATH; install Pi to run the live RPC smoke test";
+	}
+	if (input.error) {
+		throw new Error(`pi is on PATH but its version probe failed: ${input.error.message}`);
+	}
+	if (input.status !== 0) {
+		throw new Error(
+			`pi is on PATH but 'pi --version' failed: ${piProbe.stderr || piProbe.stdout}`,
+		);
+	}
+	if (!input.cliExists) {
+		throw new Error(
+			`pi is on PATH but RpcClient's bundled CLI is missing: ${piCliPath}`,
+		);
+	}
+	return undefined;
+}
+const piSkipReason = piInstallationSkipReason({
+	...(piProbeError ? { error: piProbeError } : {}),
+	status: piProbe.status,
+	cliExists: existsSync(piCliPath),
+});
 const agentDir = getAgentDir();
 const providerExtensionPath = path.join(
 	agentDir,
@@ -49,21 +80,35 @@ const hasProviderCredentials = (() => {
 		return false;
 	}
 })();
-const skip = piProbe.error || piProbe.status !== 0 || !existsSync(piCliPath)
-	? "pi is not installed on PATH; install Pi to run the live RPC smoke test"
-	: !existsSync(providerExtensionPath) || !hasProviderCredentials
+const skip = piSkipReason ??
+	(!existsSync(providerExtensionPath) || !hasProviderCredentials
 		? "no saved pi-any-endpoint extension credentials; configure a live provider to run the RPC smoke test"
-		: false;
+		: false);
 const liveModel = process.env.PI_LIVE_MODEL;
+
+test("live availability only skips an absent pi binary", () => {
+	const missingPi = Object.assign(new Error("not found"), { code: "ENOENT" });
+	assert.match(
+		piInstallationSkipReason({ error: missingPi, status: null, cliExists: false }) ?? "",
+		/pi is not installed/,
+	);
+	assert.throws(
+		() => piInstallationSkipReason({ status: 1, cliExists: true }),
+		/pi is on PATH but 'pi --version' failed/,
+	);
+	assert.throws(
+		() => piInstallationSkipReason({ status: 0, cliExists: false }),
+		/RpcClient's bundled CLI is missing/,
+	);
+});
 
 function isolateAgentSettings(runDir: string): string {
 	const isolatedDir = path.join(runDir, "pi-agent");
 	mkdirSync(isolatedDir, { recursive: true });
 	const settingsFile = path.join(agentDir, "settings.json");
-	const settings = JSON.parse(readFileSync(settingsFile, "utf8")) as Record<
-		string,
-		unknown
-	>;
+	const settings = (existsSync(settingsFile)
+		? JSON.parse(readFileSync(settingsFile, "utf8"))
+		: {}) as Record<string, unknown>;
 	// Avoid loading the host's pi-legion extension a second time. The smoke
 	// explicitly lists only the provider plugin and this child guard.
 	delete settings.packages;
