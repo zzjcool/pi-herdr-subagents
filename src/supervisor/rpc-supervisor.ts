@@ -1,0 +1,753 @@
+/**
+ * LegionSupervisor backed by one headless Pi RpcClient per child node.
+ *
+ * This module owns process registration, RPC event routing and graceful child
+ * retirement; it deliberately does not orchestrate runs or depend on herdr.
+ */
+
+import { RpcClient } from "@earendil-works/pi-coding-agent";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { formatChildTask } from "../extension/child-guard.ts";
+import { buildPiArgs } from "../runs/args.ts";
+import { ErrorCodes, SubagentError } from "../shared/types.ts";
+import {
+	InMemoryUIProxy,
+	isExtensionUIRequest,
+	type ExtensionUIResponse,
+	type UIProxy,
+} from "./ui-proxy.ts";
+import {
+	type ChildHandle,
+	type EventSubscriptionOptions,
+	type LegionSupervisor,
+	type RpcClientFactory,
+	type RpcClientLike,
+	type RpcClientOptions,
+	type RpcProcessHandle,
+	type SettleResult,
+	type SpawnInput,
+	type SupervisorEvent,
+	type SupervisorEventListener,
+	type UsageSnapshot,
+} from "./types.ts";
+
+interface EventSubscription {
+	listener: SupervisorEventListener;
+	includeTextDelta: boolean;
+}
+
+interface SettleWaiter {
+	resolve(result: SettleResult): void;
+	timer?: NodeJS.Timeout;
+}
+
+type ChildState = "starting" | "running" | "idle" | "retiring" | "exited" | "retired";
+
+interface ChildRecord {
+	name: string;
+	sessionFile: string;
+	client: RpcClientLike;
+	process: RpcProcessHandle | null;
+	tempDir: string;
+	state: ChildState;
+	processAlive: boolean;
+	turnActive: boolean;
+	retireRequested: boolean;
+	lastTurnResult?: SettleResult;
+	exitResult?: SettleResult;
+	waiters: Set<SettleWaiter>;
+	subscriptions: Set<EventSubscription>;
+	unsubscribeRpcEvents?: () => void;
+	retirePromise?: Promise<void>;
+}
+
+export interface RpcSupervisorOptions {
+	/** Replace the Pi client constructor in unit tests. */
+	clientFactory?: RpcClientFactory;
+	/** In-memory by default; M1-integration supplies a real TUI consumer. */
+	uiProxy?: UIProxy;
+	/** Grace period after stdin close before SIGTERM. */
+	retireTimeoutMs?: number;
+	/** Grace period for a child to exit after SIGTERM. */
+	signalTimeoutMs?: number;
+}
+
+const DEFAULT_RETIRE_TIMEOUT_MS = 5_000;
+const DEFAULT_SIGNAL_TIMEOUT_MS = 1_000;
+const COARSE_EVENT_TYPES = new Set([
+	"agent_start",
+	"agent_end",
+	"agent_settled",
+	"turn_start",
+	"turn_end",
+	"tool_execution_start",
+	"tool_execution_end",
+]);
+
+/** Resolve the installed package's bundled CLI, independent of the child's cwd. */
+function defaultPiCliPath(): string {
+	const packageEntry = fileURLToPath(
+		import.meta.resolve("@earendil-works/pi-coding-agent"),
+	);
+	return path.resolve(path.dirname(packageEntry), "bundle/cli.js");
+}
+
+function defaultClientFactory(options: RpcClientOptions): RpcClientLike {
+	// RpcClient's public API intentionally hides its ChildProcess. The frozen M1
+	// contract also requires stdin-close shutdown and extension_ui_response; the
+	// pinned implementation stores its ChildProcess in this TS-private field.
+	// SAFETY: this adapter only uses the SDK's documented methods plus the
+	// pinned runtime's `process` property (a TS-private, non-# field) to close
+	// stdin, observe exit, and write UI responses. RpcClient's declarations
+	// confirm every method in RpcClientLike; the process is checked for null.
+	return new RpcClient(options) as unknown as RpcClientLike;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	// SAFETY: the object check makes property reads safe; callers validate every
+	// value they consume instead of trusting this broad record view.
+	return value as Record<string, unknown>;
+}
+
+function processHasExited(child: RpcProcessHandle): boolean {
+	return (
+		typeof child.exitCode === "number" ||
+		(child.signalCode !== null && child.signalCode !== undefined)
+	);
+}
+
+function normalizedNumber(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function usageSnapshot(value: unknown): UsageSnapshot | null {
+	const stats = recordOf(value);
+	const tokens = recordOf(stats?.tokens);
+	if (!stats || !tokens) return null;
+	return {
+		tokensIn: normalizedNumber(tokens.input),
+		tokensOut: normalizedNumber(tokens.output),
+		costUsd: normalizedNumber(stats.cost),
+	};
+}
+
+/**
+ * Host-side process adapter for the frozen §3.1 LegionSupervisor contract.
+ * Registry entries are isolated by name and own their event listeners/tempfiles.
+ */
+export class RpcSupervisor implements LegionSupervisor {
+	private readonly children = new Map<string, ChildRecord>();
+	private readonly subscriptionsBeforeSpawn = new Map<
+		string,
+		Set<EventSubscription>
+	>();
+	private readonly clientFactory: RpcClientFactory;
+	private readonly retireTimeoutMs: number;
+	private readonly signalTimeoutMs: number;
+	readonly uiProxy: UIProxy;
+
+	constructor(options: RpcSupervisorOptions = {}) {
+		this.clientFactory = options.clientFactory ?? defaultClientFactory;
+		this.uiProxy = options.uiProxy ?? new InMemoryUIProxy();
+		this.retireTimeoutMs = options.retireTimeoutMs ?? DEFAULT_RETIRE_TIMEOUT_MS;
+		this.signalTimeoutMs = options.signalTimeoutMs ?? DEFAULT_SIGNAL_TIMEOUT_MS;
+	}
+
+	async spawnChild(input: SpawnInput): Promise<ChildHandle> {
+		if (input.agent.kind !== "pi") {
+			throw new SubagentError(
+				`RpcSupervisor only supports pi children (received kind '${input.agent.kind}'); ` +
+					"migrate the role to kind: pi or pin pi-legion v0.16.x",
+				ErrorCodes.INVALID_PARAMS,
+			);
+		}
+		const previous = this.children.get(input.name);
+		if (previous && this.isAlive(input.name)) {
+			throw new SubagentError(
+				`child is already registered and alive: ${input.name}`,
+				ErrorCodes.NAME_TAKEN,
+			);
+		}
+		if (previous) this.disposeRecord(previous);
+
+		const parentTempDir = path.resolve(input.tempDir);
+		fs.mkdirSync(parentTempDir, { recursive: true });
+		const tempDir = fs.mkdtempSync(path.join(parentTempDir, "rpc-child-"));
+		let builtArgs: string[];
+		try {
+			const {
+				name: _name,
+				cwd: _cwd,
+				env: _env,
+				cliPath: _cliPath,
+				tempDir: _tempDir,
+				...buildInput
+			} = input;
+			const built = buildPiArgs({
+				...buildInput,
+				tempDir,
+				// RPC mode rejects positional @file prompt arguments. The task is
+				// delivered as the initial RPC prompt just after process startup.
+				includeTask: false,
+			});
+			builtArgs = built.args;
+		} catch (error) {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+			throw error;
+		}
+
+		const options: RpcClientOptions = {
+			cliPath: input.cliPath
+				? path.resolve(input.cliPath)
+				: defaultPiCliPath(),
+			cwd: input.cwd,
+			args: builtArgs,
+			...(input.env ? { env: input.env } : {}),
+		};
+		const client = this.clientFactory(options);
+		const child: ChildRecord = {
+			name: input.name,
+			sessionFile: input.sessionFile,
+			client,
+			process: null,
+			tempDir,
+			state: "starting",
+			processAlive: true,
+			turnActive: false,
+			retireRequested: false,
+			waiters: new Set(),
+			subscriptions: this.subscriptionsBeforeSpawn.get(input.name) ?? new Set(),
+		};
+		this.subscriptionsBeforeSpawn.delete(input.name);
+		this.children.set(child.name, child);
+		child.unsubscribeRpcEvents = client.onEvent((event) =>
+			this.handleRpcEvent(child, event),
+		);
+
+		try {
+			await client.start();
+			this.attachProcess(child);
+			if (!this.isAlive(child.name)) {
+				throw this.startFailure(child, "Pi RPC process exited during startup");
+			}
+			child.state = "idle";
+			this.beginTurn(child);
+			await client.prompt(
+				formatChildTask(input.task, {
+					allowNested: input.allowNestedSubagents === true,
+					...(input.worktreeBranch
+						? { worktreeBranch: input.worktreeBranch }
+						: {}),
+				}),
+			);
+			if (!this.isAlive(child.name)) {
+				throw this.startFailure(child, "Pi RPC process exited after its first prompt");
+			}
+
+			return {
+				name: child.name,
+				sessionFile: child.sessionFile,
+				...(child.process?.pid ? { pid: child.process.pid } : {}),
+			};
+		} catch (error) {
+			this.children.delete(child.name);
+			child.unsubscribeRpcEvents?.();
+			child.unsubscribeRpcEvents = undefined;
+			this.uiProxy.forgetChild(child.name);
+			try {
+				await client.stop();
+			} catch {
+				// Preserve the launch error; stop is best-effort during rollback.
+			}
+			this.removeTempDir(child);
+			throw error;
+		}
+	}
+
+	/** Send a fresh prompt when idle; steer the current run when already active. */
+	async prompt(name: string, text: string): Promise<void> {
+		const child = this.requireChild(name);
+		await this.dispatch(child, "prompt", text);
+	}
+
+	/** Use the RPC steer command while running; idle children start a prompt. */
+	async steer(name: string, text: string): Promise<void> {
+		const child = this.requireChild(name);
+		await this.dispatch(child, "steer", text);
+	}
+
+	/** Queue a follow-up behind a running turn; idle children start a prompt. */
+	async followUp(name: string, text: string): Promise<void> {
+		const child = this.requireChild(name);
+		await this.dispatch(child, "followUp", text);
+	}
+
+	async abort(name: string): Promise<void> {
+		const child = this.requireChild(name);
+		this.assertCanSend(child);
+		if (!child.turnActive) return;
+		await child.client.abort();
+	}
+
+	waitSettled(name: string, timeoutMs = 900_000): Promise<SettleResult> {
+		const child = this.requireChild(name);
+		if (!child.turnActive && child.lastTurnResult) {
+			return Promise.resolve(child.lastTurnResult);
+		}
+		if (child.exitResult) return Promise.resolve(child.exitResult);
+		if (!this.isAlive(name)) {
+			return Promise.resolve(
+				child.exitResult ?? {
+					settled: false,
+					abnormal: !child.retireRequested,
+					reason: child.retireRequested ? "child retired" : "child process exited",
+				},
+			);
+		}
+		if (!child.turnActive) {
+			return Promise.resolve(
+				child.lastTurnResult ?? {
+					settled: false,
+					abnormal: false,
+					reason: "no active turn",
+				},
+			);
+		}
+
+		return new Promise((resolve) => {
+			const waiter: SettleWaiter = { resolve };
+			if (timeoutMs > 0) {
+				waiter.timer = setTimeout(() => {
+					child.waiters.delete(waiter);
+					resolve({ settled: false, abnormal: false, reason: "timeout" });
+				}, timeoutMs);
+			}
+			child.waiters.add(waiter);
+		});
+	}
+
+	isAlive(name: string): boolean {
+		const child = this.children.get(name);
+		if (!child || !child.processAlive) return false;
+		if (child.process && processHasExited(child.process)) {
+			this.handleProcessExit(child, child.process.exitCode, child.process.signalCode);
+			return false;
+		}
+		return child.state !== "retired" && child.state !== "exited";
+	}
+
+	async stats(name: string): Promise<UsageSnapshot | null> {
+		const child = this.children.get(name);
+		if (!child || !this.isAlive(name)) return null;
+		try {
+			return usageSnapshot(await child.client.getSessionStats());
+		} catch {
+			return null;
+		}
+	}
+
+	retire(name: string, opts: { graceful?: boolean } = {}): Promise<void> {
+		const child = this.requireChild(name);
+		if (child.retirePromise) return child.retirePromise;
+		const pending = this.retireChild(child, opts.graceful !== false);
+		child.retirePromise = pending;
+		void pending.catch(() => {
+			if (child.retirePromise === pending) child.retirePromise = undefined;
+		});
+		return pending;
+	}
+
+	/** Subscribe to coarse events; set includeTextDelta only for a live overlay. */
+	onEvent(
+		name: string,
+		listener: SupervisorEventListener,
+		options: EventSubscriptionOptions = {},
+	): () => void {
+		const child = this.children.get(name);
+		const subscription: EventSubscription = {
+			listener,
+			includeTextDelta: options.includeTextDelta === true,
+		};
+		const subscriptions = child?.subscriptions ?? this.pendingSubscriptions(name);
+		subscriptions.add(subscription);
+		return () => {
+			subscriptions.delete(subscription);
+			if (
+				!child &&
+				subscriptions.size === 0 &&
+				this.subscriptionsBeforeSpawn.get(name) === subscriptions
+			) {
+				this.subscriptionsBeforeSpawn.delete(name);
+			}
+		};
+	}
+
+	private pendingSubscriptions(name: string): Set<EventSubscription> {
+		let subscriptions = this.subscriptionsBeforeSpawn.get(name);
+		if (!subscriptions) {
+			subscriptions = new Set();
+			this.subscriptionsBeforeSpawn.set(name, subscriptions);
+		}
+		return subscriptions;
+	}
+
+	private async dispatch(
+		child: ChildRecord,
+		kind: "prompt" | "steer" | "followUp",
+		text: string,
+	): Promise<void> {
+		this.assertCanSend(child);
+		const wasActive = child.turnActive;
+		if (!wasActive) this.beginTurn(child);
+
+		try {
+			if (kind === "followUp" && wasActive) {
+				await child.client.followUp(text);
+			} else if ((kind === "steer" || kind === "prompt") && wasActive) {
+				// A prompt addressed to a busy child is an immediate correction;
+				// use the explicit RPC steer command, never a second prompt command.
+				await child.client.steer(text);
+			} else {
+				await child.client.prompt(text);
+			}
+		} catch (error) {
+			if (!wasActive && child.turnActive) {
+				child.turnActive = false;
+				child.state = "idle";
+				child.lastTurnResult = {
+					settled: false,
+					abnormal: false,
+					reason: "RPC command was rejected",
+				};
+				this.resolveWaiters(child, child.lastTurnResult);
+			}
+			throw error;
+		}
+	}
+
+	private beginTurn(child: ChildRecord): void {
+		child.lastTurnResult = undefined;
+		child.exitResult = undefined;
+		child.turnActive = true;
+		child.state = "running";
+	}
+
+	private assertCanSend(child: ChildRecord): void {
+		if (!this.isAlive(child.name) || child.retireRequested) {
+			throw new SubagentError(
+				`child is not available: ${child.name}`,
+				ErrorCodes.NOT_FOUND,
+			);
+		}
+	}
+
+	private requireChild(name: string): ChildRecord {
+		const child = this.children.get(name);
+		if (!child) {
+			throw new SubagentError(`unknown child: ${name}`, ErrorCodes.NOT_FOUND);
+		}
+		return child;
+	}
+
+	private attachProcess(child: ChildRecord): void {
+		const process = child.client.process ?? null;
+		child.process = process;
+		if (!process) return;
+
+		process.once("exit", (code, signal) =>
+			this.handleProcessExit(child, code, signal),
+		);
+		process.once("error", (error) => {
+			this.handleProcessError(child, error);
+		});
+		if (processHasExited(process)) {
+			this.handleProcessExit(child, process.exitCode, process.signalCode);
+		}
+	}
+
+	private handleRpcEvent(child: ChildRecord, event: unknown): void {
+		const record = recordOf(event);
+		if (!record || typeof record.type !== "string") return;
+
+		if (isExtensionUIRequest(event)) {
+			this.uiProxy.enqueue({
+				childName: child.name,
+				request: event,
+				respond: (response) => this.sendUIResponse(child, event.id, response),
+			});
+			return;
+		}
+
+		if (record.type === "agent_start" || record.type === "turn_start") {
+			child.turnActive = true;
+			if (child.state !== "retiring") child.state = "running";
+		}
+		if (record.type === "agent_settled") {
+			const result: SettleResult = {
+				settled: true,
+				abnormal: false,
+				...(typeof record.aborted === "boolean"
+					? { aborted: record.aborted }
+					: {}),
+			};
+			child.turnActive = false;
+			child.lastTurnResult = result;
+			if (child.state !== "retiring") child.state = "idle";
+			this.resolveWaiters(child, result);
+		}
+
+		this.publishEvent(child, record);
+	}
+
+	private publishEvent(
+		child: ChildRecord,
+		record: Record<string, unknown>,
+	): void {
+		const type = record.type;
+		if (typeof type !== "string") return;
+		if (type === "message_update") {
+			const assistantEvent = recordOf(record.assistantMessageEvent);
+			if (!assistantEvent || typeof assistantEvent.type !== "string") return;
+			const updateType = assistantEvent.type;
+			const isTextDelta = updateType === "text_delta";
+			const toolName =
+				typeof assistantEvent.toolName === "string"
+					? assistantEvent.toolName
+					: undefined;
+			if (!isTextDelta && !toolName) return;
+			const coarse: SupervisorEvent = {
+				name: child.name,
+				type,
+				updateType,
+				...(toolName ? { toolName } : {}),
+			};
+			const detailed: SupervisorEvent = {
+				name: child.name,
+				type,
+				updateType,
+				...(isTextDelta && typeof assistantEvent.delta === "string"
+					? { delta: assistantEvent.delta }
+					: {}),
+				...(toolName ? { toolName } : {}),
+			};
+			for (const subscription of [...child.subscriptions]) {
+				if (isTextDelta && !subscription.includeTextDelta) continue;
+				this.notify(
+					subscription,
+					isTextDelta ? detailed : coarse,
+				);
+			}
+			return;
+		}
+		if (!COARSE_EVENT_TYPES.has(type)) return;
+
+		// Keep payloads intentionally small: argument/text content is never
+		// copied into the default status stream, but tool names remain visible.
+		const event: SupervisorEvent = { name: child.name, type };
+		for (const key of ["toolName", "toolCallId", "aborted", "willRetry", "reason"]) {
+			if (record[key] !== undefined) event[key] = record[key];
+		}
+		for (const subscription of [...child.subscriptions]) {
+			this.notify(subscription, event);
+		}
+	}
+
+	private notify(subscription: EventSubscription, event: SupervisorEvent): void {
+		try {
+			subscription.listener(event);
+		} catch {
+			// A UI callback must not break process lifecycle or other subscribers.
+		}
+	}
+
+	private sendUIResponse(
+		child: ChildRecord,
+		rpcRequestId: string,
+		response: ExtensionUIResponse,
+	): void {
+		const stdin = child.process?.stdin;
+		if (!stdin || stdin.destroyed || stdin.writableEnded) return;
+		const record = {
+			type: "extension_ui_response",
+			id: rpcRequestId,
+			...response,
+		};
+		try {
+			stdin.write(`${JSON.stringify(record)}\n`);
+		} catch {
+			// The child may have exited between the UI action and this write.
+		}
+	}
+
+	private resolveWaiters(child: ChildRecord, result: SettleResult): void {
+		for (const waiter of [...child.waiters]) {
+			child.waiters.delete(waiter);
+			if (waiter.timer) clearTimeout(waiter.timer);
+			waiter.resolve(result);
+		}
+	}
+
+	private handleProcessExit(
+		child: ChildRecord,
+		code: number | null,
+		signal: NodeJS.Signals | null,
+	): void {
+		if (!child.processAlive) return;
+		child.processAlive = false;
+		child.turnActive = false;
+		child.state = child.retireRequested ? "retired" : "exited";
+		const result: SettleResult = child.retireRequested
+			? (child.lastTurnResult ?? {
+					settled: false,
+					abnormal: false,
+					reason: "child retired before agent_settled",
+					exitCode: code,
+					signal,
+				})
+			: {
+					settled: false,
+					abnormal: true,
+					reason: "Pi RPC process exited before agent_settled",
+					exitCode: code,
+					signal,
+				};
+		if (child.retireRequested) child.lastTurnResult = result;
+		else child.exitResult = result;
+		this.resolveWaiters(child, result);
+		child.subscriptions.clear();
+		child.unsubscribeRpcEvents?.();
+		child.unsubscribeRpcEvents = undefined;
+		this.uiProxy.forgetChild(child.name);
+		this.removeTempDir(child);
+	}
+
+	private handleProcessError(child: ChildRecord, error: Error): void {
+		if (!child.processAlive) return;
+		child.processAlive = false;
+		child.turnActive = false;
+		child.state = child.retireRequested ? "retired" : "exited";
+		const result: SettleResult = {
+			settled: false,
+			abnormal: !child.retireRequested,
+			reason: `Pi RPC process error: ${error.message}`,
+		};
+		if (child.retireRequested) child.lastTurnResult = result;
+		else child.exitResult = result;
+		this.resolveWaiters(child, result);
+		child.subscriptions.clear();
+		child.unsubscribeRpcEvents?.();
+		child.unsubscribeRpcEvents = undefined;
+		this.uiProxy.forgetChild(child.name);
+		this.removeTempDir(child);
+	}
+
+	private async retireChild(child: ChildRecord, graceful: boolean): Promise<void> {
+		if (!this.isAlive(child.name)) {
+			child.state = "retired";
+			child.subscriptions.clear();
+			child.unsubscribeRpcEvents?.();
+			child.unsubscribeRpcEvents = undefined;
+			this.uiProxy.forgetChild(child.name);
+			this.removeTempDir(child);
+			return;
+		}
+		child.retireRequested = true;
+		child.state = "retiring";
+		this.uiProxy.forgetChild(child.name);
+
+		if (graceful && this.closeInput(child)) {
+			await this.waitForExit(child, this.retireTimeoutMs);
+		}
+		if (this.isAlive(child.name)) {
+			child.process?.kill("SIGTERM");
+			if (!child.process) {
+				try {
+					await child.client.stop();
+					child.processAlive = false;
+					child.turnActive = false;
+					child.state = "retired";
+					const result: SettleResult = child.lastTurnResult ?? {
+						settled: false,
+						abnormal: false,
+						reason: "child retired before agent_settled",
+					};
+					child.lastTurnResult = result;
+					this.resolveWaiters(child, result);
+				} catch {
+					// The child may already have exited; inspect state below.
+				}
+			}
+			await this.waitForExit(child, this.signalTimeoutMs);
+		}
+		if (this.isAlive(child.name)) {
+			throw new SubagentError(
+				`timed out retiring Pi RPC child: ${child.name}`,
+				ErrorCodes.RETIRE_FAILED,
+			);
+		}
+		child.state = "retired";
+		child.subscriptions.clear();
+		child.unsubscribeRpcEvents?.();
+		child.unsubscribeRpcEvents = undefined;
+		this.removeTempDir(child);
+	}
+
+	private closeInput(child: ChildRecord): boolean {
+		const stdin = child.process?.stdin;
+		if (!stdin || stdin.destroyed || stdin.writableEnded) return false;
+		try {
+			stdin.end();
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private waitForExit(child: ChildRecord, timeoutMs: number): Promise<boolean> {
+		if (!this.isAlive(child.name)) return Promise.resolve(true);
+		const process = child.process;
+		if (!process) return Promise.resolve(false);
+		return new Promise((resolve) => {
+			let done = false;
+			const finish = (exited: boolean) => {
+				if (done) return;
+				done = true;
+				clearTimeout(timer);
+				process.off("exit", onExit);
+				resolve(exited);
+			};
+			const onExit = () => finish(true);
+			const timer = setTimeout(() => finish(false), timeoutMs);
+			process.once("exit", onExit);
+			if (processHasExited(process)) finish(true);
+		});
+	}
+
+	private startFailure(child: ChildRecord, message: string): SubagentError {
+		const stderr = child.client.getStderr?.();
+		return new SubagentError(
+			`${message}${stderr ? `: ${stderr.trim().slice(0, 500)}` : ""}`,
+			ErrorCodes.START_FAILED,
+		);
+	}
+
+	private disposeRecord(child: ChildRecord): void {
+		child.unsubscribeRpcEvents?.();
+		child.unsubscribeRpcEvents = undefined;
+		this.uiProxy.forgetChild(child.name);
+		this.resolveWaiters(child, {
+			settled: false,
+			abnormal: false,
+			reason: "child record disposed",
+		});
+		this.removeTempDir(child);
+		if (this.children.get(child.name) === child) this.children.delete(child.name);
+	}
+
+	private removeTempDir(child: ChildRecord): void {
+		fs.rmSync(child.tempDir, { recursive: true, force: true });
+	}
+}

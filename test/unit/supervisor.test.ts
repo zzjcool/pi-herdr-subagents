@@ -1,0 +1,497 @@
+/**
+ * Unit coverage for the M1 RPC supervisor process and event lifecycle.
+ */
+
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+	mkdtempSync,
+	rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import {
+	RpcSupervisor,
+	type RpcSupervisorOptions,
+} from "../../src/supervisor/rpc-supervisor.ts";
+import {
+	InMemoryUIProxy,
+	type ExtensionUIRequest,
+} from "../../src/supervisor/ui-proxy.ts";
+import type {
+	RpcClientFactory,
+	RpcClientLike,
+	RpcClientOptions,
+	RpcProcessHandle,
+	SpawnInput,
+} from "../../src/supervisor/types.ts";
+
+class FakeRpcProcess implements RpcProcessHandle {
+	readonly pid: number;
+	readonly stdin = new PassThrough();
+	exitCode: number | null = null;
+	signalCode: NodeJS.Signals | null = null;
+	readonly signals: NodeJS.Signals[] = [];
+	private readonly events = new EventEmitter();
+
+	constructor(pid: number) {
+		this.pid = pid;
+		this.stdin.on("finish", () => this.exit(0, null));
+	}
+
+	once(
+		event: "exit",
+		listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+	): this;
+	once(event: "error", listener: (error: Error) => void): this;
+	once(
+		event: "exit" | "error",
+		listener:
+			| ((code: number | null, signal: NodeJS.Signals | null) => void)
+			| ((error: Error) => void),
+	): this {
+		this.events.once(event, listener);
+		return this;
+	}
+
+	on(
+		event: "exit" | "close",
+		listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+	): this {
+		this.events.on(event, listener);
+		return this;
+	}
+
+	off(
+		event: "exit" | "close",
+		listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+	): this {
+		this.events.off(event, listener);
+		return this;
+	}
+
+	kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+		this.signals.push(signal);
+		this.exit(null, signal);
+		return true;
+	}
+
+	exit(code: number | null, signal: NodeJS.Signals | null): void {
+		if (this.exitCode !== null || this.signalCode !== null) return;
+		this.exitCode = code;
+		this.signalCode = signal;
+		this.events.emit("exit", code, signal);
+	}
+}
+
+class FakeRpcClient implements RpcClientLike {
+	readonly options: RpcClientOptions;
+	readonly process: FakeRpcProcess;
+	readonly events = new Set<(event: unknown) => void>();
+	readonly prompts: string[] = [];
+	readonly steers: string[] = [];
+	readonly followUps: string[] = [];
+	starts = 0;
+	stops = 0;
+	aborts = 0;
+	statsValue: unknown = {
+		tokens: { input: 23, output: 11 },
+		cost: 0.0125,
+	};
+
+	constructor(options: RpcClientOptions, pid: number) {
+		this.options = options;
+		this.process = new FakeRpcProcess(pid);
+	}
+
+	async start(): Promise<void> {
+		this.starts += 1;
+	}
+
+	async stop(): Promise<void> {
+		this.stops += 1;
+		this.process.kill("SIGTERM");
+	}
+
+	onEvent(listener: (event: unknown) => void): () => void {
+		this.events.add(listener);
+		return () => this.events.delete(listener);
+	}
+
+	getStderr(): string {
+		return "";
+	}
+
+	async prompt(message: string): Promise<void> {
+		this.prompts.push(message);
+	}
+
+	async steer(message: string): Promise<void> {
+		this.steers.push(message);
+	}
+
+	async followUp(message: string): Promise<void> {
+		this.followUps.push(message);
+	}
+
+	async abort(): Promise<void> {
+		this.aborts += 1;
+	}
+
+	async getSessionStats(): Promise<unknown> {
+		return this.statsValue;
+	}
+
+	emit(event: unknown): void {
+		for (const listener of [...this.events]) listener(event);
+	}
+}
+
+function testAgent() {
+	return {
+		name: "worker",
+		description: "unit test agent",
+		kind: "pi" as const,
+		source: "user" as const,
+		filePath: "/tmp/worker.md",
+		systemPrompt: "Follow the role instructions.",
+		systemPromptMode: "append" as const,
+		inheritProjectContext: true,
+		inheritSkills: false,
+		tools: ["read", "bash"],
+		extensions: ["/tmp/example-extension.ts"],
+	};
+}
+
+function testInput(root: string, name = "root.worker"): SpawnInput {
+	return {
+		name,
+		task: "Complete the M1 supervisor smoke task.",
+		agent: testAgent(),
+		sessionFile: path.join(root, `${name}.jsonl`),
+		tempDir: root,
+		cwd: root,
+		model: "openai/gpt-4.1",
+		cliPath: "/tmp/pi-cli.js",
+	};
+}
+
+function harness(options: Partial<RpcSupervisorOptions> = {}) {
+	const root = mkdtempSync(path.join(tmpdir(), "legion-supervisor-test-"));
+	const clients: FakeRpcClient[] = [];
+	const factory: RpcClientFactory = (rpcOptions) => {
+		const client = new FakeRpcClient(rpcOptions, 10_000 + clients.length);
+		clients.push(client);
+		return client;
+	};
+	const supervisor = new RpcSupervisor({
+		clientFactory: factory,
+		retireTimeoutMs: 100,
+		signalTimeoutMs: 100,
+		...options,
+	});
+	return {
+		root,
+		clients,
+		supervisor,
+		close() {
+			rmSync(root, { recursive: true, force: true });
+		},
+	};
+}
+
+function emitSettled(client: FakeRpcClient, aborted = false): void {
+	client.emit({ type: "agent_settled", aborted });
+}
+
+test("spawn passes the complete buildPiArgs CLI context and starts the first prompt", async () => {
+	const h = harness();
+	try {
+		const input = testInput(h.root);
+		const handle = await h.supervisor.spawnChild(input);
+		const client = h.clients[0]!;
+
+		assert.equal(handle.name, input.name);
+		assert.equal(handle.sessionFile, input.sessionFile);
+		assert.equal(handle.pid, 10_000);
+		assert.equal(client.options.cliPath, path.resolve("/tmp/pi-cli.js"));
+		assert.equal(client.options.cwd, h.root);
+		const args = client.options.args ?? [];
+		const sessionIndex = args.indexOf("--session");
+		assert.ok(sessionIndex >= 0);
+		assert.equal(args[sessionIndex + 1], input.sessionFile);
+		const modelIndex = args.indexOf("--model");
+		assert.ok(modelIndex >= 0);
+		assert.equal(args[modelIndex + 1], "openai/gpt-4.1");
+		const toolsIndex = args.indexOf("--tools");
+		assert.ok(toolsIndex >= 0);
+		assert.equal(args[toolsIndex + 1], "read,bash");
+		assert.ok(args.includes("--extension"));
+		assert.ok(args.includes("/tmp/example-extension.ts"));
+		assert.ok(args.includes("--append-system-prompt"));
+		assert.equal(args.some((arg) => arg.startsWith("@")), false);
+		assert.equal(client.starts, 1);
+		assert.match(client.prompts[0] ?? "", /Complete the M1 supervisor smoke task/);
+		assert.match(client.prompts[0] ?? "", /Task:/);
+		assert.equal(h.supervisor.isAlive(input.name), true);
+	} finally {
+		await h.supervisor.retire("root.worker");
+		h.close();
+	}
+});
+
+test("spawn → first prompt → agent_settled → graceful retire lifecycle", async () => {
+	const h = harness();
+	try {
+		await h.supervisor.spawnChild(testInput(h.root));
+		const client = h.clients[0]!;
+		const waiting = h.supervisor.waitSettled("root.worker", 1_000);
+		emitSettled(client);
+		assert.deepEqual(await waiting, {
+			settled: true,
+			abnormal: false,
+			aborted: false,
+		});
+
+		await h.supervisor.retire("root.worker");
+		assert.equal(client.process.stdin.writableEnded, true);
+		assert.deepEqual(client.process.signals, []);
+		assert.equal(h.supervisor.isAlive("root.worker"), false);
+	} finally {
+		h.close();
+	}
+});
+
+test("retire resolves a pending waiter when an injected client hides its process", async () => {
+	const h = harness({
+		clientFactory: () => {
+			const listeners = new Set<(event: unknown) => void>();
+			return {
+				async start() {},
+				async stop() {},
+				onEvent(listener) {
+					listeners.add(listener);
+					return () => listeners.delete(listener);
+				},
+				async prompt() {},
+				async steer() {},
+				async followUp() {},
+				async abort() {},
+				async getSessionStats() {
+					return null;
+				},
+			} satisfies RpcClientLike;
+		},
+	});
+	try {
+		await h.supervisor.spawnChild(testInput(h.root));
+		const waiting = h.supervisor.waitSettled("root.worker", 1_000);
+		await h.supervisor.retire("root.worker");
+		assert.deepEqual(await waiting, {
+			settled: false,
+			abnormal: false,
+			reason: "child retired before agent_settled",
+		});
+		assert.equal(h.supervisor.isAlive("root.worker"), false);
+	} finally {
+		h.close();
+	}
+});
+
+test("steer and follow-up target an active RPC turn without starting another prompt", async () => {
+	const h = harness();
+	try {
+		await h.supervisor.spawnChild(testInput(h.root));
+		const client = h.clients[0]!;
+
+		await h.supervisor.steer("root.worker", "Change direction now.");
+		await h.supervisor.followUp("root.worker", "After the current turn, inspect tests.");
+		assert.equal(client.prompts.length, 1);
+		assert.deepEqual(client.steers, ["Change direction now."]);
+		assert.deepEqual(client.followUps, ["After the current turn, inspect tests."]);
+
+		emitSettled(client);
+		await h.supervisor.steer("root.worker", "Start a fresh turn while idle.");
+		assert.deepEqual(client.prompts.slice(1), ["Start a fresh turn while idle."]);
+		assert.equal(client.steers.length, 1);
+		emitSettled(client);
+	} finally {
+		await h.supervisor.retire("root.worker");
+		h.close();
+	}
+});
+
+test("unexpected process exit immediately resolves waitSettled as abnormal", async () => {
+	const h = harness();
+	try {
+		await h.supervisor.spawnChild(testInput(h.root));
+		const client = h.clients[0]!;
+		const waiting = h.supervisor.waitSettled("root.worker", 5_000);
+		client.process.exit(17, null);
+
+		assert.deepEqual(await waiting, {
+			settled: false,
+			abnormal: true,
+			reason: "Pi RPC process exited before agent_settled",
+			exitCode: 17,
+			signal: null,
+		});
+		assert.equal(h.supervisor.isAlive("root.worker"), false);
+	} finally {
+		h.close();
+	}
+});
+
+test("ten concurrent children keep commands, events, stats, and exits isolated", async () => {
+	const h = harness();
+	try {
+		const inputs = Array.from({ length: 10 }, (_, index) =>
+			testInput(h.root, `root.worker-${index}`),
+		);
+		await Promise.all(inputs.map((input) => h.supervisor.spawnChild(input)));
+		assert.equal(h.clients.length, 10);
+
+		const seen = new Map<string, string[]>();
+		for (const input of inputs) {
+			seen.set(input.name, []);
+			h.supervisor.onEvent(input.name, (event) => {
+				if (event.type === "tool_execution_start") {
+					seen.get(input.name)?.push(String(event.toolName));
+				}
+			});
+		}
+		for (let index = 0; index < inputs.length; index += 1) {
+			const client = h.clients[index]!;
+			const name = inputs[index]!.name;
+			client.emit({ type: "tool_execution_start", toolCallId: `call-${index}`, toolName: name });
+		}
+		for (const input of inputs) {
+			assert.deepEqual(seen.get(input.name), [input.name]);
+		}
+
+		await h.supervisor.steer("root.worker-4", "Only worker 4 gets this steer.");
+		for (let index = 0; index < h.clients.length; index += 1) {
+			assert.deepEqual(
+				h.clients[index]!.steers,
+				index === 4 ? ["Only worker 4 gets this steer."] : [],
+			);
+		}
+		assert.deepEqual(await h.supervisor.stats("root.worker-7"), {
+			tokensIn: 23,
+			tokensOut: 11,
+			costUsd: 0.0125,
+		});
+
+		const pending = inputs.map((input) =>
+			h.supervisor.waitSettled(input.name, 1_000),
+		);
+		for (let index = 0; index < h.clients.length; index += 1) {
+			emitSettled(h.clients[index]!);
+		}
+		const settled = await Promise.all(pending);
+		assert.equal(settled.every((result) => result.settled && !result.abnormal), true);
+	} finally {
+		await Promise.all(
+			h.clients.map((_, index) =>
+				h.supervisor.retire(`root.worker-${index}`).catch(() => {}),
+			),
+		);
+		h.close();
+	}
+});
+
+test("text deltas are opt-in while default events stay coarse", async () => {
+	const h = harness();
+	try {
+		await h.supervisor.spawnChild(testInput(h.root));
+		const client = h.clients[0]!;
+		const coarse: Array<Record<string, unknown>> = [];
+		const detailed: Array<Record<string, unknown>> = [];
+		h.supervisor.onEvent("root.worker", (event) => coarse.push(event));
+		h.supervisor.onEvent("root.worker", (event) => detailed.push(event), {
+			includeTextDelta: true,
+		});
+
+		client.emit({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", delta: "secret text" },
+		});
+		client.emit({
+			type: "message_update",
+			assistantMessageEvent: { type: "thinking_delta", delta: "private reasoning" },
+		});
+		client.emit({
+			type: "message_update",
+			assistantMessageEvent: { type: "toolcall_start", toolName: "read" },
+		});
+		assert.equal(coarse.some((event) => event.delta === "secret text"), false);
+		assert.equal(detailed.some((event) => event.delta === "private reasoning"), false);
+		assert.equal(coarse.some((event) => event.updateType === "text_delta"), false);
+		assert.equal(detailed.some((event) => event.delta === "secret text"), true);
+		assert.equal(coarse.some((event) => event.toolName === "read"), true);
+	} finally {
+		await h.supervisor.retire("root.worker");
+		h.close();
+	}
+});
+
+test("extension UI requests queue with source identity and deliver correlated replies", async () => {
+	const h = harness();
+	try {
+		await h.supervisor.spawnChild(testInput(h.root));
+		const client = h.clients[0]!;
+		const request: ExtensionUIRequest = {
+			type: "extension_ui_request",
+			id: "rpc-dialog-1",
+			method: "confirm",
+			title: "Approval",
+			message: "Run the command?",
+		};
+		client.emit(request);
+		const queued = h.supervisor.uiProxy.pending();
+		assert.equal(queued.length, 1);
+		assert.equal(queued[0]?.childName, "root.worker");
+		assert.equal(queued[0]?.rpcRequestId, "rpc-dialog-1");
+
+		const pending = h.supervisor.uiProxy.take();
+		assert.ok(pending);
+		assert.equal(
+			h.supervisor.uiProxy.respond(pending.id, { confirmed: true }),
+			true,
+		);
+		assert.equal(h.supervisor.uiProxy.respond(pending.id, { confirmed: false }), false);
+		const stdinText = client.process.stdin.read()?.toString() ?? "";
+		assert.deepEqual(JSON.parse(stdinText), {
+			type: "extension_ui_response",
+			id: "rpc-dialog-1",
+			confirmed: true,
+		});
+	} finally {
+		await h.supervisor.retire("root.worker");
+		h.close();
+	}
+});
+
+test("non-dialog extension UI events queue without an answer callback", () => {
+	const proxy = new InMemoryUIProxy();
+	let callbackCount = 0;
+	const request: ExtensionUIRequest = {
+		type: "extension_ui_request",
+		id: "rpc-notify-1",
+		method: "notify",
+		message: "Heads up",
+	};
+	const pending = proxy.enqueue({
+		childName: "root.worker",
+		request,
+		respond: () => callbackCount++,
+	});
+
+	assert.equal(proxy.pending()[0]?.id, pending.id);
+	assert.equal(proxy.respond(pending.id, { cancelled: true }), false);
+	assert.equal(callbackCount, 0);
+	proxy.forgetChild("root.worker");
+	assert.equal(proxy.pending().length, 0);
+});
