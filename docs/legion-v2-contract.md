@@ -399,7 +399,7 @@ interface LegionEventBus {
 
 ### M0 地基修复（在现有后端上先行，独立发布）
 
-- **归属**：`src/runs/orchestrator.ts`（maxDepth 接线）、`src/runs/store.ts`（maxDepth 落盘一致性）、`index.ts`（两处 `new Orchestrator` 传深度）、`test/integration/nesting.test.ts`（新增）
+- **归属**：`src/runs/orchestrator.ts`（maxDepth 接线）、`src/runs/store.ts`（maxDepth 落盘一致性）、`index.ts`（两处 `new Orchestrator` 传深度）、`src/agents/settings.ts`（**仅新增** `subagents.legion` 设置块解析，契约 §11.4 全块一次加齐：maxDepth/maxChildrenPerNode/maxActiveNodes/phaseTimeouts/verifyCommandTimeoutMs/mailRatePer5Min/usagePollMs/orphanStaleMs，含默认值；**不动** herdr.* 键——那是 M1 的事）、`src/shared/types.ts`（**仅新增** legion 设置类型，其余不动）、`test/integration/nesting.test.ts`（新增）
 - **内容**：接通 `agent.maxSubagentDepth` → Orchestrator（生效公式见 §11.1）；run.json 记录**运行时实际** maxDepth（修"落盘 1 / 运行时 4"矛盾）；端到端嵌套测试
 - **验收**：(a) `maxSubagentDepth:1` 的子进程派孙被拒（BUDGET_EXCEEDED）；(b) `:2` 可派一层孙、孙再派被拒；(c) run.json maxDepth == 运行时值；(d) 全仓 typecheck + 613 unit + 107 integration 全绿
 
@@ -439,3 +439,4 @@ interface LegionEventBus {
 |---|---|---|
 | 2026-10-11 | DRAFT-1 | 初稿：整合军团需求对齐全部决策（D1–D20）与三份侦察报告事实 |
 | 2026-10-11 | FROZEN-1 | CEO 批准；修正 §6.1 maxSubagentDepth 注释（R=1 禁派生、R=2 一层）与 M0 验收语义对齐 |
+| 2026-10-11 | REV-1 | 修 §14-M0 归属缺口：`subagents.legion` 设置块（§11.4）原本无任何里程碑认领解析文件，M0 无法实现 §11.1 生效公式。M0 归属增加 `src/agents/settings.ts`（仅新增 legion 块解析）与 `src/shared/types.ts`（仅新增类型）。触发：worker-0 按契约 §15-2 正确拒绝（改动零，无提交） |
