@@ -120,6 +120,8 @@ interface LegionSupervisor {
 ### 4.2 Schema（`PRAGMA user_version = 1`）
 
 ```sql
+PRAGMA user_version = 1;   -- 未来迁移用
+
 CREATE TABLE nodes (
   id            TEXT PRIMARY KEY,     -- 树形 id（§5）
   parent_id     TEXT REFERENCES nodes(id),
@@ -445,3 +447,4 @@ interface LegionEventBus {
 | 2026-10-11 | REV-2 | 两个新车道任务卡勘误：(1) `npm test` glob 是 `test/unit/*.test.ts` 不含子目录（package.json:49，CONTRIBUTING.md:22），新模块单测一律平铺（M1-core 用 `test/supervisor.test.ts`，M2-core 用 `test/legion-*.test.ts`），§14-M1 已加注；(2) 事件类型闭集确认为 14 种（§4.3 原文即 14，派工卡笔误写 15）。触发：worker-1/worker-2 按契约 §15-2 正确拒绝（均零改动） |
 | 2026-10-11 | REV-3 | REV-2 勘误的勘误：平铺路径应为 `test/unit/supervisor.test.ts` 与 `test/unit/legion-*.test.ts`（REV-2 误写成顶层 `test/*.test.ts`，不在 npm test glob 内）。live smoke 路径 `test/live/rpc-live.test.ts` 归 `npm run test:live`，正确。触发：worker-4 按 §15-2 正确拒绝（零改动） |
 | 2026-10-11 | REV-4 | 修 §5 节点 id 歧义：slug 语法从「沿用 sanitizeNameFs」改为 `[a-z][a-z0-9_-]{0,31}`（禁止点号，点是 id 分隔符）。原因：sanitizeNameForFs 允许点号，会使 `父.a` + 子 `b` 与 `父` + 子 `a.b` 生成相同节点 id，违反 §4.2 主键约束。触发：worker-5 按 §15-2 正确拒绝（零改动） |
+| 2026-10-11 | REV-5 | §4.2 把 `PRAGMA user_version = 1;` 落进 SQL DDL 块首行（原先只在节标题注记，实现者无 DDL 可抄，哨兵测试也只能存在性匹配）。非 schema 变更，仅语句归位。触发：reviewer-0 对 PR #6 的 major finding |
