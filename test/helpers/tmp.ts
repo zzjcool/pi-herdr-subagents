@@ -9,7 +9,7 @@ import * as path from "node:path";
 
 /** Run `fn` with a fresh temp dir; the dir is always removed afterwards. */
 export async function withTempDir<T>(fn: (dir: string) => T | Promise<T>): Promise<T> {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-herdr-subagents-test-"));
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-herdr-swarm-test-"));
 	try {
 		return await fn(dir);
 	} finally {

@@ -1,9 +1,9 @@
 ---
-name: herdr-subagents
+name: herdr-swarm
 description: "Delegate with the subagent tool whenever a loaded role matches the job (search, scout, planner, worker, reviewer, oracle, or any user agent in ~/.pi/agent/agents). Prefer subagent over doing that work yourself. Do not run herdr CLI to launch agents."
 ---
 
-# Herdr Subagents
+# Herdr Swarm
 
 The launch path is frozen. Do not invent herdr commands.
 

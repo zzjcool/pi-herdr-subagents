@@ -1242,7 +1242,7 @@ export class Orchestrator {
 		if (!child.paneId) return;
 		await this.client.paneReportMetadata({
 			paneId: child.paneId,
-			source: "pi-herdr-subagents",
+			source: "pi-herdr-swarm",
 			displayAgent: agentName,
 			tokens: {
 				agent: agentName,

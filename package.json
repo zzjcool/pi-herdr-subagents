@@ -1,16 +1,16 @@
 {
-  "name": "@zzjcool/pi-herdr-subagents",
-  "version": "0.14.3",
+  "name": "pi-herdr-swarm",
+  "version": "1.0.0",
   "description": "Herdr-backed subagents for Pi: visible, steerable, resumable child agents in Herdr panes",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zzjcool/pi-herdr-subagents.git"
+    "url": "git+https://github.com/zzjcool/pi-herdr-swarm.git"
   },
-  "homepage": "https://github.com/zzjcool/pi-herdr-subagents#readme",
+  "homepage": "https://github.com/zzjcool/pi-herdr-swarm#readme",
   "bugs": {
-    "url": "https://github.com/zzjcool/pi-herdr-subagents/issues"
+    "url": "https://github.com/zzjcool/pi-herdr-swarm/issues"
   },
   "keywords": [
     "pi-package",

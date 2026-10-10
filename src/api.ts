@@ -1,5 +1,5 @@
 /**
- * Public programmatic surface for `@zzjcool/pi-herdr-subagents`.
+ * Public programmatic surface for `pi-herdr-swarm`.
  *
  * The extension registers a `subagent` tool, but a host that wants to drive the
  * same machinery directly (another extension, a script, a test harness) can
@@ -7,7 +7,7 @@
  * is covered by the package's test suite and is safe to depend on.
  *
  * ```ts
- * import { createHerdrClient, Orchestrator, loadAgentsFromDir } from "@zzjcool/pi-herdr-subagents/api";
+ * import { createHerdrClient, Orchestrator, loadAgentsFromDir } from "pi-herdr-swarm/api";
  *
  * const client = createHerdrClient();
  * const [scout] = loadAgentsFromDir("/path/to/agents", "user");

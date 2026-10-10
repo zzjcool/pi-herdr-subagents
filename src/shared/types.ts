@@ -1,5 +1,5 @@
 /**
- * Frozen interfaces for pi-herdr-subagents.
+ * Frozen interfaces for pi-herdr-swarm.
  *
  * This file is the CONTRACT between modules. Parallel work depends on it, so:
  *   - Treat every exported type here as FROZEN once workers start.

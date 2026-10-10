@@ -666,7 +666,7 @@ system prompt 不再注入 playbook/roster；bash 派发 guard 放行手动 herd
 `<provider>.quality`（偏强）→ `/subagents-load-profile` 写入
 `~/.pi/agent/settings.json` 的 `agentOverrides`。
 
-Profile 文件在 `~/.pi/agent/profiles/pi-herdr-subagents/`。加载只替换
+Profile 文件在 `~/.pi/agent/profiles/pi-herdr-swarm/`。加载只替换
 `agentOverrides`（以及 profile 里显式带的 `subagents` 键），`modelScope` /
 `herdr` 等其它设置保留。项目 `.pi/settings.json` 覆盖用户设置。
 

@@ -53,7 +53,7 @@ import { readFileSync } from "node:fs";
 const s = JSON.parse(readFileSync("/root/.pi/agent/settings.json", "utf8"));
 const pkgs = s.packages ?? [];
 console.log("packages after install", pkgs);
-if (!pkgs.some((p) => String(p).includes("plugin") || String(p).includes("herdr-subagents"))) {
+if (!pkgs.some((p) => String(p).includes("plugin") || String(p).includes("pi-herdr-swarm"))) {
   console.error("FAIL: pi install did not register /plugin");
   process.exit(1);
 }

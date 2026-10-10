@@ -1,10 +1,10 @@
 ---
-name: pi-herdr-subagents
-npm: "@zzjcool/pi-herdr-subagents"
+name: pi-herdr-swarm
+npm: "pi-herdr-swarm"
 description: "Delegate work to child Pi agents running in Herdr panes: visible, steerable, resumable, with accurate success/failure accounting. Use when a task would benefit from parallel workers, fresh-context adversarial review, or long-running background subtasks that must survive the parent. Do not use for trivial single-file edits, running tests, or answering simple questions."
 ---
 
-# @zzjcool/pi-herdr-subagents
+# pi-herdr-swarm
 
 A [Pi](https://github.com/badlogic/pi-mono) extension that delegates work to
 **child Pi agents in [Herdr](https://herdr.dev) panes**.
@@ -15,9 +15,11 @@ pane is gone, and stays visible to you. The parent session never has to invent
 `herdr pane split` / `herdr agent start` — one `subagent` tool call is the
 whole launch path.
 
-> **Name note.** The package is scoped (`@zzjcool/...`) on purpose: the
-> unscoped name `pi-herdr-subagents` on npm belongs to an unrelated project.
-> Installing that one will not give you this code.
+> **Name note.** This package was formerly published as
+> `@zzjcool/pi-herdr-subagents` (through 0.14.3). It was renamed to
+> `pi-herdr-swarm` at 1.0.0 — the previous name collided with an unrelated
+> project on npm. To migrate: `pi uninstall` the old package, then
+> `pi install npm:pi-herdr-swarm`.
 
 ## Contents
 
@@ -54,19 +56,19 @@ herdr on every launch.
 ## Install
 
 ```bash
-pi install npm:@zzjcool/pi-herdr-subagents
+pi install npm:pi-herdr-swarm
 ```
 
 From git (picks up commits that are not on npm yet):
 
 ```bash
-pi install git:github.com/zzjcool/pi-herdr-subagents
+pi install git:github.com/zzjcool/pi-herdr-swarm
 ```
 
 From a local checkout:
 
 ```bash
-pi install /path/to/herdr-subagents
+pi install /path/to/pi-herdr-swarm
 ```
 
 Then **reload the parent session** (`/reload`, or restart Pi). After install,
@@ -75,7 +77,7 @@ seven roles (`scout`, `planner`, `worker`, `reviewer`, `advisor`, `designer`,
 with no extra files to copy — see [Bundled roles](#bundled-roles).
 
 To update a git install: `pi update`. To switch from a path/git install to npm
-once a release is published, remove the old package and `pi install npm:@zzjcool/pi-herdr-subagents`.
+once a release is published, remove the old package and `pi install npm:pi-herdr-swarm`.
 
 ## What the plugin does for you
 
@@ -279,7 +281,7 @@ the parent session model every time.
 
 That writes two profiles (`<provider>.quota` leans cheaper,
 `<provider>.quality` leans stronger) under
-`~/.pi/agent/profiles/pi-herdr-subagents/` and, on load, copies
+`~/.pi/agent/profiles/pi-herdr-swarm/` and, on load, copies
 `agentOverrides` into `~/.pi/agent/settings.json`. Project `.pi/settings.json`
 still wins on overlapping keys.
 
@@ -618,7 +620,7 @@ import {
   createHerdrClient,
   Orchestrator,
   loadAgentsFromDir,
-} from "@zzjcool/pi-herdr-subagents/api";
+} from "pi-herdr-swarm/api";
 
 const client = createHerdrClient();
 const [scout] = loadAgentsFromDir("/path/to/agents", "user");
@@ -637,8 +639,8 @@ from `src/` directly.
 ## Development
 
 ```bash
-git clone https://github.com/zzjcool/pi-herdr-subagents.git
-cd pi-herdr-subagents
+git clone https://github.com/zzjcool/pi-herdr-swarm.git
+cd pi-herdr-swarm
 npm install
 npm run typecheck
 npm test                 # unit

@@ -5,7 +5,7 @@
  *   refresh a provider catalog → generate quota + quality profiles → load one
  *   into `~/.pi/agent/settings.json` as `subagents.agentOverrides`.
  *
- * Files live under `~/.pi/agent/profiles/pi-herdr-subagents/` so they do not
+ * Files live under `~/.pi/agent/profiles/pi-herdr-swarm/` so they do not
  * collide with a side-by-side pi-subagents install.
  */
 
@@ -28,7 +28,7 @@ import {
 } from "./classify.ts";
 
 export const DEFAULT_PROVIDER_MODELS_MAX_AGE_DAYS = 7;
-export const PROFILES_DIR_NAME = "pi-herdr-subagents";
+export const PROFILES_DIR_NAME = "pi-herdr-swarm";
 
 export type ProbeStatus =
 	| "ok"
@@ -265,6 +265,11 @@ export function validateSubagentProfile(
 			`Profile '${filePath}' has invalid subagents.disableBuiltins; expected a boolean.`,
 		);
 	}
+	// SAFETY: readJsonObjectFile guarantees a non-array JSON object; the
+	// validation above established the subagents/agentOverrides shape, so the
+	// only fields left (model/thinking/fallbackModels/disableBuiltins) were all
+	// type-checked in this function. The double cast just narrows the leftover
+	// `unknown` fields to their declared types.
 	return parsed as unknown as SubagentProfileFile;
 }
 
@@ -329,6 +334,10 @@ export function readProviderModelCatalog(
 ): ProviderModelCatalogFile | null {
 	const filePath = getProviderModelsPath(provider, opts);
 	if (!fs.existsSync(filePath)) return null;
+	// SAFETY: readJsonObjectFile guarantees a non-array JSON object. A missing
+	// or malformed catalog is handled by callers (isProviderModelCatalogStale /
+	// validation at generate time); the cast narrows the JSON payload to the
+	// catalog shape written by this package itself.
 	return readJsonObjectFile(filePath) as unknown as ProviderModelCatalogFile;
 }
 

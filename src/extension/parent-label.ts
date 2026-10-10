@@ -20,7 +20,7 @@
 
 import type { HerdrClient } from "../shared/types.ts";
 
-export const PARENT_LABEL_SOURCE = "pi-herdr-subagents";
+export const PARENT_LABEL_SOURCE = "pi-herdr-swarm";
 
 /**
  * Label TTL: the runtime refreshes every ~500ms, so 15s covers ~30 missed
