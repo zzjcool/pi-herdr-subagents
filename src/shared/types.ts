@@ -1,12 +1,12 @@
 /**
- * Frozen interfaces for pi-herdr-swarm.
+ * Frozen interfaces for pi-legion.
  *
  * This file is the CONTRACT between modules. Parallel work depends on it, so:
  *   - Treat every exported type here as FROZEN once workers start.
  *   - Additive changes (new optional fields) are allowed.
  *   - Breaking changes require coordinating all modules.
  *
- * Design authority: pi-herdr-swarm design.md (docs/design.md) (33 measured findings F1-F33).
+ * Design authority: pi-legion design.md (docs/design.md) (33 measured findings F1-F33).
  */
 
 // =============================================================================

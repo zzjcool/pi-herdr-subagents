@@ -902,7 +902,7 @@ test("control wait: team-overridden role definition wins over allAgents", async 
 test("profiles: malformed JSON error includes the file path", () => {
 	const dir = mkdtempSync(path.join(tmpdir(), "teams-profile-json-"));
 	try {
-		const profiles = path.join(dir, "profiles", "pi-herdr-swarm");
+		const profiles = path.join(dir, "profiles", "pi-legion");
 		mkdirSync(profiles, { recursive: true });
 		const file = path.join(profiles, "broken.json");
 		writeFileSync(file, "{ invalid");

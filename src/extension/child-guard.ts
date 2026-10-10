@@ -32,7 +32,7 @@ export function childTaskAppendix(opts?: {
 			]
 		: [];
 	return [
-		"## Frozen child constraints (injected by pi-herdr-swarm)",
+		"## Frozen child constraints (injected by pi-legion)",
 		"- Do not message, prompt, wait on, or send keys to any other pane. The parent extension delivers your result.",
 		"- Do not read or close panes that are not yours.",
 		nested,

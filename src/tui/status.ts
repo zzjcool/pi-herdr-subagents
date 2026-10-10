@@ -10,8 +10,8 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isThinkingLevel } from "../shared/types.ts";
 
-export const STATUS_WIDGET_KEY = "herdr-swarm-status";
-export const STATUS_FOOTER_KEY = "pi-herdr-swarm";
+export const STATUS_WIDGET_KEY = "pi-legion-status";
+export const STATUS_FOOTER_KEY = "pi-legion";
 export const STATUS_WIDGET_PLACEMENT = "aboveEditor" as const;
 
 export interface StatusEntry {

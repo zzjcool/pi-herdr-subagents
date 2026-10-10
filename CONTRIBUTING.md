@@ -7,8 +7,8 @@ two as the only things a downstream should need.
 ## Setup
 
 ```bash
-git clone https://github.com/zzjcool/pi-herdr-swarm.git
-cd pi-herdr-swarm
+git clone https://github.com/zzjcool/pi-legion.git
+cd pi-legion
 npm install
 ```
 
@@ -91,7 +91,7 @@ them by hand.
 | `README.md` | what is actually wired today |
 
 Do not import from `src/` in downstream packages — use
-`pi-herdr-swarm/api`. If a helper needs to be public, re-export
+`pi-legion/api`. If a helper needs to be public, re-export
 it there and add a test that imports from the API path.
 
 ## Agent definitions

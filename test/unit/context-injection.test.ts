@@ -584,7 +584,7 @@ test("enabled check defaults to true when explicit context settings are broken",
 		assert.equal((result as { block?: unknown }).block, true);
 		assert.match(
 			warnings.join(" "),
-			/pi-herdr-swarm|defaulting/,
+			/pi-legion|defaulting/,
 			"a warning should explain the settings fallback",
 		);
 	} finally {

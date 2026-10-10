@@ -573,7 +573,7 @@ const CURSOR_TUI_CHROME: readonly RegExp[] = [
 	// Replies are prose (Chinese, markdown, sentences) and never match (a), so
 	// they survive even when they mention a model.
 	/^[\w\s.%·:\-–—]*\b(?:Grok|Claude|GPT|Gemini|Sonnet|Opus|Haiku|DeepSeek|Kimi|GLM|Auto)\b[\w\s.%·:\-–—]*$/gim,
-	// The footer, e.g. `~/code/pi-herdr-swarm · master`. Requires the leading
+	// The footer, e.g. `~/code/pi-legion · master`. Requires the leading
 	// `~`/`/` and the ` · ` separator so a real reply containing ` · ` survives.
 	/^\s*~?\/[^\n·]*·\s*\S+\s*$/gim,
 	/^\s*Add a follow-up\s*$/gim,

@@ -279,7 +279,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 			);
 		} catch (error) {
 			console.warn(
-				"[pi-herdr-swarm] Unable to load settings while checking whether subagents are enabled; defaulting to enabled.",
+				"[pi-legion] Unable to load settings while checking whether subagents are enabled; defaulting to enabled.",
 				error,
 			);
 			return true;

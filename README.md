@@ -1,10 +1,10 @@
 ---
-name: pi-herdr-swarm
-npm: "pi-herdr-swarm"
+name: pi-legion
+npm: "pi-legion"
 description: "Delegate work to child Pi agents running in Herdr panes: visible, steerable, resumable, with accurate success/failure accounting. Use when a task would benefit from parallel workers, fresh-context adversarial review, or long-running background subtasks that must survive the parent. Do not use for trivial single-file edits, running tests, or answering simple questions."
 ---
 
-# pi-herdr-swarm
+# pi-legion
 
 A [Pi](https://github.com/badlogic/pi-mono) extension that delegates work to
 **child Pi agents in [Herdr](https://herdr.dev) panes**.
@@ -16,13 +16,12 @@ pane is gone, and stays visible to you. The parent session never has to invent
 whole launch path.
 
 > **Name note.** This package was formerly published as
-> `@zzjcool/pi-herdr-subagents` (through 0.14.3). It was renamed to
-> `@zzjcool/pi-herdr-subagents` (through 0.14.3). It was renamed to
-> `pi-herdr-swarm`, first published as 0.15.0 (continuing the old package's
-> version line) — the previous name collided with
-> an unrelated
-> project on npm. To migrate: `pi uninstall` the old package, then
-> `pi install npm:pi-herdr-swarm`.
+> `@zzjcool/pi-herdr-subagents` (through 0.14.3; renamed after an npm
+> name collision) and then as `pi-herdr-swarm` (0.15.0; retired when the
+> name stopped matching the architecture — this is a command tree, not a
+> swarm). It is now `pi-legion`, first published as 0.16.0 (continuing
+> the version line). To migrate: `pi uninstall` the old package, then
+> `pi install npm:pi-legion`.
 
 ## Contents
 
@@ -59,19 +58,19 @@ herdr on every launch.
 ## Install
 
 ```bash
-pi install npm:pi-herdr-swarm
+pi install npm:pi-legion
 ```
 
 From git (picks up commits that are not on npm yet):
 
 ```bash
-pi install git:github.com/zzjcool/pi-herdr-swarm
+pi install git:github.com/zzjcool/pi-legion
 ```
 
 From a local checkout:
 
 ```bash
-pi install /path/to/pi-herdr-swarm
+pi install /path/to/pi-legion
 ```
 
 Then **reload the parent session** (`/reload`, or restart Pi). After install,
@@ -80,7 +79,7 @@ seven roles (`scout`, `planner`, `worker`, `reviewer`, `advisor`, `designer`,
 with no extra files to copy — see [Bundled roles](#bundled-roles).
 
 To update a git install: `pi update`. To switch from a path/git install to npm
-once a release is published, remove the old package and `pi install npm:pi-herdr-swarm`.
+once a release is published, remove the old package and `pi install npm:pi-legion`.
 
 ## What the plugin does for you
 
@@ -284,7 +283,7 @@ the parent session model every time.
 
 That writes two profiles (`<provider>.quota` leans cheaper,
 `<provider>.quality` leans stronger) under
-`~/.pi/agent/profiles/pi-herdr-swarm/` and, on load, copies
+`~/.pi/agent/profiles/pi-legion/` and, on load, copies
 `agentOverrides` into `~/.pi/agent/settings.json`. Project `.pi/settings.json`
 still wins on overlapping keys.
 
@@ -623,7 +622,7 @@ import {
   createHerdrClient,
   Orchestrator,
   loadAgentsFromDir,
-} from "pi-herdr-swarm/api";
+} from "pi-legion/api";
 
 const client = createHerdrClient();
 const [scout] = loadAgentsFromDir("/path/to/agents", "user");
@@ -642,8 +641,8 @@ from `src/` directly.
 ## Development
 
 ```bash
-git clone https://github.com/zzjcool/pi-herdr-swarm.git
-cd pi-herdr-swarm
+git clone https://github.com/zzjcool/pi-legion.git
+cd pi-legion
 npm install
 npm run typecheck
 npm test                 # unit

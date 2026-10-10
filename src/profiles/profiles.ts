@@ -5,7 +5,7 @@
  *   refresh a provider catalog → generate quota + quality profiles → load one
  *   into `~/.pi/agent/settings.json` as `subagents.agentOverrides`.
  *
- * Files live under `~/.pi/agent/profiles/pi-herdr-swarm/` so they do not
+ * Files live under `~/.pi/agent/profiles/pi-legion/` so they do not
  * collide with a side-by-side pi-subagents install.
  */
 
@@ -28,7 +28,7 @@ import {
 } from "./classify.ts";
 
 export const DEFAULT_PROVIDER_MODELS_MAX_AGE_DAYS = 7;
-export const PROFILES_DIR_NAME = "pi-herdr-swarm";
+export const PROFILES_DIR_NAME = "pi-legion";
 
 export type ProbeStatus =
 	| "ok"

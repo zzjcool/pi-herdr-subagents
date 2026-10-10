@@ -1,4 +1,4 @@
-# pi-herdr-swarm 设计文档
+# pi-legion 设计文档
 
 > 基于 10 组实测实验（exp1–exp10）得出的设计。所有结论都标注了实验依据，
 > 未经验证的假设明确标记为「待验证」。
@@ -666,7 +666,7 @@ system prompt 不再注入 playbook/roster；bash 派发 guard 放行手动 herd
 `<provider>.quality`（偏强）→ `/subagents-load-profile` 写入
 `~/.pi/agent/settings.json` 的 `agentOverrides`。
 
-Profile 文件在 `~/.pi/agent/profiles/pi-herdr-swarm/`。加载只替换
+Profile 文件在 `~/.pi/agent/profiles/pi-legion/`。加载只替换
 `agentOverrides`（以及 profile 里显式带的 `subagents` 键），`modelScope` /
 `herdr` 等其它设置保留。项目 `.pi/settings.json` 覆盖用户设置。
 
