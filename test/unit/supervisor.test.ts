@@ -264,6 +264,42 @@ test("spawn → first prompt → agent_settled → graceful retire lifecycle", a
 	}
 });
 
+test("retire resolves a pending waiter when an injected client hides its process", async () => {
+	const h = harness({
+		clientFactory: () => {
+			const listeners = new Set<(event: unknown) => void>();
+			return {
+				async start() {},
+				async stop() {},
+				onEvent(listener) {
+					listeners.add(listener);
+					return () => listeners.delete(listener);
+				},
+				async prompt() {},
+				async steer() {},
+				async followUp() {},
+				async abort() {},
+				async getSessionStats() {
+					return null;
+				},
+			} satisfies RpcClientLike;
+		},
+	});
+	try {
+		await h.supervisor.spawnChild(testInput(h.root));
+		const waiting = h.supervisor.waitSettled("root.worker", 1_000);
+		await h.supervisor.retire("root.worker");
+		assert.deepEqual(await waiting, {
+			settled: false,
+			abnormal: false,
+			reason: "child retired before agent_settled",
+		});
+		assert.equal(h.supervisor.isAlive("root.worker"), false);
+	} finally {
+		h.close();
+	}
+});
+
 test("steer and follow-up target an active RPC turn without starting another prompt", async () => {
 	const h = harness();
 	try {

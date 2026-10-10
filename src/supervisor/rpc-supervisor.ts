@@ -647,6 +647,7 @@ export class RpcSupervisor implements LegionSupervisor {
 	private async retireChild(child: ChildRecord, graceful: boolean): Promise<void> {
 		if (!this.isAlive(child.name)) {
 			child.state = "retired";
+			child.subscriptions.clear();
 			child.unsubscribeRpcEvents?.();
 			child.unsubscribeRpcEvents = undefined;
 			this.uiProxy.forgetChild(child.name);
@@ -666,7 +667,15 @@ export class RpcSupervisor implements LegionSupervisor {
 				try {
 					await child.client.stop();
 					child.processAlive = false;
+					child.turnActive = false;
 					child.state = "retired";
+					const result: SettleResult = child.lastTurnResult ?? {
+						settled: false,
+						abnormal: false,
+						reason: "child retired before agent_settled",
+					};
+					child.lastTurnResult = result;
+					this.resolveWaiters(child, result);
 				} catch {
 					// The child may already have exited; inspect state below.
 				}
@@ -680,6 +689,7 @@ export class RpcSupervisor implements LegionSupervisor {
 			);
 		}
 		child.state = "retired";
+		child.subscriptions.clear();
 		child.unsubscribeRpcEvents?.();
 		child.unsubscribeRpcEvents = undefined;
 		this.removeTempDir(child);
