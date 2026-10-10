@@ -190,7 +190,7 @@ CREATE INDEX idx_messages_inbox ON messages(to_node, delivered, id);
 ## 5. 节点标识与命名
 
 - **node id** = `<父id>.<name-slug>`，根节点 id 为 `root`；例：`root.centurion-fe`、`root.centurion-fe.worker-a2`
-- name-slug = launch 时 `name` 参数净化（沿用 `sanitizeNameForFs` 语法），**父内唯一**，重名拒绝（BUDGET_EXCEEDED 同级错误通道）
+- name-slug 语法 = `[a-z][a-z0-9_-]{0,31}`（与 src/shared/name.ts 的 herdr 名字语法一致，**禁止点号**——点是 id 分隔符；`sanitizeNameForFs` 不适用于 slug，因其允许点号会制造 `a.b` vs `a`+`b` 的 id 歧义）。**父内唯一**，重名拒绝（BUDGET_EXCEEDED 同级错误通道）；launch 时的 `name` 参数先按 makeName 风格净化到该语法再拼 id
 - RPC 子进程不在 herdr 命名空间，全局撞名问题（F16）随之消失；树内寻址一律用 node id
 - 工具寻址简写：对**自己的直接子节点**可用短名；`legion_mail` 的 `parent`/`squad`/`children` 广播糖在发送方 supervisor 内展开
 
@@ -444,3 +444,4 @@ interface LegionEventBus {
 | 2026-10-11 | REV-1 | 修 §14-M0 归属缺口：`subagents.legion` 设置块（§11.4）原本无任何里程碑认领解析文件，M0 无法实现 §11.1 生效公式。M0 归属增加 `src/agents/settings.ts`（仅新增 legion 块解析）与 `src/shared/types.ts`（仅新增类型）。触发：worker-0 按契约 §15-2 正确拒绝（改动零，无提交） |
 | 2026-10-11 | REV-2 | 两个新车道任务卡勘误：(1) `npm test` glob 是 `test/unit/*.test.ts` 不含子目录（package.json:49，CONTRIBUTING.md:22），新模块单测一律平铺（M1-core 用 `test/supervisor.test.ts`，M2-core 用 `test/legion-*.test.ts`），§14-M1 已加注；(2) 事件类型闭集确认为 14 种（§4.3 原文即 14，派工卡笔误写 15）。触发：worker-1/worker-2 按契约 §15-2 正确拒绝（均零改动） |
 | 2026-10-11 | REV-3 | REV-2 勘误的勘误：平铺路径应为 `test/unit/supervisor.test.ts` 与 `test/unit/legion-*.test.ts`（REV-2 误写成顶层 `test/*.test.ts`，不在 npm test glob 内）。live smoke 路径 `test/live/rpc-live.test.ts` 归 `npm run test:live`，正确。触发：worker-4 按 §15-2 正确拒绝（零改动） |
+| 2026-10-11 | REV-4 | 修 §5 节点 id 歧义：slug 语法从「沿用 sanitizeNameFs」改为 `[a-z][a-z0-9_-]{0,31}`（禁止点号，点是 id 分隔符）。原因：sanitizeNameForFs 允许点号，会使 `父.a` + 子 `b` 与 `父` + 子 `a.b` 生成相同节点 id，违反 §4.2 主键约束。触发：worker-5 按 §15-2 正确拒绝（零改动） |
