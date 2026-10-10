@@ -405,6 +405,8 @@ interface LegionEventBus {
 
 ### M1 RPC 宿主层（换发动机，单层语义不变）
 
+> REV-2 补充：M1-core 新增文件为 `src/supervisor/{types,rpc-supervisor,ui-proxy}.ts` + 平铺单测 `test/supervisor.test.ts`（`npm test` 的 glob 是 `test/unit/*.test.ts`，不含子目录）。
+
 - **归属**：新增 `src/supervisor/{rpc-supervisor,types,ui-proxy}.ts`；重写 `src/runs/orchestrator.ts`、`index.ts`、`src/extension/child-guard.ts`、`src/extension/playbook.ts`、`src/shared/types.ts`；移动 `src/herdr/*` → `src/backends/legacy/`；删除/归档 `src/runs/layout.ts`、`src/extension/parent-label.ts`、`src/shared/cursor-chat.ts`、`src/shared/progress.ts` 的 pane 分支
 - **验收**：(a) `RpcClient` args 承载 `buildPiArgs` 全套 flag 实测通过；(b) 单层 launch→steer→collect→retire 全链路 e2e；(c) resume 复刻 ping-ok 实验（新进程同 session 上下文无损）；(d) steer 用 RPC `steer` 命令（流式中排队语义生效）；(e) blocked 审批经 ui-proxy 上浮根 TUI 可应答；(f) 改造后测试套件全绿（fake-supervisor 替换 fake-herdr，1064 行假件重写为 RPC mock）；(g) legacy 目录编译通过、不进主 bundle
 
@@ -440,3 +442,4 @@ interface LegionEventBus {
 | 2026-10-11 | DRAFT-1 | 初稿：整合军团需求对齐全部决策（D1–D20）与三份侦察报告事实 |
 | 2026-10-11 | FROZEN-1 | CEO 批准；修正 §6.1 maxSubagentDepth 注释（R=1 禁派生、R=2 一层）与 M0 验收语义对齐 |
 | 2026-10-11 | REV-1 | 修 §14-M0 归属缺口：`subagents.legion` 设置块（§11.4）原本无任何里程碑认领解析文件，M0 无法实现 §11.1 生效公式。M0 归属增加 `src/agents/settings.ts`（仅新增 legion 块解析）与 `src/shared/types.ts`（仅新增类型）。触发：worker-0 按契约 §15-2 正确拒绝（改动零，无提交） |
+| 2026-10-11 | REV-2 | 两个新车道任务卡勘误：(1) `npm test` glob 是 `test/unit/*.test.ts` 不含子目录（package.json:49，CONTRIBUTING.md:22），新模块单测一律平铺（M1-core 用 `test/supervisor.test.ts`，M2-core 用 `test/legion-*.test.ts`），§14-M1 已加注；(2) 事件类型闭集确认为 14 种（§4.3 原文即 14，派工卡笔误写 15）。触发：worker-1/worker-2 按契约 §15-2 正确拒绝（均零改动） |
