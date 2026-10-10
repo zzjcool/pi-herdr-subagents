@@ -1,0 +1,184 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+const contract = readFileSync(
+	fileURLToPath(new URL("../../docs/legion-v2-contract.md", import.meta.url)),
+	"utf8",
+);
+
+const EXPECTED_COLUMNS: Record<string, readonly string[]> = {
+	nodes: [
+		"id",
+		"parent_id",
+		"name",
+		"role",
+		"kind",
+		"depth",
+		"run_id",
+		"session_file",
+		"worktree_path",
+		"model",
+		"team",
+		"status",
+		"phase",
+		"phase_since",
+		"rework_count",
+		"contract_path",
+		"task_summary",
+		"created_at",
+		"updated_at",
+	],
+	events: ["id", "node_id", "type", "data", "ts"],
+	usage: ["node_id", "tokens_in", "tokens_out", "cost_usd", "updated_at"],
+	messages: [
+		"id",
+		"from_node",
+		"to_node",
+		"subject",
+		"body",
+		"kind",
+		"urgency",
+		"delivered",
+		"delivered_at",
+		"created_at",
+	],
+};
+
+const EXPECTED_INDEXES = [
+	{ table: "nodes", name: "idx_nodes_parent" },
+	{ table: "nodes", name: "idx_nodes_status" },
+	{ table: "events", name: "idx_events_node" },
+	{ table: "events", name: "idx_events_type_ts" },
+	{ table: "messages", name: "idx_messages_inbox" },
+] as const;
+
+const EXPECTED_EVENTS = [
+	"node_launched",
+	"node_settled",
+	"node_failed",
+	"node_retired",
+	"node_resumed",
+	"node_blocked",
+	"phase_change",
+	"phase_timeout",
+	"mail_sent",
+	"mail_delivered",
+	"mail_bounced",
+	"budget_refused",
+	"orphan_detected",
+	"tree_finalized",
+] as const;
+
+function tableBody(sql: string, table: string): string {
+	const match = sql.match(
+		new RegExp(
+			`CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${table}\\s*\\(([\\s\\S]*?)\\);`,
+			"i",
+		),
+	);
+	assert.ok(
+		match,
+		`Schema sentinel: §4.2 is missing CREATE TABLE ${table}; if the contract schema is intentionally revised, update this test explicitly.`,
+	);
+	return match[1] ?? "";
+}
+
+function declaredColumns(body: string): string[] {
+	return body
+		.split(/\r?\n/)
+		.map((line) => line.match(/^\s*([a-z_][a-z0-9_]*)\s+[a-z_][a-z0-9_]*/i)?.[1])
+		.filter((column): column is string => column !== undefined);
+}
+
+test("legion v2 contract §4.2 keeps the frozen four-table schema", () => {
+	const schemaSection = contract.match(/^### 4\.2\b[\s\S]*?(?=^### 4\.3\b)/m)?.[0];
+	assert.ok(schemaSection, "Schema sentinel: contract §4.2 is missing; update this test explicitly when revising the contract.");
+
+	const sql = schemaSection.match(/```sql\s*([\s\S]*?)```/)?.[1];
+	assert.ok(sql, "Schema sentinel: §4.2 is missing its SQL code block; update this test explicitly when revising the contract.");
+	assert.match(
+		schemaSection,
+		/PRAGMA\s+user_version\s*=\s*1\b/i,
+		"Schema sentinel: §4.2 must retain PRAGMA user_version = 1; update this test explicitly when revising the contract.",
+	);
+
+	const expectedTables = Object.keys(EXPECTED_COLUMNS);
+	const actualTables = Array.from(
+		sql.matchAll(/^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s*\(/gim),
+		(match) => match[1] ?? "",
+	);
+	const missingTables = expectedTables.filter((table) => !actualTables.includes(table));
+	const unexpectedTables = actualTables.filter((table) => !expectedTables.includes(table));
+	assert.deepEqual(
+		[...actualTables].sort(),
+		[...expectedTables].sort(),
+		`Schema sentinel: §4.2 must define exactly nodes/events/usage/messages (missing: ${missingTables.join(", ") || "none"}; unexpected: ${unexpectedTables.join(", ") || "none"}); update this test explicitly when revising the contract.`,
+	);
+
+	for (const [table, expected] of Object.entries(EXPECTED_COLUMNS)) {
+		const actual = declaredColumns(tableBody(sql, table));
+		const missing = expected.filter((column) => !actual.includes(column));
+		const unexpected = actual.filter((column) => !expected.includes(column));
+		const duplicates = actual.filter((column, index) => actual.indexOf(column) !== index);
+		assert.deepEqual(
+			[...actual].sort(),
+			[...expected].sort(),
+			`Schema sentinel: §4.2 ${table} columns changed (missing: ${missing.map((column) => `${table}.${column}`).join(", ") || "none"}; unexpected: ${unexpected.map((column) => `${table}.${column}`).join(", ") || "none"}; duplicates: ${duplicates.map((column) => `${table}.${column}`).join(", ") || "none"}). If the contract schema is intentionally revised, update this test explicitly.`,
+		);
+	}
+
+	const actualIndexes = Array.from(
+		sql.matchAll(/^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s+ON\s+([a-z_][a-z0-9_]*)\s*\(/gim),
+		(match) => ({ name: match[1] ?? "", table: match[2] ?? "" }),
+	).map(({ name, table }) => `${table}.${name}`);
+	const expectedIndexes = EXPECTED_INDEXES.map(({ name, table }) => `${table}.${name}`);
+	const missingIndexes = expectedIndexes.filter((index) => !actualIndexes.includes(index));
+	const unexpectedIndexes = actualIndexes.filter((index) => !expectedIndexes.includes(index));
+	assert.deepEqual(
+		[...actualIndexes].sort(),
+		[...expectedIndexes].sort(),
+		`Schema sentinel: §4.2 index set changed (missing: ${missingIndexes.join(", ") || "none"}; unexpected: ${unexpectedIndexes.join(", ") || "none"}). If the contract schema is intentionally revised, update this test explicitly.`,
+	);
+});
+
+test("legion v2 contract §4.3 keeps exactly the frozen 14 event names", () => {
+	const eventsSection = contract.match(/^### 4\.3\b[\s\S]*?(?=^### 4\.4\b)/m)?.[0];
+	assert.ok(eventsSection, "Schema sentinel: contract §4.3 is missing; update this test explicitly when revising the contract.");
+
+	const actualEvents: string[] = [];
+	for (const match of eventsSection.matchAll(/`([^`]+)`/g)) {
+		const eventName = match[1];
+		assert.ok(eventName, "Schema sentinel: found an empty event name in §4.3.");
+		actualEvents.push(eventName);
+	}
+	const expectedEvents: readonly string[] = EXPECTED_EVENTS;
+	const missing = expectedEvents.filter((event) => !actualEvents.includes(event));
+	const unexpected = actualEvents.filter((event) => !expectedEvents.includes(event));
+	const duplicates = actualEvents.filter((event, index) => actualEvents.indexOf(event) !== index);
+	assert.deepEqual(
+		[...actualEvents].sort(),
+		[...expectedEvents].sort(),
+		`Schema sentinel: §4.3 must contain exactly 14 events (found ${actualEvents.length}; missing: ${missing.join(", ") || "none"}; unexpected: ${unexpected.join(", ") || "none"}; duplicates: ${duplicates.join(", ") || "none"}). If the contract event set is intentionally revised, update this test explicitly.`,
+	);
+});
+
+test("legion v2 contract §11.1 keeps the three frozen gate defaults", () => {
+	const limitsSection = contract.match(/^### 11\.1\b[\s\S]*?(?=^### 11\.2\b)/m)?.[0];
+	assert.ok(limitsSection, "Schema sentinel: contract §11.1 is missing; update this test explicitly when revising the contract.");
+
+	for (const [name, value] of [
+		["maxDepth", "4"],
+		["maxChildrenPerNode", "8"],
+		["maxActiveNodes", "30"],
+	] as const) {
+		const row = limitsSection.split(/\r?\n/).find((line) => line.includes(`\`${name}\``));
+		assert.ok(row, `Schema sentinel: §11.1 is missing the ${name} default row; update this test explicitly when revising the contract.`);
+		assert.match(
+			row,
+			new RegExp(`\\|\\s*${value}\\s*\\|`),
+			`Schema sentinel: §11.1 ${name} default must remain ${value}; update this test explicitly when revising the contract.`,
+		);
+	}
+});
