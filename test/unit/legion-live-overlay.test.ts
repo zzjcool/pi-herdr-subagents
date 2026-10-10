@@ -8,6 +8,7 @@ import {
 	type LiveOverlaySubscription,
 	type LiveOverlaySource,
 } from "../../src/tui/live-overlay.ts";
+import type { OverlayHandle } from "@earendil-works/pi-tui";
 
 class FakeOverlaySource implements LiveOverlaySource {
 	readonly listeners = new Map<LiveOverlaySubscription, { nodeId: string; listener: LiveOverlayListener }>();
@@ -74,10 +75,24 @@ test("live overlay subscribes only when opened for the requested node and Esc un
 	assert.equal(source.subscribeCount, 1);
 	assert.equal(source.listeners.size, 1);
 	assert.equal([...source.listeners.values()][0]?.nodeId, "root.worker");
+	let hideCount = 0;
+	const overlayHandle: OverlayHandle = {
+		hide() {
+			hideCount++;
+		},
+		setHidden() {},
+		isHidden: () => false,
+		focus() {},
+		unfocus() {},
+		isFocused: () => false,
+		getBounds: () => undefined,
+	};
+	component.attachOverlayHandle(overlayHandle);
 
 	component.handleInput?.("\u001b");
 	assert.equal(source.unsubscribeCount, 1);
 	assert.equal(source.listeners.size, 0);
+	assert.equal(hideCount, 1, "Esc hides the attached overlay handle");
 	assert.equal(component.getState().open, false);
 	component.handleInput?.("\u001b");
 	component.dispose();

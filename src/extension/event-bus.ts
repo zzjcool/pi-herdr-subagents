@@ -141,9 +141,9 @@ const systemClock: EventSourceClock = {
 };
 
 /**
- * Poll the ledger using PRAGMA data_version as a cheap dirty check. The source
- * issues no event SELECT until another connection has committed a change; it
- * deliberately does not watch the DB/WAL files with fs.watch.
+ * Poll the ledger using PRAGMA data_version as a cheap dirty check. It performs
+ * one initial cursor read on start, then skips event SELECTs until another
+ * connection has committed a change. It deliberately does not watch DB/WAL files.
  */
 export function createDbEventSource(
 	db: DatabaseSync,
