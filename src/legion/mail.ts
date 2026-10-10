@@ -16,6 +16,8 @@ export const MAIL_DELIVERY = {
 export type MailDeliveryStatus = (typeof MAIL_DELIVERY)[keyof typeof MAIL_DELIVERY];
 export type MailUrgency = "info" | "action-needed";
 export type MailKind = "question" | "report" | "handoff" | "notice";
+const MAIL_KINDS: readonly MailKind[] = ["question", "report", "handoff", "notice"];
+const MAIL_SUBJECT_MAX_BYTES = 256;
 export type MailTarget = "parent" | "children" | "squad";
 
 export interface LegionMessage {
@@ -134,6 +136,23 @@ export function sendMail(
 	}
 	if (typeof input.subject !== "string" || input.subject.trim().length === 0) {
 		return { ok: false, code: "forbidden", message: "mail subject must not be empty", fromNode: input.fromNode };
+	}
+	const subjectBytes = Buffer.byteLength(input.subject, "utf8");
+	if (subjectBytes > MAIL_SUBJECT_MAX_BYTES) {
+		return {
+			ok: false,
+			code: "body_too_large",
+			message: `mail subject is ${subjectBytes} bytes; maximum is ${MAIL_SUBJECT_MAX_BYTES} bytes`,
+			fromNode: input.fromNode,
+		};
+	}
+	if (input.kind !== undefined && !(MAIL_KINDS as readonly string[]).includes(input.kind)) {
+		return {
+			ok: false,
+			code: "forbidden",
+			message: `invalid mail kind: ${String(input.kind)}`,
+			fromNode: input.fromNode,
+		};
 	}
 	if (typeof input.body !== "string") {
 		return { ok: false, code: "forbidden", message: "mail body must be a string", fromNode: input.fromNode };
@@ -256,12 +275,7 @@ export function transitionDelivery(
 		const current = getMessage(db, messageId);
 		if (!current) throw new Error(`message not found: ${messageId}`);
 		const recipient = getNode(db, current.toNode);
-		const terminal =
-			recipient === null ||
-			recipient.status === "failed" ||
-			recipient.phase === "done" ||
-			recipient.phase === "failed" ||
-			recipient.phase === "aborted";
+		const terminal = isTerminalNode(recipient);
 		const actualNext = next === MAIL_DELIVERY.INJECTED && terminal ? MAIL_DELIVERY.BOUNCED : next;
 		const update = db
 			.prepare("UPDATE messages SET delivered = ?, delivered_at = ? WHERE id = ? AND delivered = 0")
@@ -275,15 +289,21 @@ export function transitionDelivery(
 		const type = actualNext === MAIL_DELIVERY.INJECTED ? "mail_delivered" : "mail_bounced";
 		appendEvent(db, updated.fromNode, type, { messageId: updated.id, toNode: updated.toNode }, { now: () => timestamp });
 		if (actualNext === MAIL_DELIVERY.BOUNCED) {
+			const originalSender = getNode(db, updated.fromNode);
+			const receiptDelivery = isTerminalNode(originalSender)
+				? MAIL_DELIVERY.BOUNCED
+				: MAIL_DELIVERY.PENDING;
 			db.prepare(
 				`INSERT INTO messages (
-					from_node, to_node, subject, body, kind, urgency, delivered, created_at
-				) VALUES (?, ?, ?, ?, 'notice', 'info', 0, ?)`,
+					from_node, to_node, subject, body, kind, urgency, delivered, delivered_at, created_at
+				) VALUES (?, ?, ?, ?, 'notice', 'info', ?, ?, ?)`,
 			).run(
 				updated.toNode,
 				updated.fromNode,
 				`Delivery bounced: ${updated.subject}`,
 				`Message ${updated.id} could not be delivered because the recipient is terminal.`,
+				receiptDelivery,
+				receiptDelivery === MAIL_DELIVERY.BOUNCED ? timestamp : null,
 				timestamp,
 			);
 		}
@@ -347,6 +367,16 @@ function resolveShortName(db: DatabaseSync, sender: LegionNode, name: string): L
 	if (sibling) return mapNode(sibling);
 	const parent = db.prepare("SELECT * FROM nodes WHERE id = ? AND name = ? LIMIT 1").get(sender.parentId, slug);
 	return parent ? mapNode(parent) : null;
+}
+
+function isTerminalNode(node: LegionNode | null): boolean {
+	return (
+		node === null ||
+		node.status === "failed" ||
+		node.phase === "done" ||
+		node.phase === "failed" ||
+		node.phase === "aborted"
+	);
 }
 
 function isSameSquad(left: LegionNode, right: LegionNode): boolean {

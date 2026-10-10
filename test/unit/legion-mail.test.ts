@@ -86,9 +86,19 @@ test("mail broadcasts expand children and squad without duplicate or self delive
 	}
 });
 
-test("mail applies 4KB soft warning, 32KB hard rejection, and per-node rate limit", () => {
+test("mail validates kind and subject bytes; applies body limits and sender rate limit", () => {
 	const db = makeTree();
 	try {
+		const invalidKind = sendMail(db, {
+			fromNode: "root.team-a", to: "alice", subject: "kind", body: "x", kind: "invalid" as never,
+		});
+		assert.equal(invalidKind.ok, false);
+		if (!invalidKind.ok) assert.equal(invalidKind.code, "forbidden");
+		const longSubject = sendMail(db, {
+			fromNode: "root.team-a", to: "alice", subject: "é".repeat(129), body: "x",
+		});
+		assert.equal(longSubject.ok, false);
+		if (!longSubject.ok) assert.equal(longSubject.code, "body_too_large");
 		const soft = sendMail(db, {
 			fromNode: "root.team-a", to: "children", subject: "large",
 			body: "x".repeat(MAIL_BODY_SOFT_LIMIT_BYTES + 1),
@@ -116,7 +126,29 @@ test("mail applies 4KB soft warning, 32KB hard rejection, and per-node rate limi
 	}
 });
 
-test("settled nodes can resume through mail; terminal recipients bounce with receipt", () => {
+test("mail delivery has a bounded bounce-receipt chain when both nodes are terminal", () => {
+	const db = makeTree();
+	try {
+		updateNode(db, "root.team-a", { status: "failed" });
+		updateNode(db, "root.team-a.alice", { status: "failed" });
+		const sent = db.prepare(
+			"INSERT INTO messages (from_node, to_node, subject, body, created_at) VALUES (?, ?, ?, ?, ?)",
+		).run("root.team-a", "root.team-a.alice", "terminal", "no delivery", 100);
+		const initialCount = Number(db.prepare("SELECT COUNT(*) AS count FROM messages").get()?.count);
+		const bounced = transitionDelivery(db, Number(sent.lastInsertRowid), MAIL_DELIVERY.INJECTED, () => 200);
+		assert.equal(bounced.delivered, MAIL_DELIVERY.BOUNCED);
+		assert.equal(inbox(db, "root.team-a", { delivery: MAIL_DELIVERY.BOUNCED }).length, 1);
+		for (let tick = 0; tick < 10; tick += 1) {
+			const pending = pendingInbox(db, "root.team-a");
+			for (const message of pending) transitionDelivery(db, message.id, MAIL_DELIVERY.INJECTED, () => 300 + tick);
+		}
+		assert.equal(Number(db.prepare("SELECT COUNT(*) AS count FROM messages").get()?.count), initialCount + 1);
+	} finally {
+		db.close();
+	}
+});
+
+test("settled nodes can resume through mail; terminal recipient bounce receipt is delivered once", () => {
 	const db = makeTree();
 	try {
 		updateNode(db, "root.team-a.alice", { status: "settled" });
