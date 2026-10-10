@@ -98,10 +98,19 @@ test("legion v2 contract §4.2 keeps the frozen four-table schema", () => {
 
 	const sql = schemaSection.match(/```sql\s*([\s\S]*?)```/)?.[1];
 	assert.ok(sql, "Schema sentinel: §4.2 is missing its SQL code block; update this test explicitly when revising the contract.");
-	assert.match(
-		schemaSection,
-		/PRAGMA\s+user_version\s*=\s*1\b/i,
-		"Schema sentinel: §4.2 must retain PRAGMA user_version = 1; update this test explicitly when revising the contract.",
+	const userVersions = Array.from(
+		schemaSection.matchAll(/\bPRAGMA\s+user_version\s*=\s*(\d+)\b/gi),
+		(match) => match[1] ?? "",
+	);
+	assert.ok(
+		userVersions.length > 0,
+		"Schema sentinel: §4.2 must declare PRAGMA user_version; update this test explicitly when revising the contract.",
+	);
+	const unexpectedUserVersions = userVersions.filter((version) => version !== "1");
+	assert.deepEqual(
+		unexpectedUserVersions,
+		[],
+		`Schema sentinel: every §4.2 PRAGMA user_version declaration must remain 1 (found: ${userVersions.join(", ")}). If the contract schema is intentionally revised, update this test explicitly.`,
 	);
 
 	const expectedTables = Object.keys(EXPECTED_COLUMNS);
@@ -147,12 +156,18 @@ test("legion v2 contract §4.3 keeps exactly the frozen 14 event names", () => {
 	const eventsSection = contract.match(/^### 4\.3\b[\s\S]*?(?=^### 4\.4\b)/m)?.[0];
 	assert.ok(eventsSection, "Schema sentinel: contract §4.3 is missing; update this test explicitly when revising the contract.");
 
-	const actualEvents: string[] = [];
-	for (const match of eventsSection.matchAll(/`([^`]+)`/g)) {
-		const eventName = match[1];
-		assert.ok(eventName, "Schema sentinel: found an empty event name in §4.3.");
-		actualEvents.push(eventName);
-	}
+	const eventListLine = eventsSection
+		.split(/\r?\n/)
+		.slice(1)
+		.find((line) => line.trim().length > 0);
+	assert.ok(
+		eventListLine,
+		"Schema sentinel: §4.3 is missing its event-name list line; update this test explicitly when revising the contract.",
+	);
+	const actualEvents = Array.from(
+		eventListLine.matchAll(/`([^`]+)`/g),
+		(match) => match[1] ?? "",
+	);
 	const expectedEvents: readonly string[] = EXPECTED_EVENTS;
 	const missing = expectedEvents.filter((event) => !actualEvents.includes(event));
 	const unexpected = actualEvents.filter((event) => !expectedEvents.includes(event));
@@ -168,17 +183,30 @@ test("legion v2 contract §11.1 keeps the three frozen gate defaults", () => {
 	const limitsSection = contract.match(/^### 11\.1\b[\s\S]*?(?=^### 11\.2\b)/m)?.[0];
 	assert.ok(limitsSection, "Schema sentinel: contract §11.1 is missing; update this test explicitly when revising the contract.");
 
+	const tableRows = limitsSection
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => /^\|/.test(line))
+		.map((line) => line.split("|").slice(1, -1).map((cell) => cell.trim()));
+	const header = tableRows[0] ?? [];
+	const defaultColumn = header.findIndex((cell) => cell === "默认");
+	assert.ok(
+		defaultColumn >= 0,
+		"Schema sentinel: §11.1 limit table is missing the 默认 column; update this test explicitly when revising the contract.",
+	);
+
 	for (const [name, value] of [
 		["maxDepth", "4"],
 		["maxChildrenPerNode", "8"],
 		["maxActiveNodes", "30"],
 	] as const) {
-		const row = limitsSection.split(/\r?\n/).find((line) => line.includes(`\`${name}\``));
+		const row = tableRows.find((cells) => cells[0]?.includes(`\`${name}\``));
 		assert.ok(row, `Schema sentinel: §11.1 is missing the ${name} default row; update this test explicitly when revising the contract.`);
-		assert.match(
-			row,
-			new RegExp(`\\|\\s*${value}\\s*\\|`),
-			`Schema sentinel: §11.1 ${name} default must remain ${value}; update this test explicitly when revising the contract.`,
+		const actualDefault = row[defaultColumn]?.trim() ?? "<missing>";
+		assert.equal(
+			actualDefault,
+			value,
+			`Schema sentinel: §11.1 ${name} default must remain ${value} (found: ${actualDefault}); update this test explicitly when revising the contract.`,
 		);
 	}
 });
