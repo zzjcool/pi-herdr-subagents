@@ -48,7 +48,7 @@ type ChildState = "starting" | "running" | "idle" | "retiring" | "exited" | "ret
 interface ChildRecord {
 	name: string;
 	sessionFile: string;
-	client: RpcClientLike;
+	client: RpcClientLike | null;
 	process: RpcProcessHandle | null;
 	tempDir: string;
 	state: ChildState;
@@ -61,6 +61,7 @@ interface ChildRecord {
 	subscriptions: Set<EventSubscription>;
 	unsubscribeRpcEvents?: () => void;
 	retirePromise?: Promise<void>;
+	abortedPending: boolean;
 }
 
 export interface RpcSupervisorOptions {
@@ -165,7 +166,7 @@ export class RpcSupervisor implements LegionSupervisor {
 			);
 		}
 		const previous = this.children.get(input.name);
-		if (previous && this.isAlive(input.name)) {
+		if (previous && previous.state !== "exited" && previous.state !== "retired") {
 			throw new SubagentError(
 				`child is already registered and alive: ${input.name}`,
 				ErrorCodes.NAME_TAKEN,
@@ -173,9 +174,34 @@ export class RpcSupervisor implements LegionSupervisor {
 		}
 		if (previous) this.disposeRecord(previous);
 
-		const parentTempDir = path.resolve(input.tempDir);
-		fs.mkdirSync(parentTempDir, { recursive: true });
-		const tempDir = fs.mkdtempSync(path.join(parentTempDir, "rpc-child-"));
+		const registration: ChildRecord = {
+			name: input.name,
+			sessionFile: input.sessionFile,
+			client: null,
+			process: null,
+			tempDir: "",
+			state: "starting",
+			processAlive: false,
+			turnActive: false,
+			retireRequested: false,
+			abortedPending: false,
+			waiters: new Set(),
+			subscriptions:
+				this.subscriptionsBeforeSpawn.get(input.name) ?? new Set(),
+		};
+		this.subscriptionsBeforeSpawn.delete(input.name);
+		this.children.set(input.name, registration);
+
+		let tempDir = "";
+		try {
+			const parentTempDir = path.resolve(input.tempDir);
+			fs.mkdirSync(parentTempDir, { recursive: true });
+			tempDir = fs.mkdtempSync(path.join(parentTempDir, "rpc-child-"));
+		} catch (error) {
+			await this.rollbackSpawn(registration);
+			throw error;
+		}
+		registration.tempDir = tempDir;
 		let builtArgs: string[];
 		try {
 			const {
@@ -195,46 +221,33 @@ export class RpcSupervisor implements LegionSupervisor {
 			});
 			builtArgs = built.args;
 		} catch (error) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			await this.rollbackSpawn(registration);
 			throw error;
 		}
 
-		const options: RpcClientOptions = {
-			cliPath: input.cliPath
-				? path.resolve(input.cliPath)
-				: defaultPiCliPath(),
-			cwd: input.cwd,
-			args: builtArgs,
-			...(input.env ? { env: input.env } : {}),
-		};
-		const client = this.clientFactory(options);
-		const child: ChildRecord = {
-			name: input.name,
-			sessionFile: input.sessionFile,
-			client,
-			process: null,
-			tempDir,
-			state: "starting",
-			processAlive: true,
-			turnActive: false,
-			retireRequested: false,
-			waiters: new Set(),
-			subscriptions: this.subscriptionsBeforeSpawn.get(input.name) ?? new Set(),
-		};
-		this.subscriptionsBeforeSpawn.delete(input.name);
-		this.children.set(child.name, child);
-		child.unsubscribeRpcEvents = client.onEvent((event) =>
-			this.handleRpcEvent(child, event),
-		);
-
+		let client: RpcClientLike;
 		try {
+			const options: RpcClientOptions = {
+				cliPath: input.cliPath
+					? path.resolve(input.cliPath)
+					: defaultPiCliPath(),
+				cwd: input.cwd,
+				args: builtArgs,
+				...(input.env ? { env: input.env } : {}),
+			};
+			client = this.clientFactory(options);
+			registration.client = client;
+			registration.processAlive = true;
+			registration.unsubscribeRpcEvents = client.onEvent((event) =>
+				this.handleRpcEvent(registration, event),
+			);
 			await client.start();
-			this.attachProcess(child);
-			if (!this.isAlive(child.name)) {
-				throw this.startFailure(child, "Pi RPC process exited during startup");
+			this.attachProcess(registration);
+			if (!this.isAlive(input.name)) {
+				throw this.startFailure(registration, "Pi RPC process exited during startup");
 			}
-			child.state = "idle";
-			this.beginTurn(child);
+			registration.state = "idle";
+			this.beginTurn(registration);
 			await client.prompt(
 				formatChildTask(input.task, {
 					allowNested: input.allowNestedSubagents === true,
@@ -243,26 +256,17 @@ export class RpcSupervisor implements LegionSupervisor {
 						: {}),
 				}),
 			);
-			if (!this.isAlive(child.name)) {
-				throw this.startFailure(child, "Pi RPC process exited after its first prompt");
+			if (!this.isAlive(input.name)) {
+				throw this.startFailure(registration, "Pi RPC process exited after its first prompt");
 			}
 
 			return {
-				name: child.name,
-				sessionFile: child.sessionFile,
-				...(child.process?.pid ? { pid: child.process.pid } : {}),
+				name: registration.name,
+				sessionFile: registration.sessionFile,
+				...(registration.process?.pid ? { pid: registration.process.pid } : {}),
 			};
 		} catch (error) {
-			this.children.delete(child.name);
-			child.unsubscribeRpcEvents?.();
-			child.unsubscribeRpcEvents = undefined;
-			this.uiProxy.forgetChild(child.name);
-			try {
-				await client.stop();
-			} catch {
-				// Preserve the launch error; stop is best-effort during rollback.
-			}
-			this.removeTempDir(child);
+			await this.rollbackSpawn(registration);
 			throw error;
 		}
 	}
@@ -289,7 +293,7 @@ export class RpcSupervisor implements LegionSupervisor {
 		const child = this.requireChild(name);
 		this.assertCanSend(child);
 		if (!child.turnActive) return;
-		await child.client.abort();
+		await this.requireClient(child).abort();
 	}
 
 	waitSettled(name: string, timeoutMs = 900_000): Promise<SettleResult> {
@@ -332,16 +336,13 @@ export class RpcSupervisor implements LegionSupervisor {
 	isAlive(name: string): boolean {
 		const child = this.children.get(name);
 		if (!child || !child.processAlive) return false;
-		if (child.process && processHasExited(child.process)) {
-			this.handleProcessExit(child, child.process.exitCode, child.process.signalCode);
-			return false;
-		}
+		if (child.process && processHasExited(child.process)) return false;
 		return child.state !== "retired" && child.state !== "exited";
 	}
 
 	async stats(name: string): Promise<UsageSnapshot | null> {
 		const child = this.children.get(name);
-		if (!child || !this.isAlive(name)) return null;
+		if (!child || !child.client || !this.isAlive(name)) return null;
 		try {
 			return usageSnapshot(await child.client.getSessionStats());
 		} catch {
@@ -400,18 +401,19 @@ export class RpcSupervisor implements LegionSupervisor {
 		text: string,
 	): Promise<void> {
 		this.assertCanSend(child);
+		const client = this.requireClient(child);
 		const wasActive = child.turnActive;
 		if (!wasActive) this.beginTurn(child);
 
 		try {
 			if (kind === "followUp" && wasActive) {
-				await child.client.followUp(text);
+				await client.followUp(text);
 			} else if ((kind === "steer" || kind === "prompt") && wasActive) {
 				// A prompt addressed to a busy child is an immediate correction;
 				// use the explicit RPC steer command, never a second prompt command.
-				await child.client.steer(text);
+				await client.steer(text);
 			} else {
-				await child.client.prompt(text);
+				await client.prompt(text);
 			}
 		} catch (error) {
 			if (!wasActive && child.turnActive) {
@@ -435,8 +437,36 @@ export class RpcSupervisor implements LegionSupervisor {
 		child.state = "running";
 	}
 
+	private async rollbackSpawn(child: ChildRecord): Promise<void> {
+		child.state = "retiring";
+		child.processAlive = false;
+		child.turnActive = false;
+		child.subscriptions.clear();
+		child.unsubscribeRpcEvents?.();
+		child.unsubscribeRpcEvents = undefined;
+		this.uiProxy.forgetChild(child.name);
+		this.resolveWaiters(child, {
+			settled: false,
+			abnormal: true,
+			reason: "child spawn failed",
+		});
+		if (child.tempDir) this.removeTempDir(child);
+		const client = child.client;
+		try {
+			if (client) await client.stop();
+		} catch {
+			// Preserve the launch error; rollback must not strand its registry entry.
+		} finally {
+			child.client = null;
+			child.state = "exited";
+			if (this.children.get(child.name) === child) {
+				this.children.delete(child.name);
+			}
+		}
+	}
+
 	private assertCanSend(child: ChildRecord): void {
-		if (!this.isAlive(child.name) || child.retireRequested) {
+		if (!this.isAlive(child.name) || child.retireRequested || !child.client) {
 			throw new SubagentError(
 				`child is not available: ${child.name}`,
 				ErrorCodes.NOT_FOUND,
@@ -453,7 +483,7 @@ export class RpcSupervisor implements LegionSupervisor {
 	}
 
 	private attachProcess(child: ChildRecord): void {
-		const process = child.client.process ?? null;
+		const process = this.requireClient(child).process ?? null;
 		child.process = process;
 		if (!process) return;
 
@@ -481,25 +511,52 @@ export class RpcSupervisor implements LegionSupervisor {
 			return;
 		}
 
-		if (record.type === "agent_start" || record.type === "turn_start") {
-			child.turnActive = true;
-			if (child.state !== "retiring") child.state = "running";
-		}
-		if (record.type === "agent_settled") {
-			const result: SettleResult = {
-				settled: true,
-				abnormal: false,
-				...(typeof record.aborted === "boolean"
-					? { aborted: record.aborted }
-					: {}),
-			};
-			child.turnActive = false;
-			child.lastTurnResult = result;
-			if (child.state !== "retiring") child.state = "idle";
-			this.resolveWaiters(child, result);
-		}
+		this.updateTurnState(child, record);
 
 		this.publishEvent(child, record);
+	}
+
+	private updateTurnState(
+		child: ChildRecord,
+		event: Record<string, unknown>,
+	): void {
+		if (event.type === "agent_start" || event.type === "turn_start") {
+			child.turnActive = true;
+			if (event.type === "agent_start") child.abortedPending = false;
+			if (child.state !== "retiring") child.state = "running";
+			return;
+		}
+		if (event.type === "turn_end" || event.type === "agent_end") {
+			child.abortedPending = this.eventContainsAbort(
+				event,
+				child.abortedPending,
+			);
+			return;
+		}
+		if (event.type !== "agent_settled") return;
+
+		const result: SettleResult = {
+			settled: true,
+			abnormal: false,
+			aborted: child.abortedPending,
+		};
+		child.abortedPending = false;
+		child.turnActive = false;
+		child.lastTurnResult = result;
+		if (child.state !== "retiring") child.state = "idle";
+		this.resolveWaiters(child, result);
+	}
+
+	private eventContainsAbort(
+		event: Record<string, unknown>,
+		previous: boolean,
+	): boolean {
+		const message = recordOf(event.message);
+		if (message?.stopReason === "aborted") return true;
+		const messages = Array.isArray(event.messages) ? event.messages : [];
+		return (
+			previous || messages.some((item) => recordOf(item)?.stopReason === "aborted")
+		);
 	}
 
 	private publishEvent(
@@ -617,6 +674,7 @@ export class RpcSupervisor implements LegionSupervisor {
 		if (child.retireRequested) child.lastTurnResult = result;
 		else child.exitResult = result;
 		this.resolveWaiters(child, result);
+		child.client = null;
 		child.subscriptions.clear();
 		child.unsubscribeRpcEvents?.();
 		child.unsubscribeRpcEvents = undefined;
@@ -637,6 +695,7 @@ export class RpcSupervisor implements LegionSupervisor {
 		if (child.retireRequested) child.lastTurnResult = result;
 		else child.exitResult = result;
 		this.resolveWaiters(child, result);
+		child.client = null;
 		child.subscriptions.clear();
 		child.unsubscribeRpcEvents?.();
 		child.unsubscribeRpcEvents = undefined;
@@ -647,6 +706,25 @@ export class RpcSupervisor implements LegionSupervisor {
 	private async retireChild(child: ChildRecord, graceful: boolean): Promise<void> {
 		if (!this.isAlive(child.name)) {
 			child.state = "retired";
+			if (child.processAlive && child.process && processHasExited(child.process)) {
+				const code = child.process.exitCode;
+				const signal = child.process.signalCode;
+				child.processAlive = false;
+				child.turnActive = false;
+				const result: SettleResult = {
+					settled: false,
+					abnormal: !child.retireRequested,
+					...(child.retireRequested
+						? { reason: "child retired before agent_settled" }
+						: { reason: "Pi RPC process exited before agent_settled" }),
+					exitCode: code,
+					signal,
+				};
+				if (child.retireRequested) child.lastTurnResult = result;
+				else child.exitResult = result;
+				this.resolveWaiters(child, result);
+			}
+			child.client = null;
 			child.subscriptions.clear();
 			child.unsubscribeRpcEvents?.();
 			child.unsubscribeRpcEvents = undefined;
@@ -665,7 +743,7 @@ export class RpcSupervisor implements LegionSupervisor {
 			child.process?.kill("SIGTERM");
 			if (!child.process) {
 				try {
-					await child.client.stop();
+					await this.requireClient(child).stop();
 					child.processAlive = false;
 					child.turnActive = false;
 					child.state = "retired";
@@ -689,6 +767,7 @@ export class RpcSupervisor implements LegionSupervisor {
 			);
 		}
 		child.state = "retired";
+		child.client = null;
 		child.subscriptions.clear();
 		child.unsubscribeRpcEvents?.();
 		child.unsubscribeRpcEvents = undefined;
@@ -726,8 +805,16 @@ export class RpcSupervisor implements LegionSupervisor {
 		});
 	}
 
+	private requireClient(child: ChildRecord): RpcClientLike {
+		if (child.client) return child.client;
+		throw new SubagentError(
+			`child is not available: ${child.name}`,
+			ErrorCodes.NOT_FOUND,
+		);
+	}
+
 	private startFailure(child: ChildRecord, message: string): SubagentError {
-		const stderr = child.client.getStderr?.();
+		const stderr = child.client?.getStderr?.();
 		return new SubagentError(
 			`${message}${stderr ? `: ${stderr.trim().slice(0, 500)}` : ""}`,
 			ErrorCodes.START_FAILED,
