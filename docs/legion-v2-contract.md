@@ -207,7 +207,7 @@ description: 百夫长/组长：携带一支团队递归派生的指挥角色。
   调度组员、推进四阶段状态机、整队交付（squash MR）。
 kind: pi
 allowNestedSubagents: true
-maxSubagentDepth: 2          # R=1 禁派生；2=可派一层组员且组员不可再派；需孙代 centurion 设 3
+maxSubagentDepth: 2          # R=本角色子树代数上限（含自身；与所在深度无关；只收紧不放宽）：1=叶子禁派生；2=可派一层组员、组员不可再派；3=组员（如孙代 centurion）可再派一层
 worktree: true               # 子树 worktree：本人 cwd 即队的工作区（§9）
 team: be-value               # 默认队；launch 可覆盖（subagent({team:"fe-premium"})）
 ---
@@ -358,7 +358,7 @@ interface LegionEventBus {
 
 | 项 | 默认 | 判定 |
 |---|---|---|
-| `maxDepth`（全树深度） | 4 | 现有 `MAX_NESTED_PATH_ENTRIES`；生效公式 `min(env 继承值, role maxSubagentDepth, settings)` |
+| `maxDepth`（全树深度） | 4 | 硬顶 = `MAX_NESTED_PATH_ENTRIES`（血缘路径在 4 处饱和，settings/env 超 4 截断并告警）。每进程生效上限 C：根 `C = min(env 运营者覆盖, settings.legion.maxDepth, 4)`；深度 d、上限 C 的父 launch 角色 R：先过闸门 `d+1 > C` → BUDGET_EXCEEDED；再经 `PI_SUBAGENT_MAX_DEPTH` 下发 `C子 = min(C, d + R, 4)`（R 缺省=不收紧；非法值按叶子 R=1 处理；语义 = 子树代数含自身，位置无关，只收紧不放宽）。不变量：C子 ≤ C父，且每进程 depth ≤ maxDepth |
 | `maxChildrenPerNode`（单节点扇出） | 8 | 父 supervisor 查自己子节点数 |
 | `maxActiveNodes`（全树并发 running+starting） | 30 | **全树真闸门**（替代只当 hint 的 maxConcurrentAgents）：launch 前一条 SQL，超限 BUDGET_EXCEEDED + `budget_refused` 事件 |
 
@@ -401,9 +401,9 @@ interface LegionEventBus {
 
 ### M0 地基修复（在现有后端上先行，独立发布）
 
-- **归属**：`src/runs/orchestrator.ts`（maxDepth 接线）、`src/runs/store.ts`（maxDepth 落盘一致性）、`index.ts`（两处 `new Orchestrator` 传深度）、`src/agents/settings.ts`（**仅新增** `subagents.legion` 设置块解析，契约 §11.4 全块一次加齐：maxDepth/maxChildrenPerNode/maxActiveNodes/phaseTimeouts/verifyCommandTimeoutMs/mailRatePer5Min/usagePollMs/orphanStaleMs，含默认值；**不动** herdr.* 键——那是 M1 的事）、`src/shared/types.ts`（**仅新增** legion 设置类型，其余不动）、`test/integration/nesting.test.ts`（新增）
-- **内容**：接通 `agent.maxSubagentDepth` → Orchestrator（生效公式见 §11.1）；run.json 记录**运行时实际** maxDepth（修"落盘 1 / 运行时 4"矛盾）；端到端嵌套测试
-- **验收**：(a) `maxSubagentDepth:1` 的子进程派孙被拒（BUDGET_EXCEEDED）；(b) `:2` 可派一层孙、孙再派被拒；(c) run.json maxDepth == 运行时值；(d) 全仓 typecheck + 613 unit + 107 integration 全绿
+- **归属**：`src/runs/orchestrator.ts`（maxDepth 接线 + 三个实测陷阱修复：`??` 优先级会丢 env 继承必须改 min、`<1→4` 会把禁止变放行、硬顶 4 必须写进 min）、`src/runs/store.ts`（maxDepth 落盘一致性）、`index.ts`（两处 `new Orchestrator` 传深度 + **测试脚本 env 隔离**：`test`/`test:integration`/`test:live`/`test:docker` 入口统一 `env -u PI_SUBAGENT_ALLOW_NESTED -u PI_SUBAGENT_CHILD -u PI_SUBAGENT_MAX_DEPTH -u PI_SUBAGENT_PARENT_PATH`，防 worker 环境继承导致 96/107 假红）、`src/agents/settings.ts`（**仅新增** `subagents.legion` 设置块解析，契约 §11.4 全块一次加齐：maxDepth/maxChildrenPerNode/maxActiveNodes/phaseTimeouts/verifyCommandTimeoutMs/mailRatePer5Min/usagePollMs/orphanStaleMs，含默认值；**不动** herdr.* 键——那是 M1 的事）、`src/shared/types.ts`（**仅新增** legion 设置类型，其余不动）、`test/integration/nesting.test.ts`（新增，覆盖行为表 a/b/b2/b3/c1/c3/e：a=根派 X(R=1) 后 X 派孙被拒；b=根派 X(R=2)→Y 可、Y 派被拒；b2=X(R=3)→Y(R=2)→Z 可、Z 派被拒；b3=X(R=2)→Y(R=4) Y 被拒（只收紧不放宽）；c1=centurion(R=2) 派 worker(R=1) 后 worker 派被拒但 centurion 派 advisor 可；c3=centurion(R=3)→worker(R=2)→advisor 可、advisor 派被拒；e=env PI_SUBAGENT_MAX_DEPTH=0 时禁派、=10 时截断到 4）
+- **内容**：接通 `agent.maxSubagentDepth` → Orchestrator（生效公式见 §11.1，INCL 语义）；run.json 记录**运行时实际** maxDepth（修"落盘 1 / 运行时 4"矛盾）；端到端嵌套测试。**语义总纲：R = 自己这一代 + 往下还能派的代数；R−1 = 还能往下派几层。** 角色文件不改（7 个内置角色 R=1 本就是叶子，§6.3 成立）；仓库外 `~/.pi/agent/agents/worker.md`（R=1 + allowNested + 自带 advisor 止损路径）由 CEO 迁移：改 R=2 或设 `subagents.agentOverrides.worker.maxSubagentDepth: 2`（M2 写 centurion.md 时另定队内止损归属）
+- **验收**：(a) `maxSubagentDepth:1` 的子进程派孙被拒（BUDGET_EXCEEDED）；(b) `:2` 可派一层孙、孙再派被拒；(b2) `:3` 派 `:2` 派孙可、孙再派被拒（位置无关分界点）；(b3) `:2` 派 `:4` 被拒（只收紧不放宽）；(c) run.json maxDepth == 运行时值；(d) 干净 env 全仓 typecheck + 613 unit + 107 integration 全绿（含 env 隔离后 worker 环境同样全绿）；(e) env=0 禁派、env>4 截断到 4
 
 ### M1 RPC 宿主层（换发动机，单层语义不变）
 
@@ -448,3 +448,4 @@ interface LegionEventBus {
 | 2026-10-11 | REV-3 | REV-2 勘误的勘误：平铺路径应为 `test/unit/supervisor.test.ts` 与 `test/unit/legion-*.test.ts`（REV-2 误写成顶层 `test/*.test.ts`，不在 npm test glob 内）。live smoke 路径 `test/live/rpc-live.test.ts` 归 `npm run test:live`，正确。触发：worker-4 按 §15-2 正确拒绝（零改动） |
 | 2026-10-11 | REV-4 | 修 §5 节点 id 歧义：slug 语法从「沿用 sanitizeNameFs」改为 `[a-z][a-z0-9_-]{0,31}`（禁止点号，点是 id 分隔符）。原因：sanitizeNameForFs 允许点号，会使 `父.a` + 子 `b` 与 `父` + 子 `a.b` 生成相同节点 id，违反 §4.2 主键约束。触发：worker-5 按 §15-2 正确拒绝（零改动） |
 | 2026-10-11 | REV-5 | §4.2 把 `PRAGMA user_version = 1;` 落进 SQL DDL 块首行（原先只在节标题注记，实现者无 DDL 可抄，哨兵测试也只能存在性匹配）。非 schema 变更，仅语句归位。触发：reviewer-0 对 PR #6 的 major finding |
+| 2026-10-11 | REV-6 | §6.1/§11.1/§14-M0 深度语义统一为 INCL（advisor 裁决）：`maxSubagentDepth R` = 子树代数含自身（位置无关、只收紧不放宽）；launch 下发 `C子 = min(C, d+R, 4)`。否决字面 ABS（同卡多深度不可表达、会落盘 depth>maxDepth）与任务卡 C 语义（R=1 可派孙，违反验收 (a)）。M0 归属新增 package.json（测试入口 env 隔离，防 96/107 假红）与三陷阱修复要求。触发：worker-3 按 §15-2 正确拒绝 → advisor-4 裁决（含 3 个实测实现陷阱 + 用户 worker.md 迁移指引） |
