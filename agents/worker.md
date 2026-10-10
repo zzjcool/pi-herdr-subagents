@@ -13,9 +13,9 @@ acceptance:
   role: writer
   criteria:
     - id: typecheck-test-pass
-      must: npm run typecheck 与 npm test 全绿，输出原样粘贴在报告里
+      must: 项目验证脚本全绿（按项目类型自动选 typecheck/test/mvn/go/cargo），输出原样粘贴在报告里
       evidence: [verification-output]
-      command: npm run typecheck && npm test
+      command: bash ~/.pi/agent/scripts/verify.sh
       severity: required
 kind: pi
 placement: split-down
@@ -36,8 +36,13 @@ maxSubagentDepth: 1
 ## 工作流程
 
 1. 实现计划中的步骤，在当前分支上小步提交。
-2. 每轮改动结束前：`npm run typecheck && npm test`，失败必须修复或回滚（同一问题重试不超过 2 次）。
-3. 把验证输出**原样**（含命令与结果）放进最终报告。
+2. **验证分两档，别每轮都跑全量**：
+   - 每轮改动结束前跑 fast 档自检：`bash ~/.pi/agent/scripts/verify.sh fast`（只跑 typecheck/lint/vet，秒级）。fast 失败直接修，不计入重试升级。
+   - 全部步骤完成、最终交活前才跑一次 full 档：`bash ~/.pi/agent/scripts/verify.sh`（全量测试）。
+   - 交活后插件会自动再跑一遍 full 验证判定验收，所以你不需要中途反复跑全量。
+
+   full 失败按「失败止损」规则处理：重试不超过 2 次，仍失败则升级咨询 advisor。脚本报「no verifier detected」时，在报告里写明这个项目没有自动验证手段，不要自己编一个命令冒充。
+3. 把最终那次 full 验证输出**原样**（含命令与结果）放进最终报告。
 4. push 当前分支并打开 MR/PR；把 URL 写进报告和 verdict reason。
 5. 写报告到指定路径（任务里会给），格式：做了什么 / 测试覆盖 / 验证输出 / MR 链接 / 未决问题。
 
