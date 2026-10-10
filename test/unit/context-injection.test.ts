@@ -364,6 +364,75 @@ test("project convention context loads when project settings omit subagents", ()
 	}
 });
 
+test("project convention contexts win when both layers have only convention files", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-both-layers-"));
+	const userDir = path.join(dir, "user");
+	const projectPiDir = path.join(dir, "project", ".pi");
+	mkdirSync(userDir);
+	mkdirSync(projectPiDir, { recursive: true });
+	try {
+		writeFileSync(path.join(userDir, "settings.json"), JSON.stringify({}));
+		writeFileSync(path.join(projectPiDir, "settings.json"), JSON.stringify({}));
+		writeFileSync(
+			path.join(userDir, "subagents-parent-context.md"),
+			"user parent convention context",
+		);
+		writeFileSync(
+			path.join(userDir, "subagents-child-context.md"),
+			"user child convention context",
+		);
+		writeFileSync(
+			path.join(projectPiDir, "subagents-parent-context.md"),
+			"project parent convention context",
+		);
+		writeFileSync(
+			path.join(projectPiDir, "subagents-child-context.md"),
+			"project child convention context",
+		);
+
+		const settings = loadSubagentSettings({
+			userSettingsPath: path.join(userDir, "settings.json"),
+			projectSettingsPath: path.join(projectPiDir, "settings.json"),
+		});
+		assert.equal(settings.parentContext, "project parent convention context");
+		assert.equal(settings.childContext, "project child convention context");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("project false context suppresses its convention without masking user explicit value", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-project-false-"));
+	const userDir = path.join(dir, "user");
+	const projectPiDir = path.join(dir, "project", ".pi");
+	mkdirSync(userDir);
+	mkdirSync(projectPiDir, { recursive: true });
+	try {
+		writeFileSync(
+			path.join(userDir, "settings.json"),
+			JSON.stringify({ subagents: { parentContext: "user explicit context" } }),
+		);
+		writeFileSync(
+			path.join(projectPiDir, "settings.json"),
+			JSON.stringify({ subagents: { parentContext: false } }),
+		);
+		writeFileSync(
+			path.join(projectPiDir, "subagents-parent-context.md"),
+			"project convention suppressed by false",
+		);
+
+		assert.equal(
+			loadSubagentSettings({
+				userSettingsPath: path.join(userDir, "settings.json"),
+				projectSettingsPath: path.join(projectPiDir, "settings.json"),
+			}).parentContext,
+			"user explicit context",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("project explicit context overrides user convention context", () => {
 	const dir = mkdtempSync(path.join(tmpdir(), "ctx-convention-project-explicit-"));
 	const userDir = path.join(dir, "user");
@@ -513,7 +582,11 @@ test("enabled check defaults to true when explicit context settings are broken",
 
 		assert.ok(result && typeof result === "object");
 		assert.equal((result as { block?: unknown }).block, true);
-		assert.ok(warnings.length > 0, "a warning should explain the settings fallback");
+		assert.match(
+			warnings.join(" "),
+			/pi-herdr-subagents|defaulting/,
+			"a warning should explain the settings fallback",
+		);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

@@ -223,6 +223,8 @@ export function parseSubagentSettings(
 	const out: SubagentsSettings = {};
 	const baseDir = path.dirname(filePath);
 
+	setIf(out, "enabled", requiredBoolean(input.enabled, "enabled", filePath));
+
 	setIf(out, "parentContext", contextSettingValue(
 		input,
 		"parentContext",
@@ -236,12 +238,10 @@ export function parseSubagentSettings(
 		baseDir,
 	));
 
-	// The convention files are tied to the settings directory, not to the
-	// presence of a document or `subagents` object. Other fields still need an
-	// object before they can be read or validated.
+	// Convention files are tied to the settings directory, not the presence of
+	// a document or `subagents` object. Read them before returning for either
+	// absent case; `enabled` has already been validated when it is present.
 	if (raw === undefined) return out;
-
-	setIf(out, "enabled", requiredBoolean(input.enabled, "enabled", filePath));
 
 	// Each reader validates one field and returns `undefined` when absent, so a
 	// missing key and a rejected key stay distinguishable (only the latter throws).
