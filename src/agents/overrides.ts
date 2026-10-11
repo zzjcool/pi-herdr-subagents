@@ -25,7 +25,6 @@ export const OVERRIDE_FIELDS = [
 	"thinking",
 	"output",
 	"kind",
-	"placement",
 	"onBlocked",
 	"systemPromptMode",
 	"systemPrompt",
