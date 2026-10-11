@@ -121,13 +121,14 @@ test("live overlay streams text/tool/settled events into a bounded recent-activi
 
 		const state = component.getState();
 		assert.equal(state.open, true);
-		assert.equal(state.status, "settled");
+		assert.equal(state.status, "running", "RPC turn settlement does not settle the Legion node");
 		assert.equal(state.turn, 1);
 		assert.ok(state.activity.length <= 3);
-		assert.deepEqual(state.activity, ["⚙ read", "↻ turn 1", "✓ agent settled"]);
+		assert.deepEqual(state.activity, ["⚙ read", "↻ turn 1", "✓ agent turn settled"]);
 		const rendered = component.render(100).join("\n");
 		assert.match(rendered, /worker \(worker\)/);
-		assert.match(rendered, /settled/);
+		assert.match(rendered, /running/);
+		assert.match(rendered, /agent turn settled/);
 		assert.doesNotMatch(rendered, /ignored/);
 	} finally {
 		component.close();
