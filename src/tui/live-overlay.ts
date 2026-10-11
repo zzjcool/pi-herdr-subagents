@@ -144,8 +144,6 @@ function createSession(
 	let lastTextLine = -1;
 	const initialNode = source.getNode(nodeId);
 	let turn = initialNode?.turn ?? initialNode?.turns ?? 0;
-	let statusOverride: string | undefined;
-	let settledAt: number | undefined;
 
 	const safeEventText = (value: unknown): string => {
 		if (typeof value !== "string") return "";
@@ -200,7 +198,6 @@ function createSession(
 
 	const handleEvent = (event: LiveOverlayEvent): void => {
 		if (!open || (event.nodeId !== undefined && event.nodeId !== nodeId)) return;
-		const eventTime = Number.isFinite(event.ts) ? (event.ts as number) : now();
 		const updateType = readString(event, "updateType");
 		const eventType = event.type === "message_update" ? updateType ?? event.type : event.type;
 		if (eventType === "text_delta") {
@@ -223,9 +220,8 @@ function createSession(
 			turn = typeof data?.turn === "number" ? data.turn : turn + 1;
 			appendLine(`↻ turn ${turn}`);
 		} else if (eventType === "agent_settled" || eventType === "agent_end") {
-			statusOverride = "settled";
-			settledAt = eventTime;
-			appendLine("✓ agent settled");
+			// RPC turn completion is activity, not a Legion node lifecycle transition.
+			appendLine("✓ agent turn settled");
 		} else if (eventType !== "message_update") {
 			appendLine(`· ${safeEventText(eventType)}`);
 		}
@@ -244,7 +240,7 @@ function createSession(
 			open,
 			activity: [...activity],
 			turn: turn || node?.turn || node?.turns || 0,
-			status: statusOverride ?? node?.status ?? "unknown",
+			status: node?.status ?? "unknown",
 		};
 	};
 
@@ -255,9 +251,9 @@ function createSession(
 		if (!node) {
 			lines.push(style(options.theme, "dim", `● ${nodeId} · node unavailable`));
 		} else {
-			const status = statusOverride ?? node.status;
+			const status = node.status;
 			const completed = status === "settled" || status === "failed" || status === "retired";
-			const elapsedEnd = completed ? (settledAt ?? node.updatedAt) : now();
+			const elapsedEnd = completed ? node.updatedAt : now();
 			const elapsed = `${Math.max(0, Math.round((elapsedEnd - node.createdAt) / 1_000))}s`;
 			const details = [
 				`● ${safeEventText(node.name)} (${safeEventText(node.role)})`,
