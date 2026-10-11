@@ -65,9 +65,8 @@ export type TreeViewDone = (result?: undefined) => void;
 
 /**
  * Construct the /legion tree custom component. Pass this component from a
- * `ctx.ui.custom()` factory. Unlike a regular layout ScrollView, it paginates
- * its own line window because custom UI components are layout leaves and do
- * not receive a ScrollView viewport height.
+ * `ctx.ui.custom()` factory. It paginates its own line window because custom UI
+ * components are layout leaves and do not receive an allocated viewport height.
  */
 export function createTreeView(
 	options: TreeViewOptions,
@@ -724,8 +723,8 @@ export function createTreeView(
 
 /**
  * Build the `ctx.ui.custom()` factory shape. The custom factory receives a TUI,
- * and we use its terminal row count for self-managed paging instead of relying
- * on the TUI layout system to size a nested ScrollView.
+ * and injects its terminal row count for self-managed paging instead of relying
+ * on layout viewport measurement.
  */
 export function createTreeViewFactory(options: TreeViewOptions) {
 	return <T>(
