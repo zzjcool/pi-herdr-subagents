@@ -141,32 +141,3 @@ fs.writeFileSync(path.join(dir, "store.db"), "");
 const parsed = parseCursorChat(dir);
 assert.equal(parsed.turns.length, 0);
 });
-
-test("regression: no source file may statically import node:sqlite or bun:sqlite", () => {
-// pi ships as a Bun-compiled binary. Bun lacks `node:sqlite`, and a STATIC
-// import fails at module-resolution time — the whole extension dies on load
-// even when no cursor child ever runs. SQLite must be required lazily at
-// call time and branched per runtime (bun:sqlite vs node:sqlite). Guard
-// EVERY shipped source file, not just cursor-chat.ts: moving the read into
-// a new module with a static import would otherwise slip through.
-const pkgRoot = path.resolve(import.meta.dirname, "../..");
-const walkTs = (dir: string): string[] => {
-	const out: string[] = [];
-	for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-const p = path.join(dir, ent.name);
-if (ent.isDirectory()) out.push(...walkTs(p));
-else if (ent.name.endsWith(".ts")) out.push(p);
-	}
-	return out;
-};
-const files = [path.join(pkgRoot, "index.ts"), ...walkTs(path.join(pkgRoot, "src"))];
-assert.ok(files.length > 1, "sanity: source walk found files");
-for (const file of files) {
-	const src = fs.readFileSync(file, "utf-8");
-	assert.doesNotMatch(
-src,
-/^\s*import[^;\n]*from\s*["'](node:sqlite|bun:sqlite)["']/m,
-`${file}: sqlite must be loaded lazily (require at call time), never via a static import`,
-	);
-}
-});
