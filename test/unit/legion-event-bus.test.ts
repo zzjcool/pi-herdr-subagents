@@ -10,7 +10,7 @@ import {
 	type EventSourceClock,
 	type EventSourceIntervalHandle,
 } from "../../src/extension/event-bus.ts";
-import { appendEvent } from "../../src/legion/events.ts";
+import { appendEvent, getDataVersion } from "../../src/legion/events.ts";
 import { openLegionDb, type DatabaseSync } from "../../src/legion/db.ts";
 import { insertNode } from "../../src/legion/nodes.ts";
 
@@ -92,7 +92,9 @@ test("DB event source uses data_version, advances its cursor and goes quiet afte
 		source = createDbEventSource(instrumentedReader, { pollMs: 250, clock: timers.clock });
 		const bus = createLegionEventBus();
 		const received: number[] = [];
+		const localFailures: number[] = [];
 		const unsubscribe = bus.on("node_launched", (event) => received.push(event.id ?? -1));
+		bus.on("node_failed", (event) => localFailures.push(event.id ?? -1));
 		source.start(bus);
 		assert.deepEqual(received, [], "initial read starts at the configured cursor");
 		assert.equal(eventSelects, 1, "start performs one initial cursor read");
@@ -105,13 +107,21 @@ test("DB event source uses data_version, advances its cursor and goes quiet afte
 		assert.equal(eventSelects, 2, "changed data_version triggers one incremental SELECT");
 		assert.equal(source.getCursor(), launched.id);
 
-		const settled = appendEvent(writer, "root.worker", "node_settled", null, { now: () => 3 });
+		const localVersion = getDataVersion(reader);
+		const localFailure = appendEvent(reader, "root.worker", "node_failed", null, { now: () => 3 });
+		assert.equal(getDataVersion(reader), localVersion, "same-connection writes do not bump data_version");
+		source.notifyLocalCommit();
+		assert.deepEqual(localFailures, [localFailure.id], "same-connection commits can be read immediately when notified");
+		assert.equal(source.getCursor(), localFailure.id);
+		assert.equal(eventSelects, 3, "local commit notification triggers an incremental SELECT without a version change");
+
+		const settled = appendEvent(writer, "root.worker", "node_settled", null, { now: () => 4 });
 		timers.tick();
 		assert.equal(source.getCursor(), settled.id);
 		assert.deepEqual(received, [launched.id], "unrelated event types do not reach this subscriber");
 
 		unsubscribe();
-		const nextLaunch = appendEvent(writer, "root", "node_launched", null, { now: () => 4 });
+		const nextLaunch = appendEvent(writer, "root", "node_launched", null, { now: () => 5 });
 		timers.tick();
 		assert.equal(source.getCursor(), nextLaunch.id);
 		assert.deepEqual(received, [launched.id], "unsubscribe is silent while source cursor keeps advancing");

@@ -66,6 +66,36 @@ function node(
 	};
 }
 
+test("tree view default folding is independent of snapshot/event arrival order", () => {
+	const nodes = treeFixture().map((entry) =>
+		entry.id === "root.centurion.worker-a2.deep-manager.deep-worker"
+			? { ...entry, status: "running" as const }
+			: entry,
+	);
+	const launched = {
+		nodeId: "root.centurion.worker-a2.deep-manager.deep-worker",
+		type: "node_launched" as const,
+		data: null,
+		ts: BASE_TIME + 5_000,
+	};
+	const fromOrderedSnapshot = createTreeView({ nodes, events: [launched] });
+	const fromReversedSnapshot = createTreeView({ nodes: [...nodes].reverse() });
+	try {
+		fromReversedSnapshot.applyEvent(launched);
+		assert.deepEqual(
+			fromReversedSnapshot.getState().expandedIds,
+			fromOrderedSnapshot.getState().expandedIds,
+		);
+		assert.deepEqual(
+			fromReversedSnapshot.getState().visibleIds,
+			fromOrderedSnapshot.getState().visibleIds,
+		);
+	} finally {
+		fromOrderedSnapshot.dispose();
+		fromReversedSnapshot.dispose();
+	}
+});
+
 test("tree view folds settled nodes below depth two and displays one collapsed row", () => {
 	const view = createTreeView({ nodes: treeFixture(), now: () => BASE_TIME + 5_000 });
 	try {
@@ -101,6 +131,37 @@ test("tree view ignores unrelated mail events when preserving machine status tim
 	}
 });
 
+test("process agent_settled does not settle the Legion node or replace its node timestamp", () => {
+	const nodes = treeFixture().map((entry) =>
+		entry.id === "root.centurion.worker-a2.deep-manager.deep-worker"
+			? { ...entry, status: "running" as const, phase: "implementing" }
+			: entry,
+	);
+	const baseline = createTreeView({ nodes, now: () => BASE_TIME + 6_000 });
+	const view = createTreeView({ nodes, now: () => BASE_TIME + 6_000 });
+	try {
+		const baselineLines = baseline.render(100).map(stripTerminalSequences);
+		const baselineIndex = baselineLines.findIndex((line) => line.includes("deep-worker (worker)"));
+		assert.ok(baselineIndex >= 0);
+
+		view.applyEvent({
+			nodeId: "root.centurion.worker-a2.deep-manager.deep-worker",
+			type: "agent_settled",
+			data: null,
+			ts: BASE_TIME + 100_000,
+		});
+		const lines = view.render(100).map(stripTerminalSequences);
+		const headlineIndex = lines.findIndex((line) => line.includes("deep-worker (worker)"));
+		assert.ok(headlineIndex >= 0);
+		assert.equal(lines[headlineIndex], baselineLines[baselineIndex]);
+		assert.equal(lines[headlineIndex + 1], baselineLines[baselineIndex + 1]);
+		assert.match(lines[headlineIndex + 1] ?? "", /implementing/);
+	} finally {
+		baseline.dispose();
+		view.dispose();
+	}
+});
+
 test("tree view forcibly expands a running descendant's complete path", () => {
 	const view = createTreeView({ nodes: treeFixture(), now: () => BASE_TIME + 5_000 });
 	try {
@@ -122,6 +183,87 @@ test("tree view forcibly expands a running descendant's complete path", () => {
 			true,
 			"Enter cannot fold a subtree while any descendant is running",
 		);
+	} finally {
+		view.dispose();
+	}
+});
+
+test("tree view self-pages, clamps page boundaries, and keeps keyboard selection visible", () => {
+	const nodes = [node("root", null, "root", 0, "root", "running")];
+	for (let index = 0; index < 20; index++) {
+		const childName = `worker-${index}`;
+		const childId = `root.${childName}`;
+		nodes.push({
+			...node(childId, "root", childName, 1, "worker", "settled"),
+			createdAt: BASE_TIME + 100 + index,
+			updatedAt: BASE_TIME + 100 + index,
+		});
+		if (index > 0) {
+			nodes.push(node(`${childId}.leaf`, childId, "leaf", 2, "worker", "settled"));
+		}
+	}
+	const view = createTreeView({ nodes, terminalRows: 8 });
+	try {
+		const page = view.render(100);
+		const initial = view.getState();
+		assert.equal(page.length, 8, "render is capped by injected terminal rows");
+		assert.equal(initial.pageSize, 7);
+		assert.equal(initial.scrollTop, 0);
+		assert.ok(initial.maxScrollTop > 0);
+
+		view.handleInput?.("\u001b[6~");
+		const afterPageDown = view.getState();
+		assert.equal(afterPageDown.scrollTop, afterPageDown.pageSize);
+		assert.ok(afterPageDown.scrollTop <= afterPageDown.maxScrollTop);
+		assert.equal(view.render(100).length, 8);
+		assert.ok(view.render(100).some((line) => line.includes("worker-")));
+
+		view.handleInput?.("\u001b[5~");
+		assert.equal(view.getState().scrollTop, 0, "PageUp clamps to the first page");
+		view.handleInput?.("\u001b[5~");
+		assert.equal(view.getState().scrollTop, 0, "repeated PageUp cannot overscroll");
+
+		for (let index = 0; index < 10; index++) view.handleInput?.("j");
+		const selected = view.getState();
+		const selectedNodeStart = view.render(100).findIndex((line) => line.includes("❯"));
+		assert.ok(selectedNodeStart >= 1, "selection marker remains in the visible page");
+		assert.ok(selectedNodeStart < 8);
+		assert.ok(selected.selectedId);
+		view.handleInput?.("\u001b[6~");
+		const beforeWheel = view.getState().scrollTop;
+		view.handleMouse?.({
+			type: "wheel",
+			button: "none",
+			x: 2,
+			y: 3,
+			screenX: 2,
+			screenY: 3,
+			width: 100,
+			height: 8,
+			shift: false,
+			alt: false,
+			ctrl: false,
+			wheelDelta: -1,
+		});
+		assert.equal(view.getState().scrollTop, beforeWheel - 1, "negative wheel delta moves up to earlier rows");
+		view.handleMouse?.({
+			type: "wheel",
+			button: "none",
+			x: 2,
+			y: 3,
+			screenX: 2,
+			screenY: 3,
+			width: 100,
+			height: 8,
+			shift: false,
+			alt: false,
+			ctrl: false,
+			wheelDelta: 1,
+		});
+		assert.equal(view.getState().scrollTop, beforeWheel, "positive wheel delta moves down to later rows");
+		view.handleInput?.("\u001b[6~");
+		view.handleInput?.("\u001b[6~");
+		assert.equal(view.getState().scrollTop, view.getState().maxScrollTop, "PageDown clamps at the last page");
 	} finally {
 		view.dispose();
 	}
@@ -173,7 +315,7 @@ test("tree mouse click toggles the selected row head; narrow layouts never overf
 			? { ...entry, name: "very-long-worker-name-that-needs-truncation" }
 			: entry,
 	);
-	const view = createTreeView({ nodes: longNodes });
+	const view = createTreeView({ nodes: longNodes, terminalRows: 9 });
 	try {
 		const wideLines = view.render(100);
 		assert.equal(view.isExpanded("root.centurion.worker-a2.deep-manager"), false);

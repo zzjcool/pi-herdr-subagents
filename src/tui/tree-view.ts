@@ -2,8 +2,6 @@ import {
 	decodeKittyPrintable,
 	Key,
 	matchesKey,
-	MouseRegion,
-	ScrollView,
 	stripTerminalSequences,
 	truncateToWidth,
 	visibleWidth,
@@ -14,7 +12,8 @@ import {
 import type { LegionEvent } from "../extension/event-bus.ts";
 import type { LegionNode, NodeStatus } from "../legion/nodes.ts";
 
-const TREE_HEADER = "Legion tree · j/k move · enter toggle · / search · esc/q close";
+const TREE_HEADER = "Legion tree · j/k move · enter toggle · / search · pgup/pgdn scroll · esc/q close";
+const DEFAULT_TERMINAL_ROWS = 24;
 const MAX_ACTIVITY_TOOLS = 2;
 const ACTIVE_STATUSES = new Set<NodeStatus>(["starting", "running", "blocked"]);
 const TERMINAL_STATUSES = new Set<NodeStatus>(["settled", "failed", "retired"]);
@@ -36,6 +35,8 @@ export interface TreeViewOptions {
 	now?: () => number;
 	theme?: TreeViewTheme;
 	requestRender?: () => void;
+	/** Maximum component height. Production custom UI supplies `tui.terminal.rows`. */
+	terminalRows?: number | (() => number);
 }
 
 export interface TreeViewState {
@@ -44,6 +45,11 @@ export interface TreeViewState {
 	visibleIds: readonly string[];
 	searchMode: boolean;
 	searchQuery: string;
+	/** First body line in the current page. The fixed title/search lines are excluded. */
+	scrollTop: number;
+	/** Number of tree body lines available below the fixed title/search lines. */
+	pageSize: number;
+	maxScrollTop: number;
 }
 
 /** Component returned by the custom-UI factory; it has no context or DB dependency. */
@@ -59,8 +65,9 @@ export type TreeViewDone = (result?: undefined) => void;
 
 /**
  * Construct the /legion tree custom component. Pass this component from a
- * `ctx.ui.custom()` factory; `done` is called once by Esc/q. The TUI's own
- * ScrollView layout clips and scrolls the flattened snapshot rows.
+ * `ctx.ui.custom()` factory. Unlike a regular layout ScrollView, it paginates
+ * its own line window because custom UI components are layout leaves and do
+ * not receive a ScrollView viewport height.
  */
 export function createTreeView(
 	options: TreeViewOptions,
@@ -69,10 +76,24 @@ export function createTreeView(
 	const now = options.now ?? (() => Date.now());
 	const theme = options.theme;
 	const requestRender = options.requestRender ?? (() => {});
+	const readTerminalRows: () => number = () =>
+		typeof options.terminalRows === "function"
+			? options.terminalRows()
+			: options.terminalRows ?? DEFAULT_TERMINAL_ROWS;
+	function currentTerminalRows(): number {
+		const value = readTerminalRows();
+		if (!Number.isSafeInteger(value) || value < 1) {
+			throw new TypeError("terminalRows must be a positive safe integer");
+		}
+		return value;
+	}
+	currentTerminalRows();
+
 	const nodes = new Map<string, TreeNodeSnapshot>();
 	const children = new Map<string, string[]>();
 	const activity = new Map<string, TreeActivity>();
 	const expanded = new Set<string>();
+	const manualExpansion = new Map<string, boolean>();
 	const rowOffsets = new Map<string, number>();
 	let selectedId: string | undefined;
 	let searchMode = false;
@@ -81,26 +102,74 @@ export function createTreeView(
 	let closed = false;
 	let rowLines: string[] = [];
 	let contentWidth = 80;
-
-	const rows = new TreeRows(
-		(width) => {
-			contentWidth = width;
-			rowLines = buildRows();
-			return rowLines;
-		},
-		(event) => handleTreeMouse(event),
-	);
-	const scrollContent = new MouseRegion(rows, (event) => handleTreeMouse(event));
-	const scrollView = new ScrollView(scrollContent, {
-		axis: "vertical",
-		follow: "none",
-		primary: true,
-		scrollbar: "auto",
-		overscroll: "contain",
-	});
+	let headerLineCount = 1;
+	let scrollTop = 0;
 
 	function sortedChildren(parentId: string): string[] {
 		return [...(children.get(parentId) ?? [])];
+	}
+
+	function rootIds(): string[] {
+		return [...nodes.values()]
+			.filter((node) => node.parentId === null)
+			.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+			.map((node) => node.id);
+	}
+
+	function allNodeIds(): string[] {
+		const result: string[] = [];
+		const visited = new Set<string>();
+		const visit = (id: string): void => {
+			if (visited.has(id)) return;
+			visited.add(id);
+			result.push(id);
+			for (const childId of sortedChildren(id)) visit(childId);
+		};
+		for (const id of rootIds()) visit(id);
+		// Include malformed/orphaned snapshots deterministically rather than silently dropping facts.
+		for (const id of nodes.keys()) visit(id);
+		return result;
+	}
+
+	function activeSubtreeSnapshot(): Map<string, boolean> {
+		const result = new Map<string, boolean>();
+		const visiting = new Set<string>();
+		const containsActiveNode = (id: string): boolean => {
+			const known = result.get(id);
+			if (known !== undefined) return known;
+			if (visiting.has(id)) return false;
+			visiting.add(id);
+			const node = nodes.get(id);
+			let active = node !== undefined && ACTIVE_STATUSES.has(node.status);
+			if (!active) {
+				for (const childId of sortedChildren(id)) {
+					if (containsActiveNode(childId)) {
+						active = true;
+						break;
+					}
+				}
+			}
+			visiting.delete(id);
+			result.set(id, active);
+			return active;
+		};
+		for (const id of nodes.keys()) containsActiveNode(id);
+		return result;
+	}
+
+	/** Derive default folding from the whole snapshot, independent of input/event order. */
+	function reconcileExpansion(): void {
+		const activeSubtrees = activeSubtreeSnapshot();
+		expanded.clear();
+		for (const node of nodes.values()) {
+			if (sortedChildren(node.id).length === 0) continue;
+			const activeSubtree = activeSubtrees.get(node.id) === true;
+			const manualChoice = manualExpansion.get(node.id);
+			const defaultExpanded = node.depth <= 2 && !TERMINAL_STATUSES.has(node.status);
+			// Any active descendant forces the entire ancestor path open; manual
+			// collapse is remembered and applied after that subtree becomes terminal.
+			if (activeSubtree || (manualChoice ?? defaultExpanded)) expanded.add(node.id);
+		}
 	}
 
 	function rebuildIndexes(nextNodes: readonly TreeNodeSnapshot[]): void {
@@ -122,132 +191,21 @@ export function createTreeView(
 				return left.createdAt - right.createdAt || left.id.localeCompare(right.id);
 			});
 		}
-		// A snapshot may arrive in a different order; indexes are canonicalized from parent ids.
 		for (const id of [...activity.keys()]) {
 			if (!nodes.has(id)) activity.delete(id);
 		}
-		for (const id of [...expanded]) {
-			if (!nodes.has(id)) expanded.delete(id);
+		for (const id of [...manualExpansion.keys()]) {
+			if (!nodes.has(id)) manualExpansion.delete(id);
 		}
 		if (!selectedId || !nodes.has(selectedId)) selectedId = rootIds()[0];
-		initializeExpansion();
-	}
-
-	function rootIds(): string[] {
-		return [...nodes.values()]
-			.filter((node) => node.parentId === null)
-			.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
-			.map((node) => node.id);
-	}
-
-	function subtreeHasActiveNode(id: string): boolean {
-		const seen = new Set<string>();
-		const pending = [id];
-		while (pending.length > 0) {
-			const next = pending.pop();
-			if (!next || seen.has(next)) continue;
-			seen.add(next);
-			const node = nodes.get(next);
-			if (node && ACTIVE_STATUSES.has(node.status)) return true;
-			pending.push(...sortedChildren(next));
-		}
-		return false;
-	}
-
-	function initializeExpansion(): void {
-		const subtreeActive = new Map<string, boolean>();
-		const visits = new Set<string>();
-		const visiting = new Set<string>();
-		const hasActiveDescendant = (id: string): boolean => {
-			const memoized = subtreeActive.get(id);
-			if (memoized !== undefined) return memoized;
-			if (visiting.has(id) || visits.has(id)) return false;
-			visiting.add(id);
-			const node = nodes.get(id);
-			const active = Boolean(node && ACTIVE_STATUSES.has(node.status));
-			const descendantIsActive = sortedChildren(id).some((childId) => hasActiveDescendant(childId));
-			visiting.delete(id);
-			visits.add(id);
-			subtreeActive.set(id, active || descendantIsActive);
-			return active || descendantIsActive;
-		};
-		for (const id of nodes.keys()) hasActiveDescendant(id);
-
-		for (const node of nodes.values()) {
-			if (expanded.has(node.id)) continue;
-			const hasChildren = sortedChildren(node.id).length > 0;
-			const isCompleted = TERMINAL_STATUSES.has(node.status);
-			const activePath = subtreeActive.get(node.id) === true;
-			if (
-				hasChildren &&
-				(activePath || (!isCompleted && node.depth <= 2))
-			) {
-				expanded.add(node.id);
-			}
-		}
-	}
-
-	function searchVisibleNodeIds(): string[] {
-		const query = searchQuery.trim();
-		if (!searchMode || !query) return [];
-		const included = new Set(findMatches());
-		for (const id of [...included]) {
-			let current = nodes.get(id);
-			const ancestors = new Set<string>();
-			while (current?.parentId && !ancestors.has(current.parentId)) {
-				ancestors.add(current.parentId);
-				included.add(current.parentId);
-				current = nodes.get(current.parentId);
-			}
-		}
-		return allNodeIds().filter((id) => included.has(id));
-	}
-
-	function isVisuallyExpanded(id: string, searchVisible?: ReadonlySet<string>): boolean {
-		if (searchVisible) return sortedChildren(id).some((childId) => searchVisible.has(childId));
-		return expanded.has(id);
-	}
-
-	function visibleNodeIds(): string[] {
-		if (searchMode && searchQuery.trim()) return searchVisibleNodeIds();
-		const result: string[] = [];
-		const visited = new Set<string>();
-		const visit = (id: string): void => {
-			if (visited.has(id)) return;
-			visited.add(id);
-			result.push(id);
-			if (!expanded.has(id)) return;
-			for (const childId of sortedChildren(id)) visit(childId);
-		};
-		for (const id of rootIds()) visit(id);
-		return result;
-	}
-
-	function allNodeIds(): string[] {
-		const result: string[] = [];
-		const visited = new Set<string>();
-		const visit = (id: string): void => {
-			if (visited.has(id)) return;
-			visited.add(id);
-			result.push(id);
-			for (const childId of sortedChildren(id)) visit(childId);
-		};
-		for (const id of rootIds()) visit(id);
-		// Include malformed/orphaned snapshots deterministically rather than silently dropping facts.
-		for (const id of nodes.keys()) visit(id);
-		return result;
+		reconcileExpansion();
+		buildRows();
 	}
 
 	function subtreeSize(id: string, visited = new Set<string>()): number {
 		if (visited.has(id)) return 0;
 		visited.add(id);
 		return 1 + sortedChildren(id).reduce((sum, childId) => sum + subtreeSize(childId, visited), 0);
-	}
-
-	function formatElapsed(node: TreeNodeSnapshot): string {
-		const elapsedEnd = TERMINAL_STATUSES.has(node.status) ? node.updatedAt : now();
-		const elapsedSeconds = Math.max(0, Math.round((elapsedEnd - node.createdAt) / 1_000));
-		return `${elapsedSeconds}s`;
 	}
 
 	function safeText(value: string | null | undefined): string {
@@ -295,40 +253,6 @@ export function createTreeView(
 		return `${"  ".repeat(Math.max(0, node.depth))}${isSelected ? "│" : " "}   ⎿ ${detail.join(" · ")}`;
 	}
 
-	function buildRows(): string[] {
-		const searchVisible = searchMode && searchQuery.trim()
-			? new Set(searchVisibleNodeIds())
-			: undefined;
-		const visibleIds = searchVisible ? [...searchVisible] : visibleNodeIds();
-		const lines = [fitLine(TREE_HEADER, contentWidth)];
-		if (searchMode) {
-			const matches = findMatches();
-			const suffix = matches.length
-				? ` · ${Math.min(searchMatchIndex + 1, matches.length)}/${matches.length}`
-				: " · no matches";
-			lines.push(fitLine(`/${searchQuery}${searchMode ? "▏" : ""}${suffix}`, contentWidth));
-		}
-		rowOffsets.clear();
-		for (const id of visibleIds) {
-			const node = nodes.get(id);
-			if (!node) continue;
-			const start = lines.length;
-			rowOffsets.set(id, start);
-			const isSelected = selectedId === id;
-			const childCount = sortedChildren(id).length;
-			const isExpanded = isVisuallyExpanded(id, searchVisible);
-			const hiddenCount = subtreeSize(id) - 1;
-			const collapsedLine = `${"  ".repeat(Math.max(0, node.depth))}${isSelected ? "❯" : " "}▸ ${safeText(node.name)} +${hiddenCount} collapsed`;
-			const head = childCount > 0 && !isExpanded
-				? collapsedLine
-				: rowHead(node, isSelected, Boolean(searchVisible && isExpanded));
-			lines.push(fitLine(styleNodeLine(head, node, isSelected), contentWidth));
-			if (childCount > 0 && !isExpanded) continue;
-			lines.push(fitLine(styleNodeLine(rowDetail(node, isSelected), node, isSelected), contentWidth));
-		}
-		return lines;
-	}
-
 	function findMatches(): string[] {
 		const query = searchQuery.trim().toLocaleLowerCase();
 		if (!query) return [];
@@ -342,44 +266,116 @@ export function createTreeView(
 		});
 	}
 
-	function notifyRender(): void {
-		rows.invalidate();
-		scrollView.invalidate();
+	function searchVisibleNodeIds(): string[] {
+		if (!searchMode || !searchQuery.trim()) return [];
+		const included = new Set(findMatches());
+		for (const id of [...included]) {
+			let current = nodes.get(id);
+			const ancestors = new Set<string>();
+			while (current?.parentId && !ancestors.has(current.parentId)) {
+				ancestors.add(current.parentId);
+				included.add(current.parentId);
+				current = nodes.get(current.parentId);
+			}
+		}
+		return allNodeIds().filter((id) => included.has(id));
+	}
+
+	function isVisuallyExpanded(id: string, searchVisible?: ReadonlySet<string>): boolean {
+		if (searchVisible) return sortedChildren(id).some((childId) => searchVisible.has(childId));
+		return expanded.has(id);
+	}
+
+	function visibleNodeIds(): string[] {
+		if (searchMode && searchQuery.trim()) return searchVisibleNodeIds();
+		const result: string[] = [];
+		const visited = new Set<string>();
+		const visit = (id: string): void => {
+			if (visited.has(id)) return;
+			visited.add(id);
+			result.push(id);
+			if (!expanded.has(id)) return;
+			for (const childId of sortedChildren(id)) visit(childId);
+		};
+		for (const id of rootIds()) visit(id);
+		return result;
+	}
+
+	function bodyPageSize(): number {
+		return Math.max(0, currentTerminalRows() - headerLineCount);
+	}
+
+	function maxScrollTop(): number {
+		return Math.max(0, rowLines.length - headerLineCount - bodyPageSize());
+	}
+
+	function clampScrollTop(): void {
+		scrollTop = Math.max(0, Math.min(maxScrollTop(), Math.trunc(scrollTop)));
+	}
+
+	function renderTree(width: number): string[] {
+		contentWidth = Math.max(1, Math.floor(width));
+		rowLines = buildRows();
+		clampScrollTop();
+		const end = headerLineCount + scrollTop + bodyPageSize();
+		return [
+			...rowLines.slice(0, headerLineCount),
+			...rowLines.slice(headerLineCount + scrollTop, end),
+		];
+	}
+
+	function scrollBy(lines: number): void {
+		rowLines = buildRows();
+		clampScrollTop();
+		const delta = Number.isFinite(lines) ? Math.trunc(lines) : 0;
+		const nextScrollTop = Math.max(0, Math.min(maxScrollTop(), scrollTop + delta));
+		if (nextScrollTop === scrollTop) return;
+		scrollTop = nextScrollTop;
 		requestRender();
 	}
 
+	function rowHeight(nodeId: string, searchVisible?: ReadonlySet<string>): number {
+		return sortedChildren(nodeId).length > 0 && !isVisuallyExpanded(nodeId, searchVisible) ? 1 : 2;
+	}
+
 	function ensureSelectionVisible(): void {
-		if (!selectedId || scrollView.viewportHeight <= 0) return;
+		rowLines = buildRows();
+		clampScrollTop();
+		if (!selectedId || bodyPageSize() <= 0) return;
 		const start = rowOffsets.get(selectedId);
 		if (start === undefined) return;
 		const searchVisible = searchMode && searchQuery.trim()
 			? new Set(searchVisibleNodeIds())
 			: undefined;
-		const end = start + (isVisuallyExpanded(selectedId, searchVisible) ? 2 : 1);
-		if (start < scrollView.scrollTop) scrollView.scrollTo(start);
-		else if (end > scrollView.scrollTop + scrollView.viewportHeight) {
-			scrollView.scrollTo(end - scrollView.viewportHeight);
+		const selectedHeight = rowHeight(selectedId, searchVisible);
+		const visibleHeight = Math.min(selectedHeight, bodyPageSize());
+		if (start < scrollTop) scrollTop = start;
+		else if (start + visibleHeight > scrollTop + bodyPageSize()) {
+			scrollTop = start + visibleHeight - bodyPageSize();
 		}
+		clampScrollTop();
+	}
+
+	function notifyRender(): void {
+		requestRender();
 	}
 
 	function select(id: string): void {
 		if (!nodes.has(id) || selectedId === id) return;
 		selectedId = id;
-		buildRows();
 		ensureSelectionVisible();
 		notifyRender();
 	}
 
 	function toggleExpanded(id: string): void {
 		if (sortedChildren(id).length === 0) return;
-		if (expanded.has(id)) {
-			if (subtreeHasActiveNode(id)) return;
-			expanded.delete(id);
-			if (selectedId !== id && isDescendantOf(selectedId, id)) selectedId = id;
-		} else {
-			expanded.add(id);
+		const currentExpanded = expanded.has(id);
+		if (currentExpanded && activeSubtreeSnapshot().get(id) === true) return;
+		manualExpansion.set(id, !currentExpanded);
+		reconcileExpansion();
+		if (!expanded.has(id) && selectedId !== id && isDescendantOf(selectedId, id)) {
+			selectedId = id;
 		}
-		buildRows();
 		ensureSelectionVisible();
 		notifyRender();
 	}
@@ -398,15 +394,14 @@ export function createTreeView(
 	}
 
 	function reveal(id: string): void {
-		const lineage: string[] = [];
 		let current = nodes.get(id);
 		const visited = new Set<string>();
 		while (current?.parentId && !visited.has(current.parentId)) {
 			visited.add(current.parentId);
-			lineage.push(current.parentId);
+			manualExpansion.set(current.parentId, true);
 			current = nodes.get(current.parentId);
 		}
-		for (const ancestor of lineage) expanded.add(ancestor);
+		reconcileExpansion();
 	}
 
 	function submitSearch(): void {
@@ -419,7 +414,6 @@ export function createTreeView(
 		searchMode = false;
 		reveal(target);
 		selectedId = target;
-		buildRows();
 		ensureSelectionVisible();
 		notifyRender();
 	}
@@ -450,6 +444,7 @@ export function createTreeView(
 				searchMode = false;
 				searchQuery = "";
 				searchMatchIndex = -1;
+				clampScrollTop();
 				notifyRender();
 			} else {
 				finish();
@@ -464,17 +459,20 @@ export function createTreeView(
 			if (matchesKey(data, Key.backspace)) {
 				searchQuery = searchQuery.slice(0, -1);
 				searchMatchIndex = -1;
+				clampScrollTop();
 				notifyRender();
 				return;
 			}
 			if (matchesKey(data, Key.ctrl("u"))) {
 				searchQuery = "";
 				searchMatchIndex = -1;
+				clampScrollTop();
 				notifyRender();
 				return;
 			}
 			if (matchesKey(data, "q")) {
 				searchQuery += "q";
+				clampScrollTop();
 				notifyRender();
 				return;
 			}
@@ -482,6 +480,7 @@ export function createTreeView(
 			if (searchChar) {
 				searchQuery += searchChar;
 				searchMatchIndex = -1;
+				clampScrollTop();
 				notifyRender();
 			}
 			return;
@@ -510,44 +509,49 @@ export function createTreeView(
 			searchMode = true;
 			searchQuery = "";
 			searchMatchIndex = -1;
+			clampScrollTop();
 			notifyRender();
 		} else if (matchesKey(data, Key.pageDown)) {
-			scrollView.scrollBy(Math.max(1, scrollView.viewportHeight - 1));
+			scrollBy(Math.max(1, bodyPageSize()));
 		} else if (matchesKey(data, Key.pageUp)) {
-			scrollView.scrollBy(-Math.max(1, scrollView.viewportHeight - 1));
+			scrollBy(-Math.max(1, bodyPageSize()));
 		}
 	}
 
 	function handleTreeMouse(event: TuiMouseEvent): { handled: boolean; focus?: boolean } | undefined {
+		if (event.type === "press" && event.button === "left") {
+			return { handled: true, focus: true };
+		}
 		if (event.type === "wheel" && event.wheelDelta) {
-			scrollView.scrollBy(-event.wheelDelta);
+			// Pi TUI uses negative deltas for wheel-up; preserve that orientation.
+			scrollBy(event.wheelDelta);
 			return { handled: true };
 		}
 		if (event.type !== "click" || event.button !== "left") return undefined;
-		const lines = rowLines.length > 0 ? rowLines : buildRows();
+		rowLines = buildRows();
+		clampScrollTop();
 		const searchVisible = searchMode && searchQuery.trim()
 			? new Set(searchVisibleNodeIds())
 			: undefined;
-		const visibleIds = searchVisible ? [...searchVisible] : visibleNodeIds();
-		const contentY = event.y;
-		for (const id of visibleIds) {
+		const contentY = event.y - headerLineCount + scrollTop;
+		if (contentY < 0) return undefined;
+		for (const id of visibleNodeIds()) {
 			const start = rowOffsets.get(id);
 			if (start === undefined) continue;
 			const node = nodes.get(id);
 			if (!node) continue;
-			const lineCount = sortedChildren(id).length > 0 && !isVisuallyExpanded(id, searchVisible) ? 1 : 2;
-			if (contentY < start || contentY >= start + lineCount) continue;
+			const height = rowHeight(id, searchVisible);
+			if (contentY < start || contentY >= start + height) continue;
 			select(id);
 			if (contentY === start && sortedChildren(id).length > 0) toggleExpanded(id);
 			return { handled: true, focus: true };
 		}
-		if (lines.length === 0) return undefined;
 		return undefined;
 	}
 
 	function applyStoredEvents(events: readonly LegionEvent[]): void {
 		for (const event of events) applyEvent(event, false);
-		initializeExpansion();
+		reconcileExpansion();
 	}
 
 	function applyEvent(event: LegionEvent, redraw = true): void {
@@ -564,7 +568,6 @@ export function createTreeView(
 				changed = true;
 				break;
 			case "node_settled":
-			case "agent_settled":
 				updated.status = "settled";
 				updated.updatedAt = event.ts;
 				changed = true;
@@ -622,59 +625,111 @@ export function createTreeView(
 		if (!changed) return;
 		nodes.set(event.nodeId, updated);
 		activity.set(event.nodeId, details);
-		if (TERMINAL_STATUSES.has(updated.status) && !subtreeHasActiveNode(event.nodeId)) {
-			expanded.delete(event.nodeId);
-		}
 		if (redraw) {
-			initializeExpansion();
-			buildRows();
+			reconcileExpansion();
+			ensureSelectionVisible();
 			notifyRender();
 		}
 	}
 
 	function getState(): TreeViewState {
+		rowLines = buildRows();
+		clampScrollTop();
 		return {
 			selectedId,
-			expandedIds: [...expanded],
+			expandedIds: allNodeIds().filter((id) => expanded.has(id)),
 			visibleIds: visibleNodeIds(),
 			searchMode,
 			searchQuery,
+			scrollTop,
+			pageSize: bodyPageSize(),
+			maxScrollTop: maxScrollTop(),
 		};
 	}
 
 	function dispose(): void {
 		closed = true;
-		scrollView.invalidate();
+	}
+
+	function buildRows(): string[] {
+		const searchVisible = searchMode && searchQuery.trim()
+			? new Set(searchVisibleNodeIds())
+			: undefined;
+		const visibleIds = searchVisible ? [...searchVisible] : visibleNodeIds();
+		const headerLines = [fitLine(TREE_HEADER, contentWidth)];
+		if (searchMode) {
+			const matches = findMatches();
+			const suffix = matches.length
+				? ` · ${Math.min(searchMatchIndex + 1, matches.length)}/${matches.length}`
+				: " · no matches";
+			const searchLine = fitLine(`/${searchQuery}▏${suffix}`, contentWidth);
+			if (currentTerminalRows() > 1) headerLines.push(searchLine);
+			else headerLines[0] = fitLine(`${TREE_HEADER} · ${searchLine}`, contentWidth);
+		}
+		headerLineCount = headerLines.length;
+		const lines = [...headerLines];
+		rowOffsets.clear();
+		for (const id of visibleIds) {
+			const node = nodes.get(id);
+			if (!node) continue;
+			const bodyOffset = lines.length - headerLineCount;
+			rowOffsets.set(id, bodyOffset);
+			const isSelected = selectedId === id;
+			const childCount = sortedChildren(id).length;
+			const isExpanded = isVisuallyExpanded(id, searchVisible);
+			const hiddenCount = subtreeSize(id) - 1;
+			const collapsedLine = `${"  ".repeat(Math.max(0, node.depth))}${isSelected ? "❯" : " "}▸ ${safeText(node.name)} +${hiddenCount} collapsed`;
+			const head = childCount > 0 && !isExpanded
+				? collapsedLine
+				: rowHead(node, isSelected, Boolean(searchVisible && isExpanded));
+			lines.push(fitLine(styleNodeLine(head, node, isSelected), contentWidth));
+			if (childCount > 0 && !isExpanded) continue;
+			lines.push(fitLine(styleNodeLine(rowDetail(node, isSelected), node, isSelected), contentWidth));
+		}
+		return lines;
+	}
+
+	function formatElapsed(node: TreeNodeSnapshot): string {
+		const elapsedEnd = TERMINAL_STATUSES.has(node.status) ? node.updatedAt : now();
+		const elapsedSeconds = Math.max(0, Math.round((elapsedEnd - node.createdAt) / 1_000));
+		return `${elapsedSeconds}s`;
 	}
 
 	rebuildIndexes(options.nodes);
 	if (options.events) applyStoredEvents(options.events);
 	rowLines = buildRows();
 
-	// ScrollView is itself the TUI Component; attach the public controller surface to it.
-	return Object.assign(scrollView, {
-		updateSnapshot(nextNodes: readonly TreeNodeSnapshot[], events: readonly LegionEvent[] = []) {
+	return {
+		render: renderTree,
+		handleInput,
+		handleMouse: handleTreeMouse,
+		invalidate() {},
+		updateSnapshot(nextNodes, events = []) {
 			rebuildIndexes(nextNodes);
 			if (events.length > 0) applyStoredEvents(events);
-			buildRows();
+			reconcileExpansion();
+			ensureSelectionVisible();
 			notifyRender();
 		},
-		applyEvent(event: LegionEvent) {
+		applyEvent(event) {
 			applyEvent(event);
 		},
 		getState,
-		isExpanded(nodeId: string) {
+		isExpanded(nodeId) {
 			return expanded.has(nodeId);
 		},
 		dispose,
-		handleInput,
-	});
+	};
 }
 
-/** Build the factory shape accepted by `ctx.ui.custom(factory, { overlay: false })`. */
+/**
+ * Build the `ctx.ui.custom()` factory shape. The custom factory receives a TUI,
+ * and we use its terminal row count for self-managed paging instead of relying
+ * on the TUI layout system to size a nested ScrollView.
+ */
 export function createTreeViewFactory(options: TreeViewOptions) {
 	return <T>(
-		tui: Pick<TUI, "requestRender">,
+		tui: Pick<TUI, "requestRender" | "terminal">,
 		theme: TreeViewTheme,
 		_keybindings: unknown,
 		done: (result: T) => void,
@@ -682,6 +737,7 @@ export function createTreeViewFactory(options: TreeViewOptions) {
 		createTreeView(
 			{
 				...options,
+				terminalRows: () => tui.terminal.rows,
 				theme,
 				requestRender: () => tui.requestRender(),
 			},
@@ -693,33 +749,6 @@ interface TreeActivity {
 	turn?: number;
 	phase?: string;
 	tools: string[];
-}
-
-class TreeRows implements Component {
-	private readonly renderRows: (width: number) => string[];
-	private readonly handleMouseEvent: (event: TuiMouseEvent) =>
-		| { handled: boolean; focus?: boolean }
-		| undefined;
-
-	constructor(
-		renderRows: (width: number) => string[],
-		handleMouseEvent: (event: TuiMouseEvent) =>
-			| { handled: boolean; focus?: boolean }
-			| undefined,
-	) {
-		this.renderRows = renderRows;
-		this.handleMouseEvent = handleMouseEvent;
-	}
-
-	render(width: number): string[] {
-		return this.renderRows(width);
-	}
-
-	handleMouse(event: TuiMouseEvent): { handled: boolean; focus?: boolean } | undefined {
-		return this.handleMouseEvent(event);
-	}
-
-	invalidate(): void {}
 }
 
 function printableCharacter(data: string): string | undefined {
