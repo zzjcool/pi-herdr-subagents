@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { Orchestrator, preCreateSessionFile } from "../../src/runs/orchestrator.ts";
 import { ErrorCodes, SubagentError, type AgentConfig } from "../../src/shared/types.ts";
 import { FakeSupervisor } from "../helpers/fake-supervisor.ts";
 import { RunStore } from "../../src/runs/store.ts";
+import { userMsg } from "../helpers/fixtures.ts";
 
 function agent(over: Partial<AgentConfig> = {}): AgentConfig {
 	return {
@@ -108,6 +109,43 @@ test("RPC launch builds the Pi argv, records lineage/budgets, and stores a real 
 		assert.equal(h.supervisor.calls.some((call) => call.method === "spawnChild"), true);
 	} finally {
 		h.cleanup();
+	}
+});
+
+test("U7: a growing session artifact extends the RPC collect deadline", async () => {
+	const runDir = tempDir("rpc-orchestrator-growing-");
+	const supervisor = new FakeSupervisor({ immediateTimeout: true });
+	let clock = 0;
+	let childName = "";
+	let sessionFile = "";
+	let grewDuringFirstPoll = false;
+	const timeoutMs = 1_000;
+	const orchestrator = new Orchestrator({
+		supervisor,
+		runDir,
+		cwd: "/tmp/project",
+		now: () => clock,
+		sleep: async (ms) => {
+			clock += ms;
+			if (grewDuringFirstPoll) return;
+			grewDuringFirstPoll = true;
+			appendFileSync(sessionFile, `${userMsg("still writing progress")}\n`);
+			supervisor.settle(childName, { text: "late, but complete" });
+		},
+	});
+	try {
+		const handle = await orchestrator.launch({ agent: agent(), task: "long response", worktree: false });
+		childName = handle.name;
+		sessionFile = handle.sessionFile;
+		const startedAt = clock;
+		const result = await orchestrator.collect(handle.name, { timeoutMs });
+		assert.equal(result.execution.status, "success");
+		assert.match(result.output, /late, but complete/);
+		assert.equal(grewDuringFirstPoll, true);
+		assert.ok(clock - startedAt > timeoutMs, "growth must extend collection past the first timeout");
+		assert.ok(supervisor.calls.filter((call) => call.method === "waitSettled").length >= 2, "growing output grants another RPC wait");
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
 	}
 });
 
@@ -349,6 +387,39 @@ test("retired child records survive restore without pane or tab identifiers", as
 		assert.equal("tabId" in handle.child, false);
 	} finally {
 		h.cleanup();
+	}
+});
+
+test("launch failure rolls back a worktree and permits a retry with the same child name", async () => {
+	const root = tempDir("rpc-launch-rollback-");
+	const repo = path.join(root, "repo");
+	const runDir = path.join(root, "run");
+	const { execFileSync } = await import("node:child_process");
+	let rejectStart = true;
+	try {
+		execFileSync("git", ["init", "-q", repo]);
+		execFileSync("git", ["-C", repo, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-qm", "init"]);
+		const supervisor = new FakeSupervisor({
+			rejectSpawn: () => rejectStart ? new SubagentError("injected RPC start failure", ErrorCodes.START_FAILED) : undefined,
+		});
+		const orchestrator = new Orchestrator({ supervisor, runDir, cwd: repo });
+		const worktreePath = path.join(runDir, "worktrees", "worker-retry");
+		await assert.rejects(
+			() => orchestrator.launch({ agent: agent({ worktree: true }), task: "retry after start failure", name: "worker-retry", worktree: true }),
+			(error: unknown) => error instanceof SubagentError && error.code === ErrorCodes.START_FAILED,
+		);
+		assert.equal(existsSync(worktreePath), false, "failed spawn must remove its worktree directory");
+		assert.doesNotMatch(execFileSync("git", ["-C", repo, "worktree", "list", "--porcelain"], { encoding: "utf8" }), /worker-retry/);
+		assert.equal(supervisor.spawns.length, 0);
+
+		rejectStart = false;
+		const handle = await orchestrator.launch({ agent: agent({ worktree: true }), task: "retry same name", name: "worker-retry", worktree: true });
+		assert.equal(handle.name, "worker-retry");
+		assert.equal(supervisor.spawns.length, 1);
+		assert.equal(handle.child.worktreePath, worktreePath);
+		assert.equal(existsSync(worktreePath), true, "same-name retry can allocate the worktree again");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
 	}
 });
 

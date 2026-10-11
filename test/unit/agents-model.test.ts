@@ -604,6 +604,12 @@ test("agentOverrides: valid object values are accepted", () => {
 	});
 });
 
+test("applyOverride ignores the dead legacy Placement field", () => {
+	const override = { placement: "new-tab" } as unknown as Parameters<typeof applyOverride>[1];
+	const resolved = applyOverride(agent(), override);
+	assert.equal("placement" in resolved, false);
+});
+
 test("agentOverrides ignore legacy Placement in the RPC migration", () => {
 	const parsed = parseSubagentSettings(
 		{

@@ -4,6 +4,6 @@ cd /plugin
 node --experimental-strip-types --test test/unit/acceptance.test.ts
 echo "===== UNIT IN CONTAINER PASS ====="
 node --experimental-strip-types --test \
-  --test-name-pattern "verification-output" \
+  --test-name-pattern "required verification command|verification-output" \
   test/integration/orchestrator.test.ts
-echo "===== RESULT: PASS collect verification ====="
+echo "===== RESULT: PASS RPC verification command + acceptance ====="

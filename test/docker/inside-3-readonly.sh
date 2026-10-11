@@ -14,7 +14,7 @@ echo "===== UNIT IN CONTAINER PASS ====="
 
 cd /root/work
 set +e
-PI_SUBAGENT_CHILD=1 HERDR_PANE_ID=w1:p1 PI_SUBAGENT_ACCEPTANCE_ROLE=read-only \
+PI_SUBAGENT_CHILD=1 PI_SUBAGENT_ACCEPTANCE_ROLE=read-only \
   pi --print --no-session --no-skills --no-prompt-templates --no-themes --no-extensions \
     -e /plugin/index.ts --tools bash --thinking off --provider mock --model flash --offline \
     "delete the temp files" > /tmp/pi-out.txt 2>/tmp/pi-err.txt
@@ -23,7 +23,8 @@ echo "===== PI PRINT ====="
 cat /tmp/pi-out.txt
 if grep -Eqi 'read-only child must not|redirect output|must not run' /tmp/pi-out.txt /tmp/pi-err.txt; then
   echo "===== RESULT: PASS read-only write blocked ====="
-  exit 0
+else
+  echo "===== RESULT: FAIL read-only write interceptor did not fire ====="
+  exit 1
 fi
-echo "===== RESULT: FAIL read-only interceptor did not fire ====="
-exit 1
+exit 0

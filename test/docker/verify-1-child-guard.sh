@@ -11,7 +11,7 @@ docker run --rm -u 0 \
   -e TERM=xterm-256color \
   -e PI_OFFLINE=1 \
   -e MOCK_TOOL_NAME=bash \
-  -e MOCK_TOOL_ARGS='{"command":"herdr agent prompt orchestrator please take this result"}' \
+  -e MOCK_TOOL_ARGS='{"command":"sqlite3 .pi-subagents/legion.db select"}' \
   -v "$ROOT:/plugin:ro" \
   -v "$STAGING:/root" \
   -v "$ROOT/test/docker:/opt/test:ro" \

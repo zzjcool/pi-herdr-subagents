@@ -10,6 +10,7 @@ import {
 	type AgentConfig,
 } from "../../src/shared/types.ts";
 import { parseSubagentSettings, resolveSubagentSettings } from "../../src/agents/settings.ts";
+import { RunStore } from "../../src/runs/store.ts";
 import { effectiveMaxDepth, Orchestrator } from "../../src/runs/orchestrator.ts";
 import { FakeSupervisor } from "../helpers/fake-supervisor.ts";
 
@@ -192,6 +193,32 @@ test("M0 root depth ceiling combines settings, environment, and the hard cap", a
 	});
 	await withEnvironment({ ...isolatedEnv, [MAX_DEPTH_ENV]: "10" }, async () => {
 		assert.equal(effectiveMaxDepth(10), 4);
+	});
+});
+
+test("M0 persistence: runtime maxDepth uses min(settings, environment) and is stored in run.json", async () => {
+	await withEnvironment({ ...isolatedEnv, [MAX_DEPTH_ENV]: "2" }, async () => {
+		const parsed = parseSubagentSettings({ subagents: { legion: { maxDepth: 4 } } }, "/project/.pi/settings.json");
+		const configuredDepth = parsed.legion?.maxDepth;
+		assert.equal(configuredDepth, 4);
+		const runtimeDepth = effectiveMaxDepth(configuredDepth);
+		assert.equal(runtimeDepth, 2, "environment ceiling tightens settings maxDepth");
+
+		const root = mkdtempSync(path.join(tmpdir(), "legion-rpc-persist-depth-"));
+		try {
+			const store = new RunStore({ rootDir: path.join(root, ".pi-subagents") });
+			const run = store.createRun({ task: "persist effective ceiling", cwd: "/tmp/project", maxDepth: runtimeDepth });
+			const supervisor = new FakeSupervisor();
+			const orchestrator = new Orchestrator({ supervisor, runDir: store.runDir(run.runId), cwd: "/tmp/project", maxDepth: configuredDepth });
+			assert.equal(orchestrator.maxDepth, runtimeDepth);
+			const handle = await orchestrator.launch({ agent: role("worker"), task: "inherit tightened ceiling", worktree: false });
+			assert.equal(Number(supervisor.spawns[0]?.input.env?.[MAX_DEPTH_ENV]), runtimeDepth);
+			await store.addChild(run.runId, handle.child);
+			const persisted = store.readRun(run.runId);
+			assert.equal(persisted?.maxDepth, orchestrator.maxDepth);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

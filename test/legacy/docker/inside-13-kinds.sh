@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Inside pi-herdr-sandbox: plugin kind matrix, then real CLI/model probes.
+# Legacy-only Herdr kind/model matrix and real CLI probes (not RPC v2).
 set -euo pipefail
 
 pass() { echo "===== RESULT: PASS $* ====="; }
@@ -37,13 +37,12 @@ cd /plugin
 PI_OFFLINE=1 node --experimental-strip-types --test test/unit/kind.test.ts \
   || fail "unit kind.test.ts"
 
-PI_OFFLINE=1 node --experimental-strip-types /plugin/test/docker/probe-kind-matrix.ts \
-  || fail "kind matrix"
+PI_OFFLINE=1 node --experimental-strip-types /plugin/test/legacy/docker/probe-kind-matrix.ts \
+  || fail "legacy kind matrix"
 
 PI_OFFLINE=1 node --experimental-strip-types --test \
-  --test-name-pattern "every kind starts|probeProgress maps non-pi|valid non-pi kind|herdr grok kind" \
-  test/integration/orchestrator.test.ts test/unit/agents.test.ts \
-  || fail "kind integration"
+  test/legacy/herdr-client.test.ts test/legacy/cursor-chat.test.ts \
+  || fail "archived legacy transport tests"
 
 echo "===== CLI FLAG PROBES ====="
 

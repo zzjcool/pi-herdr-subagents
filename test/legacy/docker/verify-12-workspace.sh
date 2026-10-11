@@ -2,8 +2,8 @@
 # Container: install Pi + this plugin, then prove a child lands in the parent
 # herdr Space even when another Space is focused.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-chmod +x "$ROOT/test/docker/"*.sh "$ROOT/test/docker/"*.mjs
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+chmod +x "$ROOT/test/legacy/docker/"*.sh "$ROOT/test/legacy/docker/"*.mjs
 export DOCKER_PI_HOME="${DOCKER_PI_HOME:-/tmp/pi-herdr-workspace-docker-home}"
 bash "$ROOT/test/docker/prepare-home.sh"
 
@@ -36,7 +36,8 @@ docker run --rm -u 0 \
   -e HERDR_SOCKET_PATH=/tmp/space-pin-herdr.sock \
   -v "$ROOT:/plugin:ro" \
   -v "$DOCKER_PI_HOME:/root" \
-  -v "$ROOT/test/docker:/opt/test:ro" \
+  -v "$ROOT/test/legacy/docker:/opt/test:ro" \
+  -v "$ROOT/test/docker:/opt/common:ro" \
   -w /root/work \
   "$IMAGE" \
   bash /opt/test/inside-12-workspace.sh

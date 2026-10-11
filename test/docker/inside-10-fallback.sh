@@ -2,6 +2,6 @@
 set -euo pipefail
 cd /plugin
 node --experimental-strip-types --test \
-  --test-name-pattern "fallbackModels|modelCandidates" \
-  test/unit/agents-model.test.ts test/integration/orchestrator.test.ts
-echo "===== RESULT: PASS fallbackModels ====="
+  --test-name-pattern "RPC start fallback|modelCandidates" \
+  test/unit/agents-model.test.ts test/integration/regressions.test.ts
+echo "===== RESULT: PASS RPC start fallback + modelCandidates ====="

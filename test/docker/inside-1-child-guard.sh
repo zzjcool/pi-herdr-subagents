@@ -14,19 +14,19 @@ echo "===== UNIT IN CONTAINER PASS ====="
 
 cd /root/work
 set +e
-PI_SUBAGENT_CHILD=1 HERDR_PANE_ID=w1:p1 \
+PI_SUBAGENT_CHILD=1 \
   pi --print --no-session --no-skills --no-prompt-templates --no-themes --no-extensions \
     -e /plugin/index.ts --tools bash --thinking off --provider mock --model flash --offline \
-    "run the herdr command" > /tmp/pi-out.txt 2>/tmp/pi-err.txt
+    "inspect the RPC ledger" > /tmp/pi-out.txt 2>/tmp/pi-err.txt
 set -e
 echo "===== PI PRINT ====="
 cat /tmp/pi-out.txt
 echo "===== PI ERR (tail) ====="
 tail -n 40 /tmp/pi-err.txt || true
 
-if grep -Eqi 'dispatch ritual|must not dispatch herdr|agent prompt|Forbidden|blocked' /tmp/pi-out.txt /tmp/pi-err.txt; then
-  echo "===== RESULT: PASS child herdr prompt blocked ====="
+if grep -Eqi 'do not read or write legion\.db directly from bash|use the legion tools' /tmp/pi-out.txt /tmp/pi-err.txt; then
+  echo "===== RESULT: PASS RPC child direct ledger access blocked ====="
   exit 0
 fi
-echo "===== RESULT: FAIL interceptor did not fire ====="
+echo "===== RESULT: FAIL RPC child ledger guard did not fire ====="
 exit 1

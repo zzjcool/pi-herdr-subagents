@@ -17,9 +17,25 @@ test("child blocks direct access to the legion database and allows ordinary insp
 	for (const command of [
 		"sqlite3 legion.db 'select * from nodes'",
 		"cat legion.db-wal",
-		"echo $PI_LEGION_DB",
+		"cat \"$PI_LEGION_DB-wal\"",
+		"sqlite3 \"$PI_LEGION_DB\" 'select * from nodes'",
+		"grep -f legion.db '.*'",
+		"git grep -e TODO -- .pi-subagents/legion.db",
+		"cat < .pi-subagents/legion.db-shm",
+		"printf '{}' > .pi-subagents/legion.db",
 	]) assert.ok(forbiddenChildReason(command), `must block ${command}`);
-	assert.equal(forbiddenChildReason("rg TODO src"), undefined);
+	for (const command of [
+		"rg TODO src",
+		"rg legion.db src",
+		"git grep legion.db",
+		"grep -n 'PI_LEGION_DB' src/shared/types.ts",
+		"grep 'legion.db' README.md",
+		"echo legion.db",
+		"echo $PI_LEGION_DB",
+		"echo $PI_LEGION_DB-wal",
+		"printf 'PI_LEGION_DB is configured'",
+		"node -e \"console.log('legion.db')\"",
+	]) assert.equal(forbiddenChildReason(command), undefined, `mention/pattern must be allowed: ${command}`);
 	assert.equal(forbiddenChildReason("git log -1 --oneline"), undefined);
 });
 

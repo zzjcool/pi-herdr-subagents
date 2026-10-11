@@ -124,8 +124,173 @@ function classifyReadonlyBash(command: string): string | undefined {
 	return undefined;
 }
 
+interface ShellToken {
+	kind: "word" | "operator";
+	value: string;
+}
+
+/** Split the small shell surface the guard needs, retaining quotes as data. */
+function shellTokens(command: string): ShellToken[] {
+	const tokens: ShellToken[] = [];
+	let word = "";
+	let quote: "'" | '"' | undefined;
+	const flush = () => {
+		if (word) tokens.push({ kind: "word", value: word });
+		word = "";
+	};
+	for (let index = 0; index < command.length; index += 1) {
+		const character = command[index] ?? "";
+		if (quote) {
+			if (character === quote) quote = undefined;
+			else if (character === "\\" && quote === '"' && index + 1 < command.length) word += command[++index];
+			else word += character;
+			continue;
+		}
+		if (character === "'" || character === '"') {
+			quote = character;
+			continue;
+		}
+		if (character === "\\" && index + 1 < command.length) {
+			word += command[++index];
+			continue;
+		}
+		if (/\s/.test(character)) {
+			flush();
+			continue;
+		}
+		if (character === "&" && command[index + 1] === ">") {
+			flush();
+			tokens.push({ kind: "operator", value: "&>" });
+			index += 1;
+			continue;
+		}
+		if (character === ">" || character === "<") {
+			flush();
+			let operator = character;
+			if (command[index + 1] === character) {
+				operator += character;
+				index += 1;
+				if (character === "<" && command[index + 1] === "<") {
+					operator += "<";
+					index += 1;
+				}
+			} else if (command[index + 1] === "&" || command[index + 1] === "|") {
+				operator += command[++index];
+			}
+			tokens.push({ kind: "operator", value: operator });
+			continue;
+		}
+		if (character === ";" || character === "&" || character === "|") {
+			flush();
+			let operator = character;
+			if (command[index + 1] === character && (character === "&" || character === "|")) {
+				operator += character;
+				index += 1;
+			}
+			tokens.push({ kind: "operator", value: operator });
+			continue;
+		}
+		word += character;
+	}
+	flush();
+	return tokens;
+}
+
+function isLegionDbPath(value: string): boolean {
+	return /^(?:\$PI_LEGION_DB|\$\{PI_LEGION_DB\})(?:-(?:wal|shm))?$/i.test(value) ||
+		/(?:^|[\\/])legion\.db(?:-(?:wal|shm))?$/i.test(value);
+}
+
+const SEARCH_COMMANDS = new Set(["grep", "egrep", "fgrep", "rg", "ripgrep"]);
+const PRINT_ONLY_COMMANDS = new Set(["echo", "printf"]);
+const SEARCH_PATTERN_OPTIONS = new Set(["-e", "--regexp"]);
+const SEARCH_VALUE_OPTIONS = new Set([
+	"-A", "-B", "-C", "-m", "--max-count", "--max-columns",
+	"--max-columns-preview", "--context", "--after-context", "--before-context",
+	"--type", "-t", "--type-add", "-T", "--glob", "-g", "--iglob",
+	"--encoding", "--engine", "--sort", "--threads", "--color", "--colors",
+]);
+
+function searchPatternIndexes(words: string[]): Set<number> {
+	const ignored = new Set<number>();
+	let hasExplicitPattern = false;
+	for (let index = 0; index < words.length; index += 1) {
+		const value = words[index] ?? "";
+		if (SEARCH_PATTERN_OPTIONS.has(value)) {
+			if (index + 1 < words.length) ignored.add(++index);
+			hasExplicitPattern = true;
+		} else if (/^--regexp=/.test(value) || /^-e.+/.test(value)) {
+			ignored.add(index);
+			hasExplicitPattern = true;
+		} else if (SEARCH_VALUE_OPTIONS.has(value)) {
+			if (index + 1 < words.length) ignored.add(++index);
+		}
+	}
+	if (!hasExplicitPattern) {
+		for (let index = 0; index < words.length; index += 1) {
+			const value = words[index] ?? "";
+			if (value === "--") continue;
+			if (value.startsWith("-") && value !== "-") continue;
+			ignored.add(index);
+			break;
+		}
+	}
+	return ignored;
+}
+
+function segmentHasDirectLegionDbAccess(tokens: ShellToken[]): boolean {
+	const commandIndex = tokens.findIndex((token) => token.kind === "word");
+	if (commandIndex < 0) return false;
+	const command = tokens[commandIndex]?.value.split(/[\\/]/).at(-1)?.toLowerCase() ?? "";
+	const isGitGrep = command === "git" && tokens[commandIndex + 1]?.value === "grep";
+	const isSearch = SEARCH_COMMANDS.has(command) || isGitGrep;
+	const argumentsStart = commandIndex + (isGitGrep ? 2 : 1);
+	// Pattern files are input files even though a plain grep pattern is excluded
+	// below. Check their value slots before classifying positional arguments.
+	if (isSearch) {
+		for (let index = argumentsStart; index < tokens.length; index += 1) {
+			const token = tokens[index];
+			if (token?.kind !== "word") continue;
+			if ((token.value === "-f" || token.value === "--file") && tokens[index + 1]?.kind === "word") {
+				if (isLegionDbPath(tokens[index + 1]?.value ?? "")) return true;
+				index += 1;
+			} else if (token.value.startsWith("--file=") && isLegionDbPath(token.value.slice("--file=".length))) {
+				return true;
+			}
+		}
+	}
+	// Shell redirection targets are file access even for echo/printf. Here-doc
+	// delimiters and descriptor duplication do not name a ledger file.
+	for (let index = commandIndex + 1; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (!token || token.kind !== "operator") continue;
+		if (["<<", "<<<", "<&", ">&"].includes(token.value)) continue;
+		const target = tokens[index + 1];
+		if (target?.kind === "word" && isLegionDbPath(target.value)) return true;
+	}
+	if (PRINT_ONLY_COMMANDS.has(command)) return false;
+	const words = tokens.slice(argumentsStart).filter((token) => token.kind === "word").map((token) => token.value);
+	const ignoredPatterns = isSearch ? searchPatternIndexes(words) : new Set<number>();
+	let wordIndex = -1;
+	for (const token of tokens.slice(argumentsStart)) {
+		if (token.kind !== "word") continue;
+		wordIndex += 1;
+		if (!ignoredPatterns.has(wordIndex) && isLegionDbPath(token.value)) return true;
+	}
+	return false;
+}
+
 function directLegionDbAccess(command: string): boolean {
-	return /\blegion\.db(?:-(?:wal|shm))?\b|\bPI_LEGION_DB\b/i.test(command);
+	let segment: ShellToken[] = [];
+	for (const token of shellTokens(command)) {
+		if (token.kind === "operator" && ["|", "||", "&", "&&", ";"].includes(token.value)) {
+			if (segmentHasDirectLegionDbAccess(segment)) return true;
+			segment = [];
+		} else {
+			segment.push(token);
+		}
+	}
+	return segmentHasDirectLegionDbAccess(segment);
 }
 
 export function forbiddenChildReason(
