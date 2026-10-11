@@ -1,10 +1,9 @@
 /**
- * Guards that run inside a child Pi process.
+ * Guards that run inside an RPC child Pi process.
  *
- * The parent session already blocks the herdr launch ritual. Children do not
- * load parent-only tools, so without this module they can still `herdr agent
- * prompt` the parent pane. The launcher always injects this extension into
- * child argv and sets PI_SUBAGENT_CHILD=1.
+ * The child extension enforces budgets and read-only role protections. A
+ * nested dispatch can only use the subagent tool; bash must never access the
+ * tree ledger directly.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -23,7 +22,7 @@ export function childTaskAppendix(opts?: {
 	worktreeBranch?: string;
 }): string {
 	const nested = opts?.allowNested
-		? "- Nested subagents are allowed via the `subagent` tool. Do not use herdr to spawn them."
+		? "- Nested subagents via `subagent` tool only."
 		: "- Do not spawn nested agents.";
 	const worktree = opts?.worktreeBranch
 		? [
@@ -33,11 +32,9 @@ export function childTaskAppendix(opts?: {
 		: [];
 	return [
 		"## Frozen child constraints (injected by pi-legion)",
-		"- Do not message, prompt, wait on, or send keys to any other pane. The parent extension delivers your result.",
-		"- Do not read or close panes that are not yours.",
 		nested,
 		...worktree,
-		"- End with machine-readable JSON on its own: {\"ok\": true|false, \"reason\": \"...\"}.",
+		'- End with machine-readable JSON on its own: {"ok": true|false, "reason": "..."}.',
 	].join("\n");
 }
 
@@ -50,7 +47,6 @@ export function formatChildTask(
 	return `Task: ${task}\n\n${childTaskAppendix(opts)}\n`;
 }
 
-/** Refusal shown inside the child — never the parent launch playbook. */
 export function blockChildMessage(reason: string): string {
 	return `${reason}\n\n${CHILD_TASK_APPENDIX}`;
 }
@@ -60,152 +56,46 @@ export function isReadOnlyRole(role: string | undefined): boolean {
 }
 
 export interface ChildGuardEnv {
-	paneId?: string;
 	acceptanceRole?: string;
 }
 
-function herdrArgv(chunk: string): string[] | undefined {
-	const match = chunk.match(/^(?:command\s+-v\s+)?herdr(?:\s+(.*))?$/);
-	if (!match) {
-		const embedded = chunk.match(/\bherdr(?:\s+(.*))$/);
-		if (!embedded) return undefined;
-		return ["herdr", ...(embedded[1] ? embedded[1].split(" ") : [])];
-	}
-	return ["herdr", ...(match[1] ? match[1].split(" ") : [])];
-}
-
-const CHILD_AGENT_SUBS = new Set([
-	"start",
-	"prompt",
-	"wait",
-	"send-keys",
-]);
-
-function classifyChildHerdr(
-	argv: string[],
-	env: ChildGuardEnv,
-): string | undefined {
-	const args = argv.slice(1).filter((part) => part.length > 0);
-	const group = args[0] ?? "";
-	const sub = args[1];
-
-	if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
-		return "a child must not probe the herdr CLI.";
-	}
-	if (group === "agent" && sub && CHILD_AGENT_SUBS.has(sub)) {
-		return "a child must not dispatch herdr agent start/prompt/wait/send-keys; the parent delivers completion.";
-	}
-	if (group === "pane" && sub === "split") {
-		return "a child must not split panes.";
-	}
-	if (group === "tab" && (sub === "create" || sub === "close")) {
-		return "a child must not create or close tabs.";
-	}
-	if (group === "pane" && (sub === "read" || sub === "close")) {
-		const target = args[2];
-		if (!env.paneId) {
-			return "a child may not read or close panes when its own pane id is unknown.";
-		}
-		if (target && target !== env.paneId) {
-			return `a child may only ${sub} its own pane (${env.paneId}), not ${target}.`;
-		}
-	}
-	return undefined;
-}
-
 const WRITE_HEADS = new Set([
-	"rm",
-	"rmdir",
-	"mv",
-	"cp",
-	"mkdir",
-	"touch",
-	"chmod",
-	"chown",
-	"ln",
-	"install",
-	"tee",
-	"dd",
-	"truncate",
+	"rm", "rmdir", "mv", "cp", "mkdir", "touch", "chmod", "chown",
+	"ln", "install", "tee", "dd", "truncate",
 ]);
-
 const WRITE_GIT = new Set([
-	"add",
-	"commit",
-	"push",
-	"checkout",
-	"reset",
-	"rebase",
-	"merge",
-	"stash",
-	"tag",
-	"cherry-pick",
-	"clean",
-	"restore",
-	"mv",
-	"rm",
+	"add", "commit", "push", "checkout", "reset", "rebase", "merge",
+	"stash", "tag", "cherry-pick", "clean", "restore", "mv", "rm",
 ]);
-
 const WRITE_NPM = new Set(["install", "uninstall", "ci", "publish", "link"]);
 
 function firstToken(chunk: string): string {
-	const trimmed = chunk.trim();
-	const match = trimmed.match(/^(\S+)/);
-	return match?.[1] ?? "";
+	return chunk.trim().match(/^(\S+)/)?.[1] ?? "";
 }
 
-/**
- * Does this command write to the filesystem via output redirection?
- *
- * A naive `/>{1,2}/` is wrong in both directions: it fires on `=>`, `>=`, `->`
- * and on a `>` inside quotes (which the shell does NOT treat as a redirect, so
- * `node -e "[1].map(x => x+1)"` was refused), while it MISSES `&>file` because
- * the preceding `&` was excluded. That false positive is not cosmetic: it
- * blocks the read-only probes a reviewing agent needs, which is how this was
- * found.
- *
- * So the operator is located by scanning outside quotes, then rejected only
- * when it is genuinely part of a comparison/arrow/descriptor-duplication.
- */
+/** Does this command write to the filesystem via an output redirection? */
 function hasFilesystemRedirect(command: string): boolean {
 	let inSingle = false;
 	let inDouble = false;
-
-	for (let i = 0; i < command.length; i += 1) {
-		const ch = command[i];
-
-		// Track quoting: a `>` inside quotes is literal text, not a redirect.
-		if (ch === "'" && !inDouble) {
+	for (let index = 0; index < command.length; index += 1) {
+		const character = command[index];
+		if (character === "'" && !inDouble) {
 			inSingle = !inSingle;
 			continue;
 		}
-		if (ch === '"' && !inSingle) {
+		if (character === '"' && !inSingle) {
 			inDouble = !inDouble;
 			continue;
 		}
-		if (inSingle || inDouble) continue;
-		if (ch !== ">") continue;
-
-		const prev = command[i - 1] ?? "";
-		const next = command[i + 1] ?? "";
-
-		// `=>` (arrow), `->`, `<=`, `!=` and `>=` are not redirection.
-		if (prev === "=" || prev === "-" || prev === "<" || prev === "!") {
-			continue;
-		}
-		if (next === "=") continue;
-		// `2>&1` / `>&2`: descriptor duplication, not a file write.
-		if (next === "&") continue;
-		// `>>` is one operator; the second `>` was already consumed visually.
-		if (prev === ">") continue;
-
-		// Ignore the harmless sink so `cmd > /dev/null` stays allowed.
-		const rest = command.slice(i + (next === ">" ? 2 : 1)).trimStart();
+		if (inSingle || inDouble || character !== ">") continue;
+		const previous = command[index - 1] ?? "";
+		const next = command[index + 1] ?? "";
+		if (previous === "=" || previous === "-" || previous === "<" || previous === "!" || next === "=") continue;
+		if (next === "&" || previous === ">") continue;
+		const rest = command.slice(index + (next === ">" ? 2 : 1)).trimStart();
 		if (/^\/dev\/null(\s|$)/.test(rest)) continue;
-
 		return true;
 	}
-
 	return false;
 }
 
@@ -215,23 +105,17 @@ function classifyReadonlyBash(command: string): string | undefined {
 	}
 	for (const chunk of shellChunks(command)) {
 		const head = firstToken(chunk).replace(/^\\/, "");
-		if (WRITE_HEADS.has(head)) {
-			return `read-only child must not run \`${head}\`.`;
-		}
+		if (WRITE_HEADS.has(head)) return `read-only child must not run \`${head}\`.`;
 		if (head === "git") {
-			const sub = chunk.trim().split(/\s+/)[1] ?? "";
-			if (WRITE_GIT.has(sub)) {
-				return `read-only child must not run \`git ${sub}\`.`;
-			}
+			const subcommand = chunk.trim().split(/\s+/)[1] ?? "";
+			if (WRITE_GIT.has(subcommand)) return `read-only child must not run \`git ${subcommand}\`.`;
 		}
-		if (head === "npm" || head === "npx" || head === "pnpm" || head === "yarn") {
-			const sub = chunk.trim().split(/\s+/)[1] ?? "";
-			if (WRITE_NPM.has(sub) || head !== "npm") {
-				return `read-only child must not run package-manager writes (\`${head} ${sub}\`).`;
+		if (["npm", "npx", "pnpm", "yarn"].includes(head)) {
+			const subcommand = chunk.trim().split(/\s+/)[1] ?? "";
+			if (WRITE_NPM.has(subcommand) || head !== "npm") {
+				return `read-only child must not run package-manager writes (\`${head} ${subcommand}\`).`;
 			}
-			if (sub === "install" || sub === "i") {
-				return "read-only child must not run npm install.";
-			}
+			if (subcommand === "i") return "read-only child must not run npm install.";
 		}
 		if (head === "sed" && /(^|\s)-i(\s|$)/.test(chunk)) {
 			return "read-only child must not run `sed -i`.";
@@ -240,83 +124,212 @@ function classifyReadonlyBash(command: string): string | undefined {
 	return undefined;
 }
 
-/**
- * If this bash command is forbidden inside a child session, return why.
- */
+interface ShellToken {
+	kind: "word" | "operator";
+	value: string;
+}
+
+/** Split the small shell surface the guard needs, retaining quotes as data. */
+function shellTokens(command: string): ShellToken[] {
+	const tokens: ShellToken[] = [];
+	let word = "";
+	let quote: "'" | '"' | undefined;
+	const flush = () => {
+		if (word) tokens.push({ kind: "word", value: word });
+		word = "";
+	};
+	for (let index = 0; index < command.length; index += 1) {
+		const character = command[index] ?? "";
+		if (quote) {
+			if (character === quote) quote = undefined;
+			else if (character === "\\" && quote === '"' && index + 1 < command.length) word += command[++index];
+			else word += character;
+			continue;
+		}
+		if (character === "'" || character === '"') {
+			quote = character;
+			continue;
+		}
+		if (character === "\\" && index + 1 < command.length) {
+			word += command[++index];
+			continue;
+		}
+		if (/\s/.test(character)) {
+			flush();
+			continue;
+		}
+		if (character === "&" && command[index + 1] === ">") {
+			flush();
+			tokens.push({ kind: "operator", value: "&>" });
+			index += 1;
+			continue;
+		}
+		if (character === ">" || character === "<") {
+			flush();
+			let operator = character;
+			if (command[index + 1] === character) {
+				operator += character;
+				index += 1;
+				if (character === "<" && command[index + 1] === "<") {
+					operator += "<";
+					index += 1;
+				}
+			} else if (command[index + 1] === "&" || command[index + 1] === "|") {
+				operator += command[++index];
+			}
+			tokens.push({ kind: "operator", value: operator });
+			continue;
+		}
+		if (character === ";" || character === "&" || character === "|") {
+			flush();
+			let operator = character;
+			if (command[index + 1] === character && (character === "&" || character === "|")) {
+				operator += character;
+				index += 1;
+			}
+			tokens.push({ kind: "operator", value: operator });
+			continue;
+		}
+		word += character;
+	}
+	flush();
+	return tokens;
+}
+
+function isLegionDbPath(value: string): boolean {
+	return /^(?:\$PI_LEGION_DB|\$\{PI_LEGION_DB\})(?:-(?:wal|shm))?$/i.test(value) ||
+		/(?:^|[\\/])legion\.db(?:-(?:wal|shm))?$/i.test(value);
+}
+
+const SEARCH_COMMANDS = new Set(["grep", "egrep", "fgrep", "rg", "ripgrep"]);
+const PRINT_ONLY_COMMANDS = new Set(["echo", "printf"]);
+const SEARCH_PATTERN_OPTIONS = new Set(["-e", "--regexp"]);
+const SEARCH_VALUE_OPTIONS = new Set([
+	"-A", "-B", "-C", "-m", "--max-count", "--max-columns",
+	"--max-columns-preview", "--context", "--after-context", "--before-context",
+	"--type", "-t", "--type-add", "-T", "--glob", "-g", "--iglob",
+	"--encoding", "--engine", "--sort", "--threads", "--color", "--colors",
+]);
+
+function searchPatternIndexes(words: string[]): Set<number> {
+	const ignored = new Set<number>();
+	let hasExplicitPattern = false;
+	for (let index = 0; index < words.length; index += 1) {
+		const value = words[index] ?? "";
+		if (SEARCH_PATTERN_OPTIONS.has(value)) {
+			if (index + 1 < words.length) ignored.add(++index);
+			hasExplicitPattern = true;
+		} else if (/^--regexp=/.test(value) || /^-e.+/.test(value)) {
+			ignored.add(index);
+			hasExplicitPattern = true;
+		} else if (SEARCH_VALUE_OPTIONS.has(value)) {
+			if (index + 1 < words.length) ignored.add(++index);
+		}
+	}
+	if (!hasExplicitPattern) {
+		for (let index = 0; index < words.length; index += 1) {
+			const value = words[index] ?? "";
+			if (value === "--") continue;
+			if (value.startsWith("-") && value !== "-") continue;
+			ignored.add(index);
+			break;
+		}
+	}
+	return ignored;
+}
+
+function segmentHasDirectLegionDbAccess(tokens: ShellToken[]): boolean {
+	const commandIndex = tokens.findIndex((token) => token.kind === "word");
+	if (commandIndex < 0) return false;
+	const command = tokens[commandIndex]?.value.split(/[\\/]/).at(-1)?.toLowerCase() ?? "";
+	const isGitGrep = command === "git" && tokens[commandIndex + 1]?.value === "grep";
+	const isSearch = SEARCH_COMMANDS.has(command) || isGitGrep;
+	const argumentsStart = commandIndex + (isGitGrep ? 2 : 1);
+	// Pattern files are input files even though a plain grep pattern is excluded
+	// below. Check their value slots before classifying positional arguments.
+	if (isSearch) {
+		for (let index = argumentsStart; index < tokens.length; index += 1) {
+			const token = tokens[index];
+			if (token?.kind !== "word") continue;
+			if ((token.value === "-f" || token.value === "--file") && tokens[index + 1]?.kind === "word") {
+				if (isLegionDbPath(tokens[index + 1]?.value ?? "")) return true;
+				index += 1;
+			} else if (token.value.startsWith("--file=") && isLegionDbPath(token.value.slice("--file=".length))) {
+				return true;
+			}
+		}
+	}
+	// Shell redirection targets are file access even for echo/printf. Here-doc
+	// delimiters and descriptor duplication do not name a ledger file.
+	for (let index = commandIndex + 1; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (!token || token.kind !== "operator") continue;
+		if (["<<", "<<<", "<&", ">&"].includes(token.value)) continue;
+		const target = tokens[index + 1];
+		if (target?.kind === "word" && isLegionDbPath(target.value)) return true;
+	}
+	if (PRINT_ONLY_COMMANDS.has(command)) return false;
+	const words = tokens.slice(argumentsStart).filter((token) => token.kind === "word").map((token) => token.value);
+	const ignoredPatterns = isSearch ? searchPatternIndexes(words) : new Set<number>();
+	let wordIndex = -1;
+	for (const token of tokens.slice(argumentsStart)) {
+		if (token.kind !== "word") continue;
+		wordIndex += 1;
+		if (!ignoredPatterns.has(wordIndex) && isLegionDbPath(token.value)) return true;
+	}
+	return false;
+}
+
+function directLegionDbAccess(command: string): boolean {
+	let segment: ShellToken[] = [];
+	for (const token of shellTokens(command)) {
+		if (token.kind === "operator" && ["|", "||", "&", "&&", ";"].includes(token.value)) {
+			if (segmentHasDirectLegionDbAccess(segment)) return true;
+			segment = [];
+		} else {
+			segment.push(token);
+		}
+	}
+	return segmentHasDirectLegionDbAccess(segment);
+}
+
 export function forbiddenChildReason(
 	command: string,
 	env: ChildGuardEnv = {},
 ): string | undefined {
-	for (const chunk of shellChunks(command)) {
-		const argv = herdrArgv(chunk);
-		if (!argv) continue;
-		const reason = classifyChildHerdr(argv, env);
-		if (reason) return reason;
+	if (directLegionDbAccess(command)) {
+		return "do not read or write legion.db directly from bash; use the legion tools.";
 	}
-
-	if (isReadOnlyRole(env.acceptanceRole)) {
-		const write = classifyReadonlyBash(command);
-		if (write) return write;
-	}
-
+	if (isReadOnlyRole(env.acceptanceRole)) return classifyReadonlyBash(command);
 	return undefined;
 }
 
-export function childGuardEnvFromProcess(
-	env: NodeJS.ProcessEnv = process.env,
-): ChildGuardEnv {
-	return {
-		...(env.HERDR_PANE_ID ? { paneId: env.HERDR_PANE_ID } : {}),
-		...(env[CHILD_ACCEPTANCE_ROLE_ENV]
-			? { acceptanceRole: env[CHILD_ACCEPTANCE_ROLE_ENV] }
-			: {}),
-	};
+export function childGuardEnvFromProcess(env: NodeJS.ProcessEnv = process.env): ChildGuardEnv {
+	return env[CHILD_ACCEPTANCE_ROLE_ENV]
+		? { acceptanceRole: env[CHILD_ACCEPTANCE_ROLE_ENV] }
+		: {};
 }
 
-/** Child-only extension: intercept tools, do not register the subagent tool. */
+/** Child-only extension: intercept tools; do not register the parent tool. */
 export function registerChildGuard(pi: ExtensionAPI): void {
 	const budget = childBudgetFromEnv();
 	let toolCalls = 0;
 	let turns = 0;
-
-	pi.on("turn_start", () => {
-		turns += 1;
-	});
-
+	pi.on("turn_start", () => { turns += 1; });
 	pi.on("tool_call", (event) => {
 		toolCalls += 1;
-		if (
-			budget.maxToolCalls !== undefined &&
-			toolCalls > budget.maxToolCalls
-		) {
-			return {
-				block: true,
-				reason: blockChildMessage(
-					budgetExceededReason("tool", budget.maxToolCalls),
-				),
-			};
+		if (budget.maxToolCalls !== undefined && toolCalls > budget.maxToolCalls) {
+			return { block: true, reason: blockChildMessage(budgetExceededReason("tool", budget.maxToolCalls)) };
 		}
 		if (budget.maxTurns !== undefined && turns > budget.maxTurns) {
-			return {
-				block: true,
-				reason: blockChildMessage(
-					budgetExceededReason("turn", budget.maxTurns),
-				),
-			};
+			return { block: true, reason: blockChildMessage(budgetExceededReason("turn", budget.maxTurns)) };
 		}
-
 		if (event.toolName !== "bash") return;
-		const command =
-			typeof event.input.command === "string" ? event.input.command : "";
+		const command = typeof event.input.command === "string" ? event.input.command : "";
 		const reason = forbiddenChildReason(command, childGuardEnvFromProcess());
-		if (reason) {
-			return { block: true, reason: blockChildMessage(reason) };
-		}
+		if (reason) return { block: true, reason: blockChildMessage(reason) };
 		if (budget.toolTimeoutMs && budget.toolTimeoutMs > 0) {
-			event.input.command = wrapBashWithTimeout(
-				command,
-				budget.toolTimeoutMs,
-			);
+			event.input.command = wrapBashWithTimeout(command, budget.toolTimeoutMs);
 		}
 		return undefined;
 	});

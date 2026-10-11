@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Isolated docker check: kind/model argv matrix + host CLIs (pi/cb, codebuddy, cursor).
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-chmod +x "$ROOT/test/docker/"*.sh "$ROOT/test/docker/"*.mjs 2>/dev/null || true
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+chmod +x "$ROOT/test/legacy/docker/"*.sh "$ROOT/test/legacy/docker/"*.mjs 2>/dev/null || true
 export DOCKER_PI_HOME="${DOCKER_PI_HOME:-/tmp/pi-herdr-kinds-docker-home}"
 bash "$ROOT/test/docker/prepare-home.sh"
 
@@ -18,7 +18,7 @@ CODEBUDDY_HOME="${CODEBUDDY_HOME:-/root/.codebuddy}"
 MOUNTS=(
   -v "$ROOT:/plugin:ro"
   -v "$DOCKER_PI_HOME:/root"
-  -v "$ROOT/test/docker:/opt/test:ro"
+  -v "$ROOT/test/legacy/docker:/opt/test:ro"
 )
 if [ -d "$CODEBUDDY_PKG" ]; then
   MOUNTS+=(-v "$CODEBUDDY_PKG:/opt/codebuddy-code:ro")

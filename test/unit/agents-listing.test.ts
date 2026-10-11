@@ -13,7 +13,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-	chmodSync,
 	mkdirSync,
 	mkdtempSync,
 	rmSync,
@@ -21,8 +20,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import herdrSubagents from "../../index.ts";
+import { FakeSupervisor } from "../helpers/fake-supervisor.ts";
 import {
 	parseAgentsScopeArg,
 	registerAgentsCommand,
@@ -66,10 +65,6 @@ function fakePi() {
 
 type FakePi = ReturnType<typeof fakePi>;
 
-const FAKE_HERDR_BIN = fileURLToPath(
-	new URL("../helpers/fake-herdr-bin.mjs", import.meta.url),
-);
-
 /**
  * Sandbox the environment around one interaction with the extension:
  * temp PI_CODING_AGENT_DIR (settings.json), extra agent dir, fake herdr.
@@ -91,7 +86,6 @@ async function withSandbox(
 		child: process.env.PI_SUBAGENT_CHILD,
 		extra: process.env.PI_HERDR_SUBAGENTS_EXTRA_AGENT_DIRS,
 		agentDir: process.env.PI_CODING_AGENT_DIR,
-		bin: process.env.HERDR_BIN,
 	};
 	try {
 		// The tool is not registered inside a child process.
@@ -126,18 +120,8 @@ async function withSandbox(
 			writeFileSync(path.join(projectAgents, file), frontmatter);
 		}
 
-		// Hermetic herdr stub: never invoked by these tests, but the extension
-		// factory must be able to load without a real herdr present.
-		const stub = path.join(dir, "fake-herdr");
-		writeFileSync(
-			stub,
-			`#!/bin/sh\nexec "${process.execPath}" "${FAKE_HERDR_BIN}" "$@"\n`,
-		);
-		chmodSync(stub, 0o755);
-		process.env.HERDR_BIN = stub;
-
 		const pi = fakePi();
-		herdrSubagents(pi as never);
+		herdrSubagents(pi as never, { supervisor: new FakeSupervisor() });
 		await run({ pi, messages: pi.messages, projectRoot });
 	} finally {
 		if (previous.child === undefined) delete process.env.PI_SUBAGENT_CHILD;
@@ -147,8 +131,6 @@ async function withSandbox(
 		else process.env.PI_HERDR_SUBAGENTS_EXTRA_AGENT_DIRS = previous.extra;
 		if (previous.agentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previous.agentDir;
-		if (previous.bin === undefined) delete process.env.HERDR_BIN;
-		else process.env.HERDR_BIN = previous.bin;
 		rmSync(dir, { recursive: true, force: true });
 	}
 }

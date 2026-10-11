@@ -64,7 +64,6 @@ function child(
 ): ChildRecord {
 	return {
 		name,
-		paneId: "w1:p1",
 		sessionFile: path.join(rootDir, `${name}.jsonl`),
 		ownerToken: `token-${name}`,
 		state: "retired",
@@ -114,7 +113,7 @@ test("aggregateSubagentRuns groups by agent, prefers execution snapshots, and fa
 		const run = store.createRun({
 			task: "summary fixture",
 			cwd,
-			herdr: { parentPaneId: "w1:p0" },
+			herdr: { supervisor: "rpc" },
 		});
 		const reviewer0 = child(
 			root,
@@ -155,7 +154,6 @@ test("aggregateSubagentRuns groups by agent, prefers execution snapshots, and fa
 			{
 				agent: "worker",
 				state: "working",
-				paneId: "w1:p2",
 				sessionFile: path.join(root, "worker-0.jsonl"),
 			},
 		);
@@ -208,7 +206,7 @@ test("aggregateSubagentRuns groups by agent, prefers execution snapshots, and fa
 	}
 });
 
-test("non-pi zero session usage is unavailable, and awaiting execution counts as both outcome and running", async () => {
+test("legacy non-pi records retain usage safeguards, and awaiting execution counts as outcome and running", async () => {
 	const root = tempRoot();
 	try {
 		const cwd = path.join(root, "project");
@@ -224,7 +222,6 @@ test("non-pi zero session usage is unavailable, and awaiting execution counts as
 			kind: "pi",
 			agent: "worker",
 			state: "awaiting",
-			paneId: "w1:p3",
 			sessionFile: path.join(root, "awaiting.jsonl"),
 			execution: {
 				status: "success",
@@ -293,7 +290,7 @@ test("a missing or empty session file yields no usage, not parser-shaped zeros",
 	}
 });
 
-test("a running non-pi child does not display stale session usage", async () => {
+test("a running legacy child does not display stale session usage", async () => {
 	const root = tempRoot();
 	try {
 		const cwd = path.join(root, "project");
@@ -327,22 +324,17 @@ test("a running non-pi child does not display stale session usage", async () => 
 });
 
 test("formatSubagentSummary renders the fixed seven-column table and empty state", () => {
-	const empty = formatSubagentSummary(aggregateSubagentRuns([]), { cwd: "/tmp/project", parentPaneId: "w8:p1" });
-	assert.equal(
-		empty,
-		"No subagent runs under this session (parent pane w8:p1).\nLaunch children with the subagent tool to see them here.",
-	);
-	const noPane = formatSubagentSummary(aggregateSubagentRuns([]), { cwd: "/tmp/project" });
-	assert.match(noPane, /^No subagent runs under \/tmp\/project\./);
+	const empty = formatSubagentSummary(aggregateSubagentRuns([]), { cwd: "/tmp/project" });
+	assert.match(empty, /^No subagent runs under \/tmp\/project\./);
 });
 
-test("formatSubagentDetail includes available fields and omits missing pane/tab/worktree data", () => {
+test("formatSubagentDetail includes RPC fields and omits legacy pane/tab data", () => {
 	const run: RunRecord = {
 		schemaVersion: 1,
 		runId: "r-detail",
 		task: "detail",
 		cwd: "/tmp/project",
-		herdr: {},
+		herdr: { supervisor: "rpc" },
 		path: [],
 		depth: 0,
 		maxDepth: 1,
@@ -354,7 +346,6 @@ test("formatSubagentDetail includes available fields and omits missing pane/tab/
 	const childRecord = child("/tmp/project", "reviewer-0", "2026-01-01T04:21:53.000Z", {
 		agent: "reviewer",
 		kind: "pi",
-		paneId: null,
 		retiredAt: "2026-01-01T04:27:37.000Z",
 		model: "cb/kimi-k3",
 		thinking: "max",
@@ -370,7 +361,8 @@ test("formatSubagentDetail includes available fields and omits missing pane/tab/
 	const output = formatSubagentDetail({ run, child: childRecord, cwd: "/tmp/project" });
 	assert.match(output, /^reviewer-0 — reviewer \(pi\)/);
 	assert.match(output, /state: retired · execution: success · model: cb\/kimi-k3 · thinking: max/);
-	assert.match(output, /run: r-detail · pane: \(recycled\)/);
+	assert.match(output, /run: r-detail · supervisor: rpc/);
+	assert.doesNotMatch(output, /pane:/);
 	assert.match(output, /time: \d\d:21:53 → \d\d:27:37 \(5m44s\)/);
 	assert.match(output, /usage: 34\.0K in · 7\.6K out · 525K cache · \$0\.37/);
 	assert.match(output, /turns: 1 · tool errors: 6 · acceptance: rejected \(attested\)/);
@@ -382,11 +374,10 @@ test("formatSubagentDetail includes available fields and omits missing pane/tab/
 test("registerSummaryCommand registers completion and emits slash text", async () => {
 	const root = tempRoot();
 	const oldCwd = process.cwd();
-	const oldPane = process.env.HERDR_PANE_ID;
 	try {
 		const cwd = path.join(root, "project");
 		const store = new RunStore({ rootDir: path.join(cwd, ".pi-subagents") });
-		const run = store.createRun({ task: "command", cwd, herdr: { parentPaneId: "w9:p1" } });
+		const run = store.createRun({ task: "command", cwd, herdr: { supervisor: "rpc" } });
 		const entry = child(root, "reviewer-0", new Date(Date.now() - 1000).toISOString(), {
 			agent: "reviewer",
 			kind: "pi",
@@ -394,7 +385,7 @@ test("registerSummaryCommand registers completion and emits slash text", async (
 		});
 		writeFileSync(entry.sessionFile, "");
 		await store.addChild(run.runId, entry);
-		const otherRun = store.createRun({ task: "other parent", cwd, herdr: { parentPaneId: "w9:other" } });
+		const otherRun = store.createRun({ task: "other parent", cwd, herdr: { supervisor: "rpc" } });
 		const otherEntry = child(root, "planner-0", new Date(Date.now() - 1000).toISOString(), {
 			agent: "planner",
 			kind: "pi",
@@ -415,12 +406,11 @@ test("registerSummaryCommand registers completion and emits slash text", async (
 		registerSummaryCommand(fakePi);
 		const command = commands.get("subagents-summary");
 		assert.ok(command);
-		process.env.HERDR_PANE_ID = "w9:p1";
 		await command.handler("", { cwd, ui: { notify() {} } });
 		assert.equal(messages.length, 1);
 		assert.match(messages[0] ?? "", /Subagents session summary/);
-		assert.match(messages[0] ?? "", /1 children/);
-		assert.doesNotMatch(messages[0] ?? "", /planner/);
+		assert.match(messages[0] ?? "", /2 children/);
+		assert.match(messages[0] ?? "", /planner/);
 		await command.handler("--all", { cwd, ui: { notify() {} } });
 		assert.match(messages[1] ?? "", /2 children/);
 		assert.match(messages[1] ?? "", /planner/);
@@ -447,8 +437,6 @@ test("registerSummaryCommand registers completion and emits slash text", async (
 		assert.deepEqual(unknownFlag, []);
 	} finally {
 		process.chdir(oldCwd);
-		if (oldPane === undefined) delete process.env.HERDR_PANE_ID;
-		else process.env.HERDR_PANE_ID = oldPane;
 		rmSync(root, { recursive: true, force: true });
 	}
 });

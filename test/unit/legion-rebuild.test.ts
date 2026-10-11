@@ -23,10 +23,10 @@ test("rebuild reconstructs root, centurion, worker, events and usage from run.js
 	const centurionSession = path.join(rootDir, "centurion.jsonl");
 	const workerSession = path.join(childDir, "worker.jsonl");
 	const root: RunRecord = {
-		schemaVersion: 1, runId: "r-root", task: "root", cwd: sandbox, herdr: {}, path: [],
+		schemaVersion: 1, runId: "r-root", task: "root", cwd: sandbox, herdr: { supervisor: "rpc" }, path: [],
 		depth: 0, maxDepth: 4,
 		children: [{
-			name: "centurion", paneId: null, sessionFile: centurionSession, ownerToken: "root-token",
+			name: "centurion", sessionFile: centurionSession, ownerToken: "root-token",
 			state: "working", spawnedAt: new Date(1_000).toISOString(), agent: "centurion", kind: "pi",
 			worktreePath: "/tmp/team-a",
 		}],
@@ -37,7 +37,7 @@ test("rebuild reconstructs root, centurion, worker, events and usage from run.js
 		...root, runId: "r-centurion", task: "team", path: [{ runId: "r-root", agent: "centurion" }],
 		depth: 1,
 		children: [{
-			name: "worker", paneId: null, sessionFile: workerSession, ownerToken: "worker-token",
+			name: "worker", sessionFile: workerSession, ownerToken: "worker-token",
 			state: "exited", execution: { status: "success", turns: 1, usage: { input: 12, output: 8, cacheRead: 2, cacheWrite: 1, cost: 0.42 } },
 			spawnedAt: new Date(2_000).toISOString(), agent: "worker", kind: "pi",
 		}],

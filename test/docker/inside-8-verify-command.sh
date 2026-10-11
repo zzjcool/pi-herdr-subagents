@@ -4,6 +4,6 @@ cd /plugin
 node --experimental-strip-types --test test/unit/acceptance.test.ts
 echo "===== UNIT IN CONTAINER PASS ====="
 node --experimental-strip-types --test \
-  --test-name-pattern "verification-output|criterion command|times out" \
+  --test-name-pattern "required verification command|live child timeout|verification-output|criterion command|times out" \
   test/integration/orchestrator.test.ts test/unit/acceptance.test.ts
-echo "===== RESULT: PASS verify command + timeout ====="
+echo "===== RESULT: PASS RPC verify command + timeout ====="

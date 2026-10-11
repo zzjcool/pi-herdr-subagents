@@ -39,7 +39,7 @@ const CORRUPT_SUFFIX = ".corrupt";
 const ARTIFACT_DIR = "out";
 const SESSION_EXT = ".jsonl";
 
-/** 16 hex chars of entropy per child — proves ownership of a pane. */
+/** 16 hex chars of entropy give each persisted child a stable owner token. */
 function newOwnerToken(): string {
 	return randomBytes(8).toString("hex");
 }
@@ -80,17 +80,14 @@ export function sanitizeNameForFs(name: string): string {
 }
 
 /**
- * Resolve a child handle across runs belonging to one parent Pi.
+ * Resolve a child handle across runs within the current cwd.
  *
- * Names are reused after recycle (F16), and `.pi-subagents` is per-cwd, so a
- * naive oldest-first scan can return another parent's `scout-0` or a stale
- * retired record. Filter by `parentPaneId` when we have one, then prefer a
- * live child, then the newest run.
+ * Names are reused after retirement, so prefer a live child and then the newest
+ * run record. The v2 RPC name registry replaces parent-pane scoping.
  */
 export function pickChildByName(
 	runs: readonly RunRecord[],
 	name: string,
-	opts?: { parentPaneId?: string },
 ): { run: RunRecord; child: ChildRecord } | null {
 	const matches: Array<{ run: RunRecord; child: ChildRecord }> = [];
 	for (const run of runs) {
@@ -99,16 +96,10 @@ export function pickChildByName(
 	}
 	if (matches.length === 0) return null;
 
-	const owner = opts?.parentPaneId?.trim();
-	const pool = owner
-		? matches.filter((m) => m.run.herdr.parentPaneId === owner)
-		: matches;
-	if (pool.length === 0) return null;
-
-	const live = pool.filter(
+	const live = matches.filter(
 		(m) => m.child.state !== "retired" && m.child.state !== "exited",
 	);
-	const pickFrom = live.length > 0 ? live : pool;
+	const pickFrom = live.length > 0 ? live : matches;
 	const ranked = [...pickFrom].sort((a, b) =>
 		b.run.createdAt.localeCompare(a.run.createdAt),
 	);

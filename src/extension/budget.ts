@@ -1,8 +1,8 @@
 /**
  * Child-process budgets: tool calls, turns, and per-bash timeouts.
  *
- * The parent injects these as env on the pane; `registerChildGuard` reads them
- * and blocks or wraps tool calls. 0 means "none allowed", not "unlimited".
+ * The parent injects these into the RPC child environment; `registerChildGuard`
+ * reads them and blocks or wraps tool calls. 0 means "none allowed", not "unlimited".
  */
 
 export const MAX_TOOL_CALLS_ENV = "PI_SUBAGENT_MAX_TOOL_CALLS";

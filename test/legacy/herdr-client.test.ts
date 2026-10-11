@@ -1,6 +1,7 @@
 /**
- * W4 tests for src/herdr/client.ts — written from IMPLEMENTATION.md's spec
- * (findings F1/F7/F11/F16/F17/F19/F21/F22), using the in-memory fake herdr.
+ * Legacy-only tests for the archived v0.16.x Herdr client. Not part of the RPC
+ * mainline suite (`npm test`); run manually with `node --experimental-strip-types
+ * --test test/legacy/herdr-client.test.ts` when changing the legacy transport.
  */
 
 import { test } from "node:test";
@@ -8,14 +9,15 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createHerdrClient, parseHerdrResponse } from "../../src/herdr/client.ts";
-import { ErrorCodes, type CommandRunner } from "../../src/shared/types.ts";
-import { createCommandRunner, resolveHerdrBin } from "../../src/herdr/runner.ts";
+import { createHerdrClient, parseHerdrResponse } from "../../src/backends/legacy/client.ts";
+import { ErrorCodes } from "../../src/shared/types.ts";
+import type { CommandRunner } from "../../src/backends/legacy/types.ts";
+import { createCommandRunner, resolveHerdrBin } from "../../src/backends/legacy/runner.ts";
 import {
 	FakeHerdr,
 	createFakeRunner,
 	createMissingBinaryRunner,
-} from "../helpers/fake-herdr.ts";
+} from "./helpers/fake-herdr.ts";
 
 // ── Required test cases (client): parseHerdrResponse ─────────────────────────
 

@@ -18,7 +18,9 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
-import { createHerdrClient } from "./src/herdr/client.ts";
+import { RpcSupervisor } from "./src/supervisor/rpc-supervisor.ts";
+import type { LegionSupervisor } from "./src/supervisor/types.ts";
+import { InMemoryUIProxy, type UIProxy } from "./src/supervisor/ui-proxy.ts";
 import { discoverAgents, findAgent, formatAgentRoster, BUILTIN_AGENTS_DIR } from "./src/agents/agents.ts";
 import {
 	applyAgentOverrides,
@@ -46,7 +48,6 @@ import {
 	followUpFor,
 } from "./src/extension/blocked.ts";
 import { formatAlreadyRecycled } from "./src/extension/recycle.ts";
-import { ParentPaneLabeler } from "./src/extension/parent-label.ts";
 import {
 	SUBAGENT_NOTIFY_TYPE,
 } from "./src/extension/notify.ts";
@@ -58,21 +59,12 @@ import {
 	registerToggleCommand,
 } from "./src/extension/slash.ts";
 import { registerSummaryCommand } from "./src/extension/summary.ts";
-import {
-	blockMessage,
-	forbiddenDispatchReason,
-	PARENT_PLAYBOOK,
-	TOOL_DESCRIPTION,
-} from "./src/extension/playbook.ts";
+import { PARENT_PLAYBOOK, TOOL_DESCRIPTION } from "./src/extension/playbook.ts";
 import { getAgentDir } from "./src/agents/paths.ts";
 import {
 	effectiveMaxDepth,
 	Orchestrator,
 } from "./src/runs/orchestrator.ts";
-import {
-	createSessionLayout,
-	type SessionLayout,
-} from "./src/runs/layout.ts";
 import { RunStore, pickChildByName } from "./src/runs/store.ts";
 import { resolveLaunchWorktree } from "./src/runs/worktree.ts";
 import {
@@ -81,21 +73,13 @@ import {
 	DEFAULTS,
 	DEFAULT_ON_BLOCKED,
 	ErrorCodes,
-	type HerdrClient,
 	type ModelOrigin,
-	type Placement,
 	SubagentError,
 } from "./src/shared/types.ts";
 
 // ---------------------------------------------------------------------------
 // Parameters
 // ---------------------------------------------------------------------------
-
-const PlacementSchema = Type.Union([
-	Type.Literal("split-down"),
-	Type.Literal("split-right"),
-	Type.Literal("new-tab"),
-]);
 
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
@@ -149,7 +133,6 @@ const SubagentParams = Type.Object({
 		Type.String({ description: "Named kind+model+thinking preset" }),
 	),
 	cwd: Type.Optional(Type.String()),
-	placement: Type.Optional(PlacementSchema),
 	worktree: Type.Optional(
 		Type.Boolean({
 			description:
@@ -197,7 +180,13 @@ const blockedUi = new WeakMap<
 // Extension
 // ---------------------------------------------------------------------------
 
-export default function herdrSubagents(pi: ExtensionAPI) {
+export interface ExtensionSupervisorDeps {
+	supervisor?: LegionSupervisor;
+	uiProxy?: UIProxy;
+	onBudgetRefused?: NonNullable<ConstructorParameters<typeof Orchestrator>[0]["onBudgetRefused"]>;
+}
+
+export default function herdrSubagents(pi: ExtensionAPI, deps: ExtensionSupervisorDeps = {}) {
 	const isChild = process.env.PI_SUBAGENT_CHILD === "1";
 	const allowNested = process.env[ALLOW_NESTED_ENV] === "1";
 	if (isChild) {
@@ -209,13 +198,13 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	// completed child to one line so visibility does not cost a screen.
 	pi.registerMessageRenderer(SUBAGENT_NOTIFY_TYPE, renderSubagentNotice);
 
-	// The parent pane's own id: absent when pi runs outside herdr, in which
-	// case every labeler call is a no-op.
-	const parentLabeler = new ParentPaneLabeler({
-		client: createHerdrClient(),
-		paneId: process.env.HERDR_PANE_ID,
+	const supervisor = deps.supervisor ?? new RpcSupervisor();
+	const rpcUIProxy = (supervisor as LegionSupervisor & { uiProxy?: UIProxy }).uiProxy;
+	const uiProxy = deps.uiProxy ?? rpcUIProxy ?? new InMemoryUIProxy();
+	const onBudgetRefused = deps.onBudgetRefused ?? ((event) => {
+		try { pi.events.emit("pi-legion:budget_refused", event); } catch { /* optional host event */ }
 	});
-	const layout = createSessionLayout();
+	let lastUi: ExtensionContext["ui"] | undefined;
 	let lastModelRegistry: ExtensionContext["modelRegistry"] | undefined;
 	let lastConfirm: ((message: string) => Promise<boolean>) | undefined;
 	let lastCwd = process.cwd();
@@ -226,20 +215,8 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 	const runtime = createSessionRuntime({
 		sendMessage: (message, options) => pi.sendMessage(message, options),
 		emitBusy: (active, label) => {
-			// Sidebar annotation (research option C): herdr's own integration
-			// reports the parent `idle` the moment its turn settles — exactly
-			// when it is WAITING on subagents. Label the idle state so the
-			// sidebar says `waiting` instead of reading done. Display-layer only;
-			// the status icon stays herdr's call.
-			parentLabeler.report(active ? label : undefined);
-			try {
-				pi.events.emit(
-					"herdr:busy",
-					active ? { active: true, label } : { active: false },
-				);
-			} catch {
-				// herdr's busy overlay is optional; the TUI widget is the primary signal.
-			}
+			try { pi.events.emit("pi-legion:busy", active ? { active: true, label } : { active: false }); }
+			catch { /* optional display integration */ }
 		},
 	});
 	blockedUi.set(runtime, {
@@ -255,7 +232,7 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 					{ triggerTurn: true, deliverAs: "followUp" },
 				);
 			} catch {
-				// Parent session is gone; the child pane stays open for a later steer.
+				// Parent session may already be gone.
 			}
 		},
 	});
@@ -347,14 +324,6 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 					ErrorCodes.DISABLED,
 				);
 			}
-			const client = createHerdrClient();
-			if (!(await client.available())) {
-				return fail(
-					"herdr is not available. Install it (https://herdr.dev) or check HERDR_BIN.",
-					ErrorCodes.HERDR_UNAVAILABLE,
-				);
-			}
-
 			const cwd = params.cwd ?? ctx.cwd;
 			const store = new RunStore({ rootDir: path.join(cwd, ".pi-subagents") });
 			const catalog = loadCatalog(ctx.cwd, cwd, params.agentScope);
@@ -373,14 +342,15 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 				return controlAction({
 					action,
 					params,
-					client,
+					supervisor,
+					uiProxy,
+					onBudgetRefused,
 					store,
 					cwd,
 					agents,
 					allAgents,
 					team,
 					runtime,
-					layout,
 					settings,
 				});
 			}
@@ -388,7 +358,9 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 			return launchFamily({
 				params,
 				ctx,
-				client,
+				supervisor,
+				uiProxy,
+				onBudgetRefused,
 				store,
 				cwd,
 				agents,
@@ -396,7 +368,6 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 				settings,
 				team,
 				runtime,
-				layout,
 				onUpdate,
 			});
 		},
@@ -421,22 +392,9 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 		};
 	});
 
-	pi.on("tool_call", (event, ctx) => {
-		if (event.toolName !== "bash") return;
-		// Master switch: when disabled, the user (or the model) may legitimately
-		// drive herdr by hand; the guard only makes sense while we own dispatch.
-		// Prefer the event's own ctx over lastCwd: it cannot go stale between
-		// the bindUi events that maintain lastCwd.
-		if (!subagentsEnabled(ctx?.cwd ?? lastCwd)) return;
-		const command =
-			typeof event.input.command === "string" ? event.input.command : "";
-		const reason = forbiddenDispatchReason(command);
-		if (!reason) return;
-		return { block: true, reason: blockMessage(reason) };
-	});
-
 	const bindUi = (_event: unknown, ctx: ExtensionContext): void => {
 		lastModelRegistry = ctx.modelRegistry;
+		lastUi = ctx.hasUI ? ctx.ui : undefined;
 		if (ctx.cwd) lastCwd = ctx.cwd;
 		runtime.bind(ctx);
 		lastConfirm =
@@ -444,6 +402,24 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 				? (message) => ctx.ui.confirm("", message)
 				: undefined;
 	};
+
+	uiProxy.onRequest((pending) => {
+		const ui = lastUi;
+		if (!ui) return;
+		const request = pending.request;
+		if (request.method === "confirm") return;
+		if (request.method === "select") {
+			void ui.select(request.title, request.options).then((value) => uiProxy.respond(pending.id, value === undefined ? { cancelled: true } : { value }));
+		} else if (request.method === "input") {
+			void ui.input(request.title, request.placeholder).then((value) => uiProxy.respond(pending.id, value === undefined ? { cancelled: true } : { value }));
+		} else if (request.method === "editor") {
+			void ui.editor(request.title, request.prefill).then((value) => uiProxy.respond(pending.id, value === undefined ? { cancelled: true } : { value }));
+		} else if (request.method === "notify") ui.notify(request.message, request.notifyType);
+		else if (request.method === "setStatus") ui.setStatus(request.statusKey, request.statusText);
+		else if (request.method === "setWidget") ui.setWidget(request.widgetKey, request.widgetLines, { placement: request.widgetPlacement });
+		else if (request.method === "setTitle") ui.setTitle(request.title);
+		else if (request.method === "set_editor_text") ui.setEditorText(request.text);
+	});
 
 	pi.on("session_start", bindUi);
 	pi.on("session_info_changed", bindUi);
@@ -462,9 +438,12 @@ export default function herdrSubagents(pi: ExtensionAPI) {
 		bindUi(_event, ctx);
 		runtime.refreshUi();
 	});
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", async () => {
+		const children = runtime.activeJobs();
 		runtime.dispose();
-		void parentLabeler.clear();
+		await Promise.all(
+			children.map((job) => job.retire?.().catch(() => {})),
+		);
 	});
 }
 
@@ -533,14 +512,15 @@ export function loadCatalog(
 async function controlAction(input: {
 	action: string;
 	params: SubagentParams;
-	client: HerdrClient;
+	supervisor: LegionSupervisor;
+	uiProxy: UIProxy;
+	onBudgetRefused: NonNullable<ConstructorParameters<typeof Orchestrator>[0]["onBudgetRefused"]>;
 	store: RunStore;
 	cwd: string;
 	agents: AgentConfig[];
 	allAgents: AgentConfig[];
 	team: ActiveTeam;
 	runtime: SessionRuntime;
-	layout: SessionLayout;
 	settings: ReturnType<typeof loadSubagentSettings>;
 }): Promise<AgentToolResult<unknown>> {
 	const { action, params, store, cwd } = input;
@@ -579,15 +559,14 @@ async function controlAction(input: {
 	if (!found) return unknownChild(params.name, store, cwd);
 
 	const orchestrator = new Orchestrator({
-		client: input.client,
+		supervisor: input.supervisor,
+		uiProxy: input.uiProxy,
 		runDir: store.runDir(found.runId),
 		cwd,
-		layout: input.layout,
-		maxDepth: effectiveMaxDepth(input.settings.legion?.maxDepth),
-		workspaceId: process.env.HERDR_WORKSPACE_ID,
-		parentPaneId: process.env.HERDR_PANE_ID,
+		maxDepth: input.settings.legion?.maxDepth,
 		childContext: input.settings.childContext,
 		...teamForChildren(input.team),
+		onBudgetRefused: input.onBudgetRefused,
 	});
 	orchestrator.restore(found.run);
 
@@ -613,7 +592,9 @@ interface ChildContext {
 	params: SubagentParams;
 	/** Always set: `controlAction` rejects a request without a name. */
 	name: string;
-	client: HerdrClient;
+	supervisor: LegionSupervisor;
+	uiProxy: UIProxy;
+	onBudgetRefused: NonNullable<ConstructorParameters<typeof Orchestrator>[0]["onBudgetRefused"]>;
 	store: RunStore;
 	cwd: string;
 	agents: AgentConfig[];
@@ -635,14 +616,7 @@ function unknownChild(
 	store: RunStore,
 	cwd: string,
 ): AgentToolResult<unknown> {
-	const known = store
-		.listRuns()
-		.filter((r) => {
-			const owner = process.env.HERDR_PANE_ID?.trim();
-			if (!owner) return true;
-			return r.herdr.parentPaneId === owner;
-		})
-		.flatMap((r) => r.children.map((c) => c.name));
+	const known = store.listRuns().flatMap((run) => run.children.map((child) => child.name));
 	return fail(
 		`unknown child: ${name} (no run under ${cwd}/.pi-subagents` +
 			`${known.length ? `; known here: ${known.join(", ")}` : ""}). ` +
@@ -705,7 +679,7 @@ async function collectChild(
 	}
 }
 
-/** Recycle the child: snapshot the outcome, exit the agent, close the pane. */
+/** Retire the RPC child while preserving its outcome and session for resume. */
 async function retireChild(
 	ctx: ChildContext,
 ): Promise<AgentToolResult<unknown>> {
@@ -722,7 +696,7 @@ async function retireChild(
 		await persistChild(ctx.store, ctx.found.runId, ctx.orchestrator, ctx.name);
 		return ok(
 			`Retired ${ctx.name} (execution=${child.execution?.status ?? "unknown"}). ` +
-				`Pane closed; session kept for resume: ${child.sessionFile}`,
+				`RPC process stopped; session kept for resume: ${child.sessionFile}`,
 		);
 	} catch (error) {
 		return fail(`retire failed: ${String(error)}`, ErrorCodes.RETIRE_FAILED);
@@ -733,12 +707,12 @@ async function retireChild(
  * Continue or resume a child.
  *
  * A live agent is prompted in place; an exited one is relaunched from its
- * persisted session so its context survives the pane being gone (F12).
+ * persisted session so its context survives the process being gone (F12).
  */
 async function reviveChild(
 	ctx: ChildContext,
 ): Promise<AgentToolResult<unknown>> {
-	const { action, params, client, name, found, orchestrator } = ctx;
+	const { action, params, supervisor, name, found, orchestrator } = ctx;
 
 	if (!params.message) {
 		return fail(
@@ -760,23 +734,11 @@ async function reviveChild(
 	}
 
 	try {
-		const agentState = await client.agentGet(name);
-		if (agentState.ok) {
+		if (supervisor.isAlive(name)) {
 			await orchestrator.steer(name, params.message);
 			followChild(ctx, { watch: true });
 			return ok(
-				`${action === "resume" ? "Resumed" : "Continued"} ${name} (live agent prompted).`,
-			);
-		}
-		// Only a DEFINITIVE not-found means the agent exited and must be
-		// relaunched. Any other failure (a wedged or timed-out herdr CLI) says
-		// nothing about the child — relaunching now would collide with the live
-		// agent holding the name (F16) or spawn a duplicate.
-		if (agentState.error.code !== ErrorCodes.NOT_FOUND) {
-			return fail(
-				`${action} failed: cannot determine whether ${name} is alive ` +
-					`(herdr: ${agentState.error.message}). Retry shortly.`,
-				agentState.error.code,
+				`${action === "resume" ? "Resumed" : "Continued"} ${name} (live RPC child steered).`,
 			);
 		}
 
@@ -788,8 +750,7 @@ async function reviveChild(
 		});
 		followChild(ctx, { watch: true });
 		return ok(
-			`Resumed ${handle.name} from its session (pane ${handle.paneId}). ` +
-				`Context preserved from ${handle.sessionFile}`,
+			`Resumed ${handle.name} from its session. Context preserved from ${handle.sessionFile}`,
 		);
 	} catch (error) {
 		return fail(`${action} failed: ${String(error)}`, ErrorCodes.START_FAILED);
@@ -804,7 +765,9 @@ async function reviveChild(
 async function launchFamily(input: {
 	params: SubagentParams;
 	ctx: ExtensionContext;
-	client: HerdrClient;
+	supervisor: LegionSupervisor;
+	uiProxy: UIProxy;
+	onBudgetRefused: NonNullable<ConstructorParameters<typeof Orchestrator>[0]["onBudgetRefused"]>;
 	store: RunStore;
 	cwd: string;
 	agents: AgentConfig[];
@@ -812,11 +775,9 @@ async function launchFamily(input: {
 	settings: ReturnType<typeof resolveSubagentSettings>;
 	team: ActiveTeam;
 	runtime: SessionRuntime;
-	layout: SessionLayout;
 	onUpdate?: AgentToolUpdateCallback;
 }): Promise<AgentToolResult<unknown>> {
-	const { params, ctx, store, cwd, agents, settings, runtime, layout, onUpdate } =
-		input;
+	const { params, ctx, store, cwd, agents, settings, runtime, onUpdate } = input;
 
 	const plan = buildPlan(params);
 	if (!plan.ok) return fail(plan.message, ErrorCodes.INVALID_PARAMS);
@@ -825,39 +786,24 @@ async function launchFamily(input: {
 		content: [
 			{
 				type: "text",
-				text: `playbook: ${plan.steps.map((s) => s.agent).join(", ")} → type-tab → pane → start → watch`,
+				text: `playbook: ${plan.steps.map((s) => s.agent).join(", ")} → RPC launch → watch`,
 			},
 		],
 		details: {},
 	});
 
 	const maxDepth = effectiveMaxDepth(settings.legion?.maxDepth);
-	const run = store.createRun({
-		task: plan.task,
-		cwd,
-		maxDepth,
-		herdr: {
-			...(process.env.HERDR_WORKSPACE_ID
-				? { workspaceId: process.env.HERDR_WORKSPACE_ID }
-				: {}),
-			...(process.env.HERDR_PANE_ID
-				? { parentPaneId: process.env.HERDR_PANE_ID }
-				: {}),
-		},
-	});
+	const run = store.createRun({ task: plan.task, cwd, maxDepth, herdr: { supervisor: "rpc" } });
 	const orchestrator = new Orchestrator({
-		client: input.client,
+		supervisor: input.supervisor,
+		uiProxy: input.uiProxy,
 		runDir: store.runDir(run.runId),
 		cwd,
-		layout,
-		maxDepth,
-		// Enforce the session spawn budget so a runaway fan-out cannot exhaust
-		// the machine (ErrorCodes.BUDGET_EXCEEDED).
+		maxDepth: settings.legion?.maxDepth,
 		maxSpawns: settings.maxSubagentSpawnsPerSession ?? null,
-		workspaceId: process.env.HERDR_WORKSPACE_ID,
-		parentPaneId: process.env.HERDR_PANE_ID,
 		childContext: settings.childContext,
 		...teamForChildren(input.team),
+		onBudgetRefused: input.onBudgetRefused,
 	});
 
 	const session: LaunchSession = {
@@ -911,19 +857,9 @@ async function launchFamily(input: {
 		}
 	}
 
-	// Record the type-tab the children joined so a later process can see it.
-	if (orchestrator.tabId) {
-		await store.updateRun(run.runId, (r) => {
-			r.herdr = {
-				...r.herdr,
-				tabId: orchestrator.tabId ?? undefined,
-			};
-		});
-	}
-
 	if (isAsync && session.handles.length > 0) {
 		session.results.push(
-			"↳ async: a completion message is queued when each child finishes. If this session is idle it wakes immediately; if it is still working the notice waits until the current turn ends. Running children show next to the input. Do not tell children to message the parent; do not poll just to wait.",
+			"↳ async: a completion message is queued when each RPC child finishes. It wakes this session when idle; otherwise it is delivered after the current turn. Use wait or collect for results. Do not tell children to message the parent.",
 		);
 	}
 
@@ -998,9 +934,8 @@ async function launchStep(
 			return;
 		}
 
-		// Let `launch()` allocate: it consults the GLOBAL herdr name namespace.
-		// Pre-allocating here from local state alone would bypass that check and
-		// collide with another session's agent.
+		// Let `launch()` allocate from the supervisor-local registry; the index
+		// must not race separate subagent tool calls.
 		const handle = await session.orchestrator.launch({
 			agent: effective,
 			task: step.task,
@@ -1009,7 +944,6 @@ async function launchStep(
 			// dropped, and only this layer can tell them apart (a parent model
 			// arrives as the same `dispatch` source as a per-run override).
 			modelOrigin: model.modelOrigin,
-			...(model.placement ? { placement: model.placement } : {}),
 			worktree: resolveLaunchWorktree({
 				roleDefault: effective.worktree,
 				launch: session.params.worktree,
@@ -1022,7 +956,7 @@ async function launchStep(
 			session.timeoutByName.set(handle.name, effective.timeoutMs);
 		}
 		session.results.push(
-			`▶ ${handle.name} (${effective.name}) pane=${handle.paneId}`,
+			`▶ ${handle.name} (${effective.name}) supervisor=rpc`,
 		);
 		// An inherited model the target CLI cannot express is dropped on purpose
 		// (the parent's pi model means nothing to cursor). Say so, or the user
@@ -1038,7 +972,7 @@ async function launchStep(
 			content: [
 				{
 					type: "text",
-					text: `playbook: ${handle.name} started in ${handle.paneId}`,
+					text: `playbook: ${handle.name} started via RPC`,
 				},
 			],
 			details: {},
@@ -1100,7 +1034,7 @@ export function unknownAgentLineForCatalog(
 }
 
 /**
- * Resolve the model and placement one step will launch with.
+ * Resolve the model one step will launch with.
  *
  * The precedence logic itself lives in `resolveStepModel`
  * (`src/agents/step-model.ts`), which is pure and unit-tested; this wrapper
@@ -1114,7 +1048,6 @@ function resolveStep(
 	step: { model?: string; preset?: string },
 ): {
 	resolved: ReturnType<typeof resolveModel>;
-	placement?: Placement;
 	agent: AgentConfig;
 	modelOrigin: ModelOrigin;
 } {
@@ -1128,7 +1061,6 @@ function resolveStep(
 	});
 	return {
 		resolved: result.resolved,
-		...(params.placement ? { placement: params.placement as Placement } : {}),
 		agent: result.agent,
 		modelOrigin: result.modelOrigin,
 	};
@@ -1277,7 +1209,6 @@ function followJob(
 		.childrenSnapshot()
 		.find((entry) => entry.name === input.name);
 	const existing = runtime.get(input.name);
-	const nonPi = child?.kind && child.kind !== "pi";
 	runtime.track({
 		name: input.name,
 		runId: input.runId,
@@ -1288,9 +1219,6 @@ function followJob(
 		...(child?.model ? { model: child.model } : {}),
 		...(child?.thinking !== undefined ? { thinking: child.thinking } : {}),
 		...(child?.worktreeBranch ? { worktreeBranch: child.worktreeBranch } : {}),
-		...(nonPi
-			? { probe: () => input.orchestrator.probeProgress(input.name) }
-			: {}),
 		collect: () =>
 			input.orchestrator.collect(input.name, { timeoutMs: input.timeoutMs }),
 		persist: async () =>
@@ -1566,9 +1494,7 @@ function findChild(
 	run: ReturnType<RunStore["listRuns"]>[number];
 	child: NonNullable<ReturnType<RunStore["findChild"]>>;
 } | null {
-	const picked = pickChildByName(runs, name, {
-		parentPaneId: process.env.HERDR_PANE_ID,
-	});
+	const picked = pickChildByName(runs, name);
 	if (!picked) return null;
 	return { runId: picked.run.runId, run: picked.run, child: picked.child };
 }
@@ -1579,7 +1505,7 @@ function renderChild(
 ): AgentToolResult<unknown> {
 	const lines = [
 		`${child.name} — state=${child.state} agent=${child.agent ?? "?"} kind=${child.kind ?? "?"}`,
-		`pane=${child.paneId ?? "(recycled)"}`,
+		"supervisor=rpc",
 		`session=${child.sessionFile}`,
 	];
 	if (child.execution) {
@@ -1626,7 +1552,7 @@ function renderCollect(
 	];
 	if (collected.blocked) {
 		lines.push(
-			"blocked: waiting for a tool approval — the pane is still open. Approve in the parent confirm, or steer the child.",
+			"blocked: waiting for child UI approval. Answer the pending request in the parent UI, or steer the child.",
 		);
 	}
 

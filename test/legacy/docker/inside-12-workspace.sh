@@ -60,7 +60,7 @@ if (!pkgs.some((p) => String(p).includes("plugin") || String(p).includes("pi-leg
 JS
 
 echo "### 2. mock LLM + isolated herdr server"
-node /opt/test/mock-llm.mjs >/tmp/mock-llm.stdout 2>/tmp/mock-llm.stderr &
+node /opt/common/mock-llm.mjs >/tmp/mock-llm.stdout 2>/tmp/mock-llm.stderr &
 for i in $(seq 1 25); do
   if node -e 'fetch("http://127.0.0.1:8765/health").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'; then
     break

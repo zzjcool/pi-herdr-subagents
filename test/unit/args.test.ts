@@ -78,7 +78,7 @@ test("buildPiArgs allowNested omits the no-nested-agents constraint", () => {
 		const taskArg = built.args.find((a) => a.startsWith("@"));
 		assert.ok(taskArg);
 		const text = readFileSync(taskArg!.slice(1), "utf8");
-		assert.match(text, /Nested subagents are allowed/);
+		assert.match(text, /Nested subagents via `subagent` tool only/);
 		assert.doesNotMatch(text, /Do not spawn nested agents/);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });

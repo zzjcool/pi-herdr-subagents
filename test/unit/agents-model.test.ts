@@ -365,13 +365,21 @@ test("settings: validates herdr numeric fields", () => {
 	);
 });
 
-test("settings: rejects an invalid placement", () => {
-	assert.throws(() =>
-		parseSubagentSettings(
-			{ subagents: { herdr: { defaultPlacement: "sideways" } } },
-			"/s.json",
-		),
-	);
+test("settings: retains and warns for legacy defaultPlacement during migration", () => {
+	const original = console.warn;
+	const warnings: string[] = [];
+	try {
+		console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+		const settings = parseSubagentSettings(
+			{ subagents: { herdr: { defaultPlacement: "new-tab" } } },
+			"/legacy/settings.json",
+		);
+		assert.equal(settings.herdr?.defaultPlacement, "new-tab");
+		assert.equal(warnings.length, 1);
+		assert.match(warnings[0] ?? "", /deprecated and ignored/);
+	} finally {
+		console.warn = original;
+	}
 });
 
 test("settings: project settings win over user settings", () => {
@@ -594,6 +602,26 @@ test("agentOverrides: valid object values are accepted", () => {
 		worker: { model: "cb/glm-5.3" },
 		reviewer: { disabled: true },
 	});
+});
+
+test("applyOverride ignores the dead legacy Placement field", () => {
+	const override = { placement: "new-tab" } as unknown as Parameters<typeof applyOverride>[1];
+	const resolved = applyOverride(agent(), override);
+	assert.equal("placement" in resolved, false);
+});
+
+test("agentOverrides ignore legacy Placement in the RPC migration", () => {
+	const parsed = parseSubagentSettings(
+		{
+			subagents: {
+				agentOverrides: { worker: { model: "cb/glm-5.3", placement: "new-tab" } },
+				teams: { frontend: { members: [{ agent: "worker", placement: "split-down" }] } },
+			},
+		},
+		"/s.json",
+	);
+	assert.deepEqual(parsed.agentOverrides, { worker: { model: "cb/glm-5.3" } });
+	assert.deepEqual(parsed.teams?.frontend?.members, [{ agent: "worker" }]);
 });
 
 test("modelCandidates is unique and keeps an empty primary as one attempt", () => {

@@ -9,8 +9,8 @@ import * as path from "node:path";
 import {
 	nativeModelFor,
 	planKindStart,
-} from "../../src/runs/kind.ts";
-import type { AgentConfig, AgentKind } from "../../src/shared/types.ts";
+} from "../../../src/runs/kind.ts";
+import type { AgentConfig, AgentKind } from "../../../src/shared/types.ts";
 
 function agent(over: Partial<AgentConfig> = {}): AgentConfig {
 	return {

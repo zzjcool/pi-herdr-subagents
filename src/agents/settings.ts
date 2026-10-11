@@ -15,7 +15,6 @@ import {
 	type LegionSettings,
 	type ModelScopeConfig,
 	type OnBlockedPolicy,
-	type Placement,
 	type SubagentsSettings,
 	type TeamConfig,
 	type TeamMember,
@@ -27,12 +26,6 @@ import {
 import { OVERRIDE_FIELDS } from "./overrides.ts";
 import { parseModelScopeConfig } from "./model-scope.ts";
 import { parsePresets } from "./presets.ts";
-
-const VALID_PLACEMENTS: ReadonlySet<string> = new Set([
-	"split-down",
-	"split-right",
-	"new-tab",
-]);
 
 const PARENT_CONTEXT_CONVENTION = "subagents-parent-context.md";
 const CHILD_CONTEXT_CONVENTION = "subagents-child-context.md";
@@ -91,6 +84,8 @@ function nonNegativeInt(
 }
 
 const VALID_JOIN_MODES: ReadonlySet<string> = new Set(["each", "smart"]);
+const LEGACY_PLACEMENTS = ["split-down", "split-right", "new-tab"] as const;
+const warnedHerdrSettings = new Set<string>();
 
 const VALID_ON_BLOCKED_POLICIES: ReadonlySet<string> = new Set([
 	"forward",
@@ -129,16 +124,22 @@ function parseHerdrSettings(
 	}
 	const input = value as Record<string, unknown>;
 	const out: HerdrSettings = {};
+	if (!warnedHerdrSettings.has(filePath)) {
+		warnedHerdrSettings.add(filePath);
+		console.warn(
+			`[pi-legion] Settings 'subagents.herdr' in ${filePath} are deprecated and ignored by the RPC supervisor; remove them when migrating from v0.16.x.`,
+		);
+	}
 
 	const placement = input.defaultPlacement;
 	if (placement !== undefined) {
-		if (typeof placement !== "string" || !VALID_PLACEMENTS.has(placement)) {
+		if (typeof placement !== "string" || !LEGACY_PLACEMENTS.includes(placement as (typeof LEGACY_PLACEMENTS)[number])) {
 			throw new Error(
 				`Subagent settings in '${filePath}' have invalid 'herdr.defaultPlacement'; ` +
-					`expected one of: ${[...VALID_PLACEMENTS].join(", ")}.`,
+					`expected one of: ${[...LEGACY_PLACEMENTS].join(", ")}.`,
 			);
 		}
-		out.defaultPlacement = placement as Placement;
+		out.defaultPlacement = placement as NonNullable<HerdrSettings["defaultPlacement"]>;
 	}
 
 	const maxAgents = positiveInt(
@@ -518,7 +519,6 @@ function overrideFieldExpected(field: string): string | undefined {
 	if (["description", "model", "preset", "output", "systemPrompt"].includes(field)) return "a string";
 	if (field === "thinking") return "a string or false";
 	if (field === "kind") return `one of: ${AGENT_KINDS.join(", ")}`;
-	if (field === "placement") return "a valid placement";
 	if (field === "onBlocked") return "a valid onBlocked policy";
 	if (field === "systemPromptMode") return "replace or append";
 	if (["inheritProjectContext", "inheritSkills", "defaultProgress", "async", "completionGuard", "allowNestedSubagents", "disabled", "worktree", "steer"].includes(field)) return "a boolean";
@@ -532,7 +532,6 @@ function isValidOverrideField(field: string, value: unknown): boolean {
 	if (["description", "model", "preset", "output", "systemPrompt"].includes(field)) return typeof value === "string";
 	if (field === "thinking") return typeof value === "string" || value === false;
 	if (field === "kind") return typeof value === "string" && (AGENT_KINDS as readonly string[]).includes(value);
-	if (field === "placement") return typeof value === "string" && VALID_PLACEMENTS.has(value);
 	if (field === "onBlocked") return typeof value === "string" && VALID_ON_BLOCKED_POLICIES.has(value);
 	if (field === "systemPromptMode") return value === "replace" || value === "append";
 	if (["inheritProjectContext", "inheritSkills", "defaultProgress", "async", "completionGuard", "allowNestedSubagents", "disabled", "worktree", "steer"].includes(field)) return typeof value === "boolean";
@@ -557,7 +556,11 @@ function parseAgentOverride(
 			`Subagent settings in '${filePath}' have invalid '${field}'; expected an object of agent fields.`,
 		);
 	}
-	for (const [key, member] of Object.entries(value)) {
+	// Placement was a pane-only field. Ignore it during the RPC migration even
+	// though older settings files may still carry it in an agent override.
+	const normalized: Record<string, unknown> = { ...value };
+	delete normalized.placement;
+	for (const [key, member] of Object.entries(normalized)) {
 		const expected = overrideFieldExpected(key);
 		if (
 			expected &&
@@ -569,7 +572,7 @@ function parseAgentOverride(
 			);
 		}
 	}
-	return value as AgentOverride;
+	return normalized as AgentOverride;
 }
 
 /**
@@ -586,14 +589,18 @@ function parseAgentOverrides(
 			`Subagent settings in '${filePath}' have invalid 'agentOverrides'; expected an object.`,
 		);
 	}
+	const parsed: NonNullable<SubagentsSettings["agentOverrides"]> = {};
 	for (const [name, override] of Object.entries(value)) {
 		if (!isRecord(override)) {
 			throw new Error(
 				`Subagent settings in '${filePath}' have invalid 'agentOverrides.${name}'; expected an object of agent fields.`,
 			);
 		}
+		const normalized: Record<string, unknown> = { ...override };
+		delete normalized.placement;
+		parsed[name] = normalized as AgentOverride;
 	}
-	return value as SubagentsSettings["agentOverrides"];
+	return parsed;
 }
 
 type InvalidTeamSetting = (field: string, expected: string) => never;

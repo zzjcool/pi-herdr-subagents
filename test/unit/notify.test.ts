@@ -49,7 +49,7 @@ test("formatCompletionNotice: success is displayed and carries renderer details"
 	assert.match(notice.content, /execution: success/);
 	assert.match(notice.content, /done the thing/);
 	assert.match(notice.content, /Session file: \/tmp\/worker-0\.jsonl/);
-	assert.match(notice.content, /Pane recycled/);
+	assert.match(notice.content, /RPC child retired/);
 });
 
 test("formatCompletionNotice: failure is displayed", () => {
@@ -160,7 +160,7 @@ test("formatCollectFailure wraps an exception as a failed notice", () => {
 	const notice = formatCollectFailure("w1", new Error("gone"));
 	assert.equal(notice.status, "failed");
 	assert.match(notice.content, /gone/);
-	assert.doesNotMatch(notice.content, /Pane recycled/);
+	assert.doesNotMatch(notice.content, /RPC child retired/);
 });
 
 test("completionDeliveryOptions follows up instead of steering", () => {
@@ -388,21 +388,21 @@ test("formatGroupedNotice: multiple entries merge into one notice with a header"
 	assert.match(notice.content, /Run: r-1/);
 	assert.match(notice.content, /- worker-0 \(worker\): completed — acceptance: accepted \(attested\)/);
 	assert.match(notice.content, /- worker-1 \(worker\): completed — acceptance: accepted \(attested\)/);
-	assert.match(notice.content, /\(pane recycled\)/);
+	assert.match(notice.content, /\(RPC child retired\)/);
 });
 
-test("formatGroupedNotice: recycle markers are per-entry, not a blanket footer", () => {
-	// A wait()-released sibling can race the flush window: the blanket
-	// "Pane recycled" footer used to lie about panes that were still open.
+test("formatGroupedNotice: retirement markers are per-entry, not a blanket footer", () => {
+	// A wait()-released sibling can race the flush window: a blanket retirement
+	// footer would be inaccurate while another RPC child is still alive.
 	const notice = formatGroupedNotice({
 		entries: [
 			groupedEntry({ name: "kept", recycled: false }),
 			groupedEntry({ name: "gone" }),
 		],
 	});
-	assert.match(notice.content, /- gone \(worker\): completed .*\(pane recycled\)/);
-	assert.doesNotMatch(notice.content, /- kept \(worker\): completed .*pane recycled/);
-	assert.doesNotMatch(notice.content, /Pane recycled\. Resume from session files/);
+	assert.match(notice.content, /- gone \(worker\): completed .*\(RPC child retired\)/);
+	assert.doesNotMatch(notice.content, /- kept \(worker\): completed .*RPC child retired/);
+	assert.doesNotMatch(notice.content, /pane recycled/i);
 });
 
 test("formatGroupedNotice: any failed → failed aggregate and display", () => {

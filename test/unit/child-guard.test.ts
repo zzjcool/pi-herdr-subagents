@@ -13,63 +13,39 @@ import {
 	TOOL_TIMEOUT_MS_ENV,
 } from "../../src/extension/budget.ts";
 
-test("child: herdr agent prompt/wait/send-keys/start are blocked", () => {
-	const blocked = [
-		"herdr agent prompt orchestrator please take this",
-		"herdr agent wait orchestrator",
-		"herdr agent send-keys orchestrator ctrl+d",
-		"herdr agent start nested --kind pi --pane w1:p2",
-	];
-	for (const command of blocked) {
-		assert.ok(
-			forbiddenChildReason(command, { paneId: "w1:p1" }),
-			`child must not ${command}`,
-		);
-	}
+test("child blocks direct access to the legion database and allows ordinary inspection", () => {
+	for (const command of [
+		"sqlite3 legion.db 'select * from nodes'",
+		"cat legion.db-wal",
+		"cat \"$PI_LEGION_DB-wal\"",
+		"sqlite3 \"$PI_LEGION_DB\" 'select * from nodes'",
+		"grep -f legion.db '.*'",
+		"git grep -e TODO -- .pi-subagents/legion.db",
+		"cat < .pi-subagents/legion.db-shm",
+		"printf '{}' > .pi-subagents/legion.db",
+	]) assert.ok(forbiddenChildReason(command), `must block ${command}`);
+	for (const command of [
+		"rg TODO src",
+		"rg legion.db src",
+		"git grep legion.db",
+		"grep -n 'PI_LEGION_DB' src/shared/types.ts",
+		"grep 'legion.db' README.md",
+		"echo legion.db",
+		"echo $PI_LEGION_DB",
+		"echo $PI_LEGION_DB-wal",
+		"printf 'PI_LEGION_DB is configured'",
+		"node -e \"console.log('legion.db')\"",
+	]) assert.equal(forbiddenChildReason(command), undefined, `mention/pattern must be allowed: ${command}`);
+	assert.equal(forbiddenChildReason("git log -1 --oneline"), undefined);
 });
 
-test("child: may read its own pane but not another", () => {
-	assert.equal(
-		forbiddenChildReason("herdr pane read w1:p1 --lines 40", {
-			paneId: "w1:p1",
-		}),
-		undefined,
-	);
-	assert.ok(
-		forbiddenChildReason("herdr pane read w1:p2", { paneId: "w1:p1" }),
-		"foreign pane read must be blocked",
-	);
-	assert.ok(
-		forbiddenChildReason("herdr pane close w1:p2", { paneId: "w1:p1" }),
-		"foreign pane close must be blocked",
-	);
-});
-
-test("child: pane split / tab create stay blocked", () => {
-	assert.ok(forbiddenChildReason("herdr pane split --direction down"));
-	assert.ok(forbiddenChildReason("herdr tab create --label extra"));
-});
-
-test("child: unknown own pane blocks every pane read", () => {
-	assert.ok(forbiddenChildReason("herdr pane read w1:p1"));
-});
-
-test("child: herdr --help is blocked without the parent launch playbook", () => {
-	const reason = forbiddenChildReason("herdr --help", { paneId: "w1:p1" });
-	assert.ok(reason);
-	assert.match(reason, /must not probe the herdr CLI/);
-	assert.doesNotMatch(reason, /subagent\(\{ agent/);
-});
-
-test("child block reasons do not tell the child to call subagent", () => {
-	const reason = forbiddenChildReason(
-		"herdr agent prompt orchestrator please take this",
-		{ paneId: "w1:p1" },
-	);
-	assert.ok(reason);
-	assert.match(reason, /must not dispatch herdr agent/);
-	assert.doesNotMatch(reason, /Call `subagent/);
-	assert.doesNotMatch(reason, /old dispatch ritual/);
+test("child constraints use RPC child language and only allow nested dispatch via tool", () => {
+	const plain = formatChildTask("inspect this repo");
+	assert.match(plain, /Do not spawn nested agents/);
+	assert.doesNotMatch(plain, /pane|herdr agent|send keys/i);
+	const nested = formatChildTask("inspect", { allowNested: true });
+	assert.match(nested, /Nested subagents via `subagent` tool only/);
+	assert.match(nested, /machine-readable JSON/);
 });
 
 test("formatChildTask appends the frozen constraints", () => {
@@ -82,7 +58,7 @@ test("formatChildTask appends the frozen constraints", () => {
 
 test("formatChildTask allowNested changes the nested-agents bullet", () => {
 	const nested = formatChildTask("do it", { allowNested: true });
-	assert.match(nested, /Nested subagents are allowed/);
+	assert.match(nested, /Nested subagents via `subagent` tool only/);
 	assert.doesNotMatch(nested, /Do not spawn nested agents/);
 	assert.match(formatChildTask("do it"), /Do not spawn nested agents/);
 });
@@ -101,7 +77,7 @@ test("read-only role: writes and herdr prompts are blocked, recon commands pass"
 	assert.equal(isReadOnlyRole("read-only"), true);
 	assert.equal(isReadOnlyRole("writer"), false);
 
-	const env = { paneId: "w1:p1", acceptanceRole: "read-only" as const };
+	const env = { acceptanceRole: "read-only" as const };
 	assert.ok(forbiddenChildReason("rm -rf /tmp/x", env));
 	assert.ok(forbiddenChildReason("git commit -am wip", env));
 	assert.ok(forbiddenChildReason("echo hi > /tmp/out", env));
@@ -113,10 +89,7 @@ test("read-only role: writes and herdr prompts are blocked, recon commands pass"
 
 test("writer role may run npm test", () => {
 	assert.equal(
-		forbiddenChildReason("npm test", {
-			paneId: "w1:p1",
-			acceptanceRole: "writer",
-		}),
+		forbiddenChildReason("npm test", { acceptanceRole: "writer" }),
 		undefined,
 	);
 });

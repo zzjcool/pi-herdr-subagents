@@ -13,7 +13,7 @@
  *         not a clear error
  */
 
-import type { CommandRunner } from "../../src/shared/types.ts";
+import type { CommandRunner } from "../../../src/backends/legacy/types.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";

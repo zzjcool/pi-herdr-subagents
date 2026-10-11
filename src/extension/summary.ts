@@ -105,7 +105,6 @@ export interface SubagentSummary {
 export interface SummaryFormatOptions {
 	/** Used only by the empty-state message and relative session paths. */
 	cwd?: string;
-	parentPaneId?: string;
 }
 
 export interface SummaryDetailInput {
@@ -117,8 +116,8 @@ export interface SummaryDetailInput {
 }
 
 /**
- * Return the role used for grouping. Herdr's `kind` is intentionally not used:
- * several CLI kinds can be launched for the same logical role.
+ * Return the role used for grouping. Child execution kind is intentionally not
+ * used: one logical role may be relaunched under the same run record.
  */
 export function summaryRole(child: Pick<ChildRecord, "agent" | "name">): string {
 	const role = child.agent ?? child.name.replace(/-\d+$/, "");
@@ -328,7 +327,7 @@ function incrementOutcome(
 
 function outcomeForChild(child: SummaryChild): ExecutionStatus | null {
 	if (child.running) {
-		// An awaiting pane may retain a terminal execution snapshot while its
+		// An awaiting child may retain a terminal execution snapshot while its
 		// process is still open. Count that status as well as running. Working
 		// and blocked snapshots are stale lifecycle data, so do not present them
 		// as terminal outcomes.
@@ -571,10 +570,7 @@ export function formatSubagentSummary(
 ): string {
 	if (summary.childCount === 0) {
 		const cwd = options.cwd ?? summary.cwd ?? process.cwd();
-		const parent = options.parentPaneId?.trim();
-		return parent
-			? `No subagent runs under this session (parent pane ${parent}).\nLaunch children with the subagent tool to see them here.`
-			: `No subagent runs under ${cwd}.\nLaunch children with the subagent tool to see them here.`;
+		return `No subagent runs under ${cwd}.\nLaunch children with the subagent tool to see them here.`;
 	}
 
 	const start = formatLocalTime(summary.earliestSpawnedAtMs);
@@ -621,12 +617,7 @@ export function formatSubagentDetail(input: SummaryDetailInput): string {
 	if (child.thinking !== undefined) stateBits.push(`thinking: ${child.thinking}`);
 	const lines = [title, `  ${stateBits.join(" · ")}`];
 
-	const runBits = [`run: ${run.runId}`];
-	if (child.paneId !== undefined) {
-		runBits.push(`pane: ${child.paneId ?? "(recycled)"}`);
-	}
-	const tabId = child.tabId ?? run.herdr.tabId;
-	if (tabId) runBits.push(`tab: ${tabId}`);
+	const runBits = [`run: ${run.runId}`, `supervisor: ${run.herdr.supervisor ?? "legacy"}`];
 	lines.push(`  ${runBits.join(" · ")}`);
 
 	const startedAtMs = parseTimestamp(child.spawnedAt);
@@ -680,13 +671,8 @@ function parseSummaryArgs(
 	return { ok: true, all, ...(name ? { name } : {}) };
 }
 
-function filteredRuns(
-	runs: readonly RunRecord[],
-	parentPaneId: string | undefined,
-	all: boolean,
-): RunRecord[] {
-	if (all || !parentPaneId) return [...runs];
-	return runs.filter((run) => run.herdr.parentPaneId === parentPaneId);
+function filteredRuns(runs: readonly RunRecord[], _all: boolean): RunRecord[] {
+	return [...runs];
 }
 
 function sessionMapFor(runs: readonly RunRecord[]): Map<string, SummarySession> {
@@ -703,7 +689,7 @@ function sessionMapFor(runs: readonly RunRecord[]): Map<string, SummarySession> 
 
 function completionRuns(cwd: string, all: boolean): RunRecord[] {
 	const store = new RunStore({ rootDir: path.join(cwd, ".pi-subagents") });
-	return filteredRuns(store.listRuns(), process.env.HERDR_PANE_ID?.trim(), all);
+	return filteredRuns(store.listRuns(), all);
 }
 
 function summaryCompletions(
@@ -752,38 +738,14 @@ export function registerSummaryCommand(pi: ExtensionAPI): void {
 				ctx.ui.notify(parsed.message, "error");
 				return;
 			}
-			const parentPaneId = process.env.HERDR_PANE_ID?.trim() || undefined;
 			const store = new RunStore({
 				rootDir: path.join(ctx.cwd, ".pi-subagents"),
 			});
-			const runs = filteredRuns(store.listRuns(), parentPaneId, parsed.all);
+			const runs = filteredRuns(store.listRuns(), parsed.all);
 			const sessions = sessionMapFor(runs);
 			const now = Date.now();
 			if (parsed.name) {
-			// Without a pane id the lookup cannot be scoped to this session, and
-			// pickChildByName prefers a LIVE child over the newest run — a name
-			// shared with another parent would silently show that parent's child.
-			// Flag the ambiguity instead of guessing.
-			const scope = parentPaneId && !parsed.all ? { parentPaneId } : undefined;
-			const picked = pickChildByName(runs, parsed.name, scope);
-			if (!picked) {
-				notifyUnknownChild(ctx, parsed.name);
-				return;
-			}
-			if (
-				!scope &&
-				new Set(
-					runs
-						.filter((r) => r.children.some((c) => c.name === parsed.name))
-						.map((r) => r.herdr.parentPaneId),
-				).size > 1
-			) {
-				ctx.ui.notify(
-					`"${parsed.name}" exists under multiple parent panes and this session has no HERDR_PANE_ID; showing the live/newest match. Run with --all to see every run.`,
-					"error",
-				);
-				return;
-			}
+				const picked = pickChildByName(runs, parsed.name);
 				if (!picked) {
 					notifyUnknownChild(ctx, parsed.name);
 					return;
@@ -803,10 +765,7 @@ export function registerSummaryCommand(pi: ExtensionAPI): void {
 			const summary = aggregateSubagentRuns(runs, { now, sessions });
 			sendSlashText(
 				pi,
-				formatSubagentSummary(summary, {
-					cwd: ctx.cwd,
-					...(!parsed.all && parentPaneId ? { parentPaneId } : {}),
-				}),
+				formatSubagentSummary(summary, { cwd: ctx.cwd }),
 			);
 		},
 	});

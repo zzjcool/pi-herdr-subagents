@@ -7,9 +7,9 @@ import {
 
 test("formatAlreadyRecycled is a no-op explanation, not a new close", () => {
 	const text = formatAlreadyRecycled("worker-0", "/tmp/w.jsonl");
-	assert.match(text, /Already recycled worker-0/);
-	assert.match(text, /no-op/);
-	assert.match(text, /\/tmp\/w\.jsonl/);
+	assert.match(text, /Already retired worker-0/);
+	assert.match(text, /RPC child is already stopped/);
+	assert.match(text, /Session kept for resume: \/tmp\/w\.jsonl/);
 });
 
 test("canUseCachedCollect is true after collect, not while the child is working", () => {

@@ -20,6 +20,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { RpcSupervisor } from "../../src/supervisor/rpc-supervisor.ts";
+import { parseSessionFile } from "../../src/shared/session.ts";
 import type { SpawnInput } from "../../src/supervisor/types.ts";
 
 const packageEntry = fileURLToPath(
@@ -123,10 +124,10 @@ function isolateAgentSettings(runDir: string): string {
 	return isolatedDir;
 }
 
-function liveInput(root: string, isolatedAgentDir: string): SpawnInput {
+function liveInput(root: string, isolatedAgentDir: string, task = "Reply with exactly RPC_LIVE_OK. Do not use any tools."): SpawnInput {
 	return {
 		name: "rpc-live",
-		task: "Reply with exactly RPC_LIVE_OK. Do not use any tools.",
+		task,
 		agent: {
 			name: "scout",
 			description: "Live RPC smoke child",
@@ -189,6 +190,50 @@ test("live: launch a real Pi RPC child, wait for agent_settled, and retire", {
 
 		await supervisor.retire(handle.name);
 		assert.equal(supervisor.isAlive(handle.name), false);
+	} finally {
+		if (childStarted) await supervisor.retire("rpc-live").catch(() => {});
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("live: a retired RPC child resumes the same session and recalls its first-turn sentinel", {
+	skip,
+}, async () => {
+	const runDir = mkdtempSync(path.join(tmpdir(), "legion-rpc-live-resume-"));
+	const sessionFile = path.join(runDir, "rpc-live.jsonl");
+	const supervisor = new RpcSupervisor({ retireTimeoutMs: 5_000, signalTimeoutMs: 1_000 });
+	let childStarted = false;
+	try {
+		writeFileSync(sessionFile, "", { mode: 0o600 });
+		const isolatedAgentDir = isolateAgentSettings(runDir);
+		const events: string[] = [];
+		supervisor.onEvent("rpc-live", (event) => events.push(event.type));
+		const sentinel = "RPC_RESUME_PING_OK_7F39A2";
+		const first = await supervisor.spawnChild(
+			liveInput(runDir, isolatedAgentDir, `Remember the exact token ${sentinel} as durable conversation context. Reply with exactly RPC_RESUME_FIRST_OK and use no tools.`),
+		);
+		childStarted = true;
+		assert.equal(first.sessionFile, sessionFile);
+		const firstSettled = await supervisor.waitSettled(first.name, 240_000);
+		assert.equal(firstSettled.settled, true, `first turn did not settle: ${JSON.stringify(firstSettled)}`);
+		await supervisor.retire(first.name);
+		assert.equal(supervisor.isAlive(first.name), false);
+
+		const resumed = await supervisor.spawnChild(
+			liveInput(runDir, isolatedAgentDir, "Recall the exact token from the preceding conversation and reply with only that token. Do not use tools."),
+		);
+		supervisor.onEvent(resumed.name, (event) => events.push(event.type));
+		assert.equal(resumed.name, first.name);
+		assert.equal(resumed.sessionFile, first.sessionFile, "resume must reuse the persisted session path");
+		assert.ok(resumed.pid, "resume must launch a fresh Pi RPC process");
+		const secondSettled = await supervisor.waitSettled(resumed.name, 240_000);
+		assert.equal(secondSettled.settled, true, `resumed turn did not settle: ${JSON.stringify(secondSettled)}`);
+		const resumedSession = parseSessionFile(sessionFile);
+		assert.match(resumedSession.output, new RegExp(sentinel), "the resumed answer must recall the first-turn token");
+		assert.match(resumedSession.lastTurnOutput ?? "", new RegExp(sentinel), "the final turn must be the recalled token");
+		assert.ok(events.filter((event) => event === "agent_settled").length >= 2);
+		await supervisor.retire(resumed.name);
+		assert.equal(supervisor.isAlive(resumed.name), false);
 	} finally {
 		if (childStarted) await supervisor.retire("rpc-live").catch(() => {});
 		rmSync(runDir, { recursive: true, force: true });

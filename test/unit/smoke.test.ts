@@ -13,7 +13,6 @@ import {
 	sanitizeNestedPath,
 	isSafeNestedPathId,
 } from "../../src/shared/nested-path.ts";
-import { parseHerdrResponse } from "../../src/herdr/client.ts";
 import { buildPiArgs } from "../../src/runs/args.ts";
 
 const user = (t: string) =>
@@ -162,21 +161,6 @@ test("nested path safety", () => {
 			.length,
 		4,
 	);
-});
-
-test("herdr error on stderr", () => {
-	const r = parseHerdrResponse(
-		"",
-		'{"error":{"code":"agent_pane_busy","message":"not an available shell"}}',
-		1,
-	);
-	assert.equal(r.ok, false);
-	if (!r.ok) assert.equal(r.error.code, "PANE_BUSY");
-});
-
-test("herdr success on stdout", () => {
-	const r = parseHerdrResponse('{"result":{"pane":{"pane_id":"w1:p1"}}}', "", 0);
-	assert.equal(r.ok, true);
 });
 
 // F38: a multi-line task must never travel as an argv element — herdr rejects

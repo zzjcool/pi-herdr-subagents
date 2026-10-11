@@ -74,8 +74,8 @@ export interface BuildArgsInput {
 	 */
 	childContext?: string;
 	/**
-	 * When false, omit `@task.md`. The orchestrator always delivers the task
-	 * with `herdr agent prompt` so every kind shares the same control plane.
+	 * When false, omit `@task.md`; the RPC supervisor delivers the task through
+	 * the child Pi process so the session records it as the first user turn.
 	 */
 	includeTask?: boolean;
 }

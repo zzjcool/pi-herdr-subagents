@@ -10,7 +10,7 @@ import fs from "node:fs";
 const PORT = Number(process.env.MOCK_LLM_PORT || 8765);
 const LOG = process.env.MOCK_LLM_LOG || "/tmp/mock-llm.log";
 const TOOL_NAME = process.env.MOCK_TOOL_NAME || "bash";
-const TOOL_ARGS = process.env.MOCK_TOOL_ARGS || '{"command":"herdr agent prompt orchestrator hi"}';
+const TOOL_ARGS = process.env.MOCK_TOOL_ARGS || '{"command":"pwd"}';
 
 function append(line) {
 	fs.appendFileSync(LOG, `${new Date().toISOString()} ${line}\n`);

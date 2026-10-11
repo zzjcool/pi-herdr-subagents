@@ -11,22 +11,18 @@
  *   F22 — a missing binary surfaces as a start timeout, not a clear error
  */
 
-import {
-	type AgentInfo,
-	type AgentKind,
-	type AgentStartResult,
-	type CommandRunner,
-	ErrorCodes,
-	type HerdrClient,
-	type HerdrError,
-	type HerdrResult,
-	type PaneInfo,
-	type ProcessInfo,
-	type ReadSource,
-	DEFAULTS,
-	SubagentError,
-	type TabInfo,
-} from "../shared/types.ts";
+import { type AgentKind, ErrorCodes, DEFAULTS, SubagentError } from "../../shared/types.ts";
+import type {
+	AgentInfo,
+	AgentStartResult,
+	CommandRunner,
+	HerdrClient,
+	HerdrError,
+	HerdrResult,
+	PaneInfo,
+	ReadSource,
+	TabInfo,
+} from "./types.ts";
 import { createCommandRunner, type RunnerOptions } from "./runner.ts";
 
 interface HerdrEnvelope {
@@ -249,31 +245,6 @@ function paneFromResult(value: unknown): PaneInfo {
 }
 
 /** Map one entry of `pane process-info`'s `foreground_processes`. */
-function toForegroundProcess(
-	raw: unknown,
-): ProcessInfo["foregroundProcesses"][number] {
-	const p = asRecord(raw);
-	return {
-		argv: Array.isArray(p.argv) ? p.argv.map(String) : [],
-		cmdline: str(p.cmdline) ?? "",
-		pid: typeof p.pid === "number" ? p.pid : 0,
-		name: str(p.name) ?? "",
-		cwd: str(p.cwd),
-	};
-}
-
-/** Map the `pane process-info` payload into `ProcessInfo`. */
-function toProcessInfo(value: unknown): ProcessInfo {
-	const info = asRecord(asRecord(value).process_info ?? value);
-	const procs = Array.isArray(info.foreground_processes)
-		? info.foreground_processes
-		: [];
-	return {
-		foregroundProcesses: procs.map(toForegroundProcess),
-		shellPid: typeof info.shell_pid === "number" ? info.shell_pid : undefined,
-	};
-}
-
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -406,7 +377,6 @@ function createPaneApi(
 	| "paneRead"
 	| "paneList"
 	| "paneGet"
-	| "paneProcessInfo"
 	| "paneReportMetadata"
 > {
 	return {
@@ -428,21 +398,13 @@ function createPaneApi(
 				res.ok ? ok(paneFromResult(res.value)) : res,
 			),
 
-		paneProcessInfo: (paneId) =>
-			call<Record<string, unknown>>([
-				"pane",
-				"process-info",
-				"--pane",
-				paneId,
-			]).then((res) => (res.ok ? ok(toProcessInfo(res.value)) : res)),
-
 		paneReportMetadata: (opts) => call<void>(paneReportMetadataArgs(opts)),
 	};
 }
 
 function createTabApi(
 	call: Call,
-): Pick<HerdrClient, "tabCreate" | "tabClose" | "tabRename" | "tabList"> {
+): Pick<HerdrClient, "tabCreate" | "tabClose" | "tabList"> {
 	return {
 		async tabCreate(opts) {
 			const args = ["tab", "create"];
@@ -464,9 +426,6 @@ function createTabApi(
 			return call<void>(["tab", "close", tabId]);
 		},
 
-		tabRename(tabId, label) {
-			return call<void>(["tab", "rename", tabId, label]);
-		},
 
 		async tabList(workspaceId) {
 			const args = ["tab", "list"];
@@ -572,22 +531,8 @@ function createAgentApi(
 
 function createMetaApi(
 	runner: CommandRunner,
-): Pick<HerdrClient, "version" | "available" | "integrationStatus" | "integrationInstall"> {
+): Pick<HerdrClient, "available" | "integrationStatus" | "integrationInstall"> {
 	return {
-		async version() {
-			// Explicit cap: version() may be called through a legacy bare runner
-			// (createHerdrClient(runner)) that carries no defaultTimeoutMs.
-			const { stdout, code } = await runner(["--version"], {
-				timeoutMs: DEFAULTS.commandTimeoutMs,
-			});
-			if (code !== 0)
-				return err({
-					code: ErrorCodes.HERDR_UNAVAILABLE,
-					message: stdout.slice(0, 200),
-				});
-			return ok(stdout.trim());
-		},
-
 		async available() {
 			try {
 				const res = await runner(["--version"], { timeoutMs: 5_000 });

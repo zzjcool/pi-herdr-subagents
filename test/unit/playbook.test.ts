@@ -7,15 +7,15 @@ import {
 	TOOL_DESCRIPTION,
 } from "../../src/extension/playbook.ts";
 
-test("playbook text is the frozen launch recipe", () => {
+test("playbook text describes RPC launch and frozen child guidance", () => {
 	assert.match(PARENT_PLAYBOOK, /subagent\(\{ agent:/);
 	assert.match(PARENT_PLAYBOOK, /matching role/);
 	assert.match(PARENT_PLAYBOOK, /Forbidden/);
 	assert.match(PARENT_PLAYBOOK, /Isolation is YOUR call/);
 	assert.match(PARENT_PLAYBOOK, /worktree: true/);
+	assert.match(PARENT_PLAYBOOK, /headless RPC children/);
 	assert.match(TOOL_DESCRIPTION, /async by default/);
-	assert.match(TOOL_DESCRIPTION, /scout\/planner\/worker\/reviewer\/advisor/);
-	assert.doesNotMatch(PARENT_PLAYBOOK, /agent: "worker"/);
+	assert.doesNotMatch(PARENT_PLAYBOOK, /Same agent type shares one tab/);
 });
 
 test("shellChunks splits compound commands", () => {
@@ -25,48 +25,17 @@ test("shellChunks splits compound commands", () => {
 	]);
 });
 
-test("forbiddenDispatchReason: the herdr skill discovery ritual", () => {
-	const blocked = [
-		"herdr --help",
-		"herdr -h",
-		"herdr agent",
-		"herdr pane",
-		"herdr tab",
-		"herdr workspace",
-		"herdr agent --help",
-		"herdr pane --help",
-	];
-	for (const command of blocked) {
-		assert.ok(
-			forbiddenDispatchReason(command),
-			`must block discovery: ${command}`,
-		);
+test("parent bash no longer blocks legacy herdr inspection commands", () => {
+	for (const command of ["herdr --help", "herdr pane list", "herdr agent start worker"]) {
+		assert.equal(forbiddenDispatchReason(command), undefined);
 	}
 });
 
-test("forbiddenDispatchReason: the old dispatch ritual", () => {
-	const blocked = [
-		"herdr agent start worker-0 --kind pi --pane w1:p2",
-		"herdr agent prompt worker-0 hello",
-		"herdr agent wait worker-0 --timeout 900000",
-		"herdr agent send-keys worker-0 ctrl+d",
-		"herdr pane split --current --direction down --no-focus",
-	];
-	for (const command of blocked) {
-		assert.ok(
-			forbiddenDispatchReason(command),
-			`must block dispatch: ${command}`,
-		);
-	}
-});
 
-test("forbiddenDispatchReason: HERDR_ENV prelude", () => {
-	assert.ok(forbiddenDispatchReason('test "${HERDR_ENV:-}" = 1'));
-	assert.ok(forbiddenDispatchReason('test "$HERDR_ENV" = 1 && herdr --help'));
-	assert.ok(forbiddenDispatchReason('[ -n "$HERDR_ENV" ]'));
-});
 
-test("forbiddenDispatchReason: inspection commands stay allowed", () => {
+
+
+test("legacy herdr commands remain available for manual v0.16.x workflows", () => {
 	const allowed = [
 		"herdr pane list",
 		"herdr pane read w1:p1",
@@ -88,20 +57,13 @@ test("forbiddenDispatchReason: inspection commands stay allowed", () => {
 	}
 });
 
-test("playbook explains merged completion notices and the wait action", () => {
-	// §1.6 frozen copy: grouped delivery + the wait escape hatch.
-	assert.match(PARENT_PLAYBOOK, /merged and delivered as one grouped message/);
-	assert.match(PARENT_PLAYBOOK, /subagent\(\{ action: "wait", all: true, timeoutMs \}\)/);
-	assert.match(PARENT_PLAYBOOK, /\(or `wait` with `name`\)/);
-	assert.match(TOOL_DESCRIPTION, /collect, wait, list/);
+test("playbook keeps the explicit wait action available", () => {
+	assert.match(PARENT_PLAYBOOK, /Use `wait` when you need blocking results/);
+	assert.match(TOOL_DESCRIPTION, /collect, wait, list, retire/);
 });
 
-test("U8: playbook explains that a collect timeout notice is a progress signal", () => {
-	// §1.E frozen copy: the parent must not read "still alive" as a verdict.
-	assert.match(
-		PARENT_PLAYBOOK,
-		/collect timed out … the agent is still alive` is a progress signal, not a verdict/,
-	);
-	assert.match(PARENT_PLAYBOOK, /will notify again when it truly finishes/);
-	assert.match(PARENT_PLAYBOOK, /appends to its queue rather than interrupting/);
+test("playbook explains RPC timeout and steering semantics", () => {
+	assert.match(PARENT_PLAYBOOK, /collect timeout with a live RPC child is a progress signal/);
+	assert.match(PARENT_PLAYBOOK, /session JSONL/);
+	assert.match(PARENT_PLAYBOOK, /Do not tell a child to message or prompt the parent/);
 });
