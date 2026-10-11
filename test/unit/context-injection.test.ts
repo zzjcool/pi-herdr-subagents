@@ -15,6 +15,7 @@ import {
 	resolveContextValue,
 } from "../../src/agents/context.ts";
 import herdrSubagents from "../../index.ts";
+import { FakeSupervisor } from "../helpers/fake-supervisor.ts";
 import {
 	loadSubagentSettings,
 	resolveSubagentSettings,
@@ -546,47 +547,17 @@ test("before_agent_start still fails loudly for a broken explicit context refere
 	}
 });
 
-test("enabled check defaults to true when explicit context settings are broken", () => {
-	const dir = mkdtempSync(path.join(tmpdir(), "ctx-enabled-broken-"));
-	const agentDir = path.join(dir, "agent");
-	const projectRoot = path.join(dir, "project");
-	mkdirSync(agentDir);
-	mkdirSync(projectRoot);
+test("parent extension no longer registers a pane-era bash dispatch interceptor", () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "ctx-parent-rpc-"));
 	try {
-		writeFileSync(
-			path.join(agentDir, "settings.json"),
-			JSON.stringify({ subagents: { parentContext: "@missing-context.md" } }),
-		);
-
-		const warnings: string[] = [];
-		const originalWarn = console.warn;
-		let result: unknown;
-		try {
-			console.warn = (...args: unknown[]) => {
-				warnings.push(args.map(String).join(" "));
-			};
-			result = withRegisteredExtension(agentDir, (events) => {
-				const handler = events.get("tool_call");
-				assert.ok(handler, "tool_call handler must be registered");
-				return handler(
-					{
-						toolName: "bash",
-						input: { command: "herdr agent start worker" },
-					},
-					{ cwd: projectRoot },
-				);
-			});
-		} finally {
-			console.warn = originalWarn;
-		}
-
-		assert.ok(result && typeof result === "object");
-		assert.equal((result as { block?: unknown }).block, true);
-		assert.match(
-			warnings.join(" "),
-			/pi-legion|defaulting/,
-			"a warning should explain the settings fallback",
-		);
+		const events = new Map<string, ExtensionEvent>();
+		const pi = {
+			registerMessageRenderer() {}, registerTool() {}, registerCommand() {}, sendMessage() {},
+			events: { emit() {} },
+			on(name: string, handler: unknown) { events.set(name, handler as ExtensionEvent); },
+		};
+		herdrSubagents(pi as never, { supervisor: new FakeSupervisor() });
+		assert.equal(events.has("tool_call"), false);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

@@ -7,7 +7,7 @@
  */
 
 import { spawn } from "node:child_process";
-import type { CommandRunner } from "../shared/types.ts";
+import type { CommandRunner } from "./types.ts";
 
 const HERDR_BIN_ENV = "HERDR_BIN";
 const HERDR_BIN_PATH_ENV = "HERDR_BIN_PATH";

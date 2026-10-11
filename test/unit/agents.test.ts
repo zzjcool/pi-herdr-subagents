@@ -526,7 +526,7 @@ test("formerly unenforced fields are now honoured", () => {
 	assert.equal(agent.allowNestedSubagents, true);
 });
 
-test("enforced fields are NOT reported as unenforced", () => {
+test("Placement is not parsed or reported as an active agent field", () => {
 	const doc = [
 		"---",
 		"name: probe",
@@ -546,6 +546,7 @@ test("enforced fields are NOT reported as unenforced", () => {
 		[],
 		"fields the runtime honours must not be listed",
 	);
+	assert.equal("placement" in agent, false, "legacy placement frontmatter is ignored");
 });
 
 test("acceptance.criteria is no longer reported unenforced (it is surfaced instead)", () => {

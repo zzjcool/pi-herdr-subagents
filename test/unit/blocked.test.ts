@@ -14,7 +14,7 @@ test("formatBlockedPrompt names the child and the reason", () => {
 	);
 });
 
-test("followUpFor: a decision resumes the watch; notify holds the pane", () => {
+test("followUpFor: a decision resumes the watch; notify holds the child", () => {
 	assert.equal(followUpFor("approved"), "resume");
 	assert.equal(followUpFor("rejected"), "resume");
 	assert.equal(followUpFor("notified"), "hold");

@@ -7,26 +7,27 @@
  * is covered by the package's test suite and is safe to depend on.
  *
  * ```ts
- * import { createHerdrClient, Orchestrator, loadAgentsFromDir } from "pi-legion/api";
+ * import { Orchestrator, RpcSupervisor, loadAgentsFromDir } from "pi-legion/api";
  *
- * const client = createHerdrClient();
  * const [scout] = loadAgentsFromDir("/path/to/agents", "user");
- * const orch = new Orchestrator({ client, runDir: "/tmp/run", cwd: process.cwd() });
+ * const orch = new Orchestrator({ supervisor: new RpcSupervisor(), runDir: "/tmp/run", cwd: process.cwd() });
  * const handle = await orch.launch({ agent: scout, task: "survey the repo" });
  * const result = await orch.collect(handle.name);
  * ```
  */
 
-// ── herdr transport ─────────────────────────────────────────────────────────
+// ── deprecated herdr transport ──────────────────────────────────────────────
+/** @deprecated Use `RpcSupervisor` for the v2 execution path. */
 export {
 	createHerdrClient,
 	parseHerdrResponse,
 	mapHerdrErrorCode,
 	readPaneDiagnostic,
 	SubagentError,
-} from "./herdr/client.ts";
-export { createCommandRunner, resolveHerdrBin } from "./herdr/runner.ts";
-export type { RunnerOptions } from "./herdr/runner.ts";
+} from "./backends/legacy/client.ts";
+/** @deprecated Only for pi-legion v0.16.x Herdr workflows. */
+export { createCommandRunner, resolveHerdrBin } from "./backends/legacy/runner.ts";
+export type { RunnerOptions } from "./backends/legacy/runner.ts";
 
 // ── agent definitions ───────────────────────────────────────────────────────
 export {
@@ -150,8 +151,27 @@ export type {
 } from "./extension/summary.ts";
 
 // ── runs ────────────────────────────────────────────────────────────────────
-export { Orchestrator, preCreateSessionFile } from "./runs/orchestrator.ts";
-export type { CollectResult, OrchestratorDeps } from "./runs/orchestrator.ts";
+export { Orchestrator, preCreateSessionFile, effectiveMaxDepth } from "./runs/orchestrator.ts";
+export type { BudgetRefusedEvent, CollectResult, OrchestratorDeps } from "./runs/orchestrator.ts";
+export { RpcSupervisor } from "./supervisor/rpc-supervisor.ts";
+export { InMemoryUIProxy, isExtensionUIRequest } from "./supervisor/ui-proxy.ts";
+export type {
+	ChildHandle,
+	LegionSupervisor,
+	RpcClientFactory,
+	RpcClientLike,
+	RpcClientOptions,
+	SettleResult,
+	SpawnInput,
+	SupervisorEvent,
+	UsageSnapshot,
+} from "./supervisor/types.ts";
+export type {
+	ExtensionUIRequest,
+	ExtensionUIResponse,
+	PendingUIRequest,
+	UIProxy,
+} from "./supervisor/ui-proxy.ts";
 export {
 	DEFAULT_VERIFY_TIMEOUT_MS,
 	applyVerification,
@@ -160,8 +180,6 @@ export {
 	defaultVerifyRunner,
 } from "./runs/acceptance.ts";
 export type { CommandResult, VerifyRunner } from "./runs/acceptance.ts";
-export { createSessionLayout, typeTabLabel, sanitizeTabOwner, tileSplit, TILE_COLUMNS } from "./runs/layout.ts";
-export type { SessionLayout } from "./runs/layout.ts";
 export { RunStore, sanitizeNameForFs, pickChildByName } from "./runs/store.ts";
 export type { StoreOptions } from "./runs/store.ts";
 export {
@@ -264,8 +282,6 @@ export {
 } from "./shared/session.ts";
 export {
 	mergeProgress,
-	progressFromAgentInfo,
-	progressFromPaneInfo,
 	progressFromSession,
 	progressFromSessionFile,
 } from "./shared/progress.ts";
@@ -283,23 +299,18 @@ export type {
 	AgentOverride,
 	TeamConfig,
 	TeamMember,
-	AgentInfo,
 	AgentKind,
 	AgentScope,
 	AgentSource,
 	ChildRecord,
 	Execution,
 	ExecutionStatus,
-	HerdrError,
-	HerdrResult,
 	ModelOrigin,
 	ModelScopeConfig,
 	ModelScopeViolation,
 	ModelSourceInfo,
 	NestedPathEntry,
 	OnBlockedPolicy,
-	PaneInfo,
-	Placement,
 	PresetConfig,
 	RunRecord,
 	StopReason,
@@ -310,3 +321,16 @@ export type {
 	TurnBudgetConfig,
 	Usage,
 } from "./shared/types.ts";
+/** @deprecated v0.16.x pane backend compatibility types. */
+export type {
+	AgentInfo,
+	AgentStartResult,
+	CommandRunner,
+	HerdrClient,
+	HerdrError,
+	HerdrResult,
+	PaneInfo,
+	ProcessInfo,
+	ReadSource,
+	TabInfo,
+} from "./backends/legacy/types.ts";

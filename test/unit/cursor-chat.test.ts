@@ -8,7 +8,7 @@ import {
 	cursorTurnSettled,
 	findCursorChatDir,
 	parseCursorChat,
-} from "../../src/shared/cursor-chat.ts";
+} from "../../src/backends/legacy/cursor-chat.ts";
 
 /** Build a chat dir mirroring cursor's on-disk shape (schemaVersion 1). */
 function makeChat(

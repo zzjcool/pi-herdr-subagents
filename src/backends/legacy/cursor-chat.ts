@@ -27,8 +27,8 @@ import * as path from "node:path";
 // `node:module` is implemented by both Bun and Node, so this static import is
 // safe — unlike node:sqlite, which Bun lacks entirely.
 import { createRequire } from "node:module";
-import type { ParsedSession, TurnRecord } from "./types.ts";
-import { emptyParsedSession } from "./session.ts";
+import type { ParsedSession, TurnRecord } from "../../shared/types.ts";
+import { emptyParsedSession } from "../../shared/session.ts";
 
 /**
  * Minimal structural type both runtimes' SQLite drivers satisfy.

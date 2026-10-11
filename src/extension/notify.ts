@@ -70,9 +70,8 @@ export function formatSize(bytes: number): string {
  * ESC included) and any escape sequence they could have introduced.
  *
  * Child names are usually sanitized in `src/shared/name.ts`, but `agent`
- * labels and labels from non-pi kinds come from pane titles and frontmatter
- * the extension does not control. Everything the headline interpolates
- * passes through here.
+ * labels come from frontmatter the extension does not control. Everything
+ * the headline interpolates passes through here.
  */
 export function sanitizeNoticeField(value: string): string {
 	return value.replace(/[\x00-\x1f\x7f]/g, "");
@@ -114,13 +113,11 @@ const PREVIEW_CHARS = 4_000;
 /**
  * Map an execution status onto the coarse notification label.
  *
- * `unknown` needs a witness: non-pi kinds cannot produce a stopReason (F7),
- * so a finished cursor child reports `unknown`. When its own verdict was
- * still parsed (acceptance accepted/rejected), the turn demonstrably ran and
- * finished — report completion and let the `acceptance:` line carry the
- * verdict. Without that witness, `unknown` stays `failed` (pi kind, no
- * messages at all). The old blanket mapping labelled every successful
- * cursor answer "Background task failed".
+ * `unknown` needs a witness for compatibility with legacy records that did
+ * not persist a structured stopReason. When a verdict was parsed (acceptance
+ * accepted/rejected), the turn demonstrably ran and finished — report
+ * completion and let the `acceptance:` line carry the verdict. Without that
+ * witness, `unknown` stays `failed` (no usable session messages).
  *
  * `running` is NOT a completion and is reported as itself (B). It used to fall
  * through to the `failed` default, so a collect timeout on a live child sent
@@ -198,7 +195,7 @@ export function formatCompletionNotice(input: CompletionInput): CompletionNotice
 		input.sessionFile ? `Session file: ${input.sessionFile}` : undefined,
 		input.recycled === false
 			? undefined
-			: "Pane recycled. Resume from the session file if you need this child again.",
+			: "RPC child retired. Resume from the session file if you need this child again.",
 	]
 		.filter((line) => line !== undefined)
 		.join("\n");
@@ -269,9 +266,9 @@ export interface GroupedCompletionInput {
  *   - reviewer-1: failed (model error)
  *   Still running: slow-2 (notifies separately when it finishes)
  *
- * Recycle is per-entry (a wait()-released sibling can race the flush, so a
- * blanket "Pane recycled" footer could lie): entries whose pane was actually
- * recycled carry an inline "(pane recycled)" marker.
+ * Retirement is per-entry (a wait()-released sibling can race the flush, so a
+ * blanket footer could be inaccurate): entries whose RPC child is retired
+ * carry an inline "(RPC child retired)" marker.
  * Aggregate status: any failed → "failed"; else any stopped → "stopped";
  * else "completed". `display` follows the single-notice rule.
  */
@@ -305,9 +302,9 @@ export function formatGroupedNotice(
 		const acceptance = entry.acceptance
 			? ` — acceptance: ${entry.acceptance.status}${entry.acceptance.level ? ` (${entry.acceptance.level})` : ""}`
 			: "";
-		// recycled is per-entry truth: a wait()-consumed sibling may already
-		// be released while this pane is still open, so no blanket footer.
-		const recycled = entry.recycled === false ? "" : " (pane recycled)";
+		// Retirement is per-entry truth: a wait()-consumed sibling may already
+		// be released while another RPC child is still alive, so no blanket footer.
+		const recycled = entry.recycled === false ? "" : " (RPC child retired)";
 		lines.push(`- ${label}: ${entry.status}${reason}${acceptance}${recycled}`);
 		// Prefer the durable full-text artifact over the session file as the
 		// recovery pointer: one `read` beats re-deriving from jsonl/chat store.

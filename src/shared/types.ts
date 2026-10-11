@@ -6,7 +6,7 @@
  *   - Additive changes (new optional fields) are allowed.
  *   - Breaking changes require coordinating all modules.
  *
- * Design authority: pi-legion design.md (docs/design.md) (33 measured findings F1-F33).
+ * Design authority: docs/legion-v2-contract.md.
  */
 
 // =============================================================================
@@ -17,7 +17,7 @@ export type AgentScope = "user" | "project" | "both";
 
 export type SystemPromptMode = "replace" | "append";
 
-/** herdr agent kinds we can launch. Mirrors `herdr agent start --kind`. */
+/** Agent kinds parsed from role files; the RPC supervisor accepts only `pi`. */
 export const AGENT_KINDS = [
 	"pi",
 	"claude",
@@ -59,9 +59,6 @@ export type AgentKind = (typeof AGENT_KINDS)[number];
  * parent model is expected to be irrelevant to a different CLI and is dropped.
  */
 export type ModelOrigin = "explicit" | "inherited";
-
-/** Where a subagent's pane is placed (design §8.3). */
-export type Placement = "split-down" | "split-right" | "new-tab";
 
 /** What to do when an agent reports `blocked` (design §5.3). */
 export type OnBlockedPolicy = "forward" | "auto-approve" | "notify";
@@ -141,9 +138,8 @@ export interface AgentConfig {
 	alias?: string[];
 	extraFields?: Record<string, string>;
 
-	// ── herdr-specific ──
+	// ── execution metadata ──
 	kind: AgentKind;
-	placement?: Placement;
 	worktree?: boolean;
 	steer?: boolean;
 	onBlocked?: OnBlockedPolicy;
@@ -283,16 +279,12 @@ export interface NestedPathEntry {
 export const MAX_NESTED_PATH_ENTRIES = 4;
 
 export interface ChildRecord {
-	/** herdr agent name, globally unique among live agents. */
+	/** Supervisor-local child name; unique among live children in this run. */
 	name: string;
-	/** Pane id, or null once recycled (F12: pane is not the durable carrier). */
-	paneId: string | null;
-	/** Owning tab when the child got its own tab (placement: "new-tab"). */
-	tabId?: string;
 	/** ★ resume credential — must persist. */
 	sessionFile: string;
 	sessionId?: string;
-	/** Proves we created this pane (guards against killing others'). */
+	/** Stable per-run child identity; legacy records used a pane owner token. */
 	ownerToken: string;
 
 	// lifecycle
@@ -300,7 +292,7 @@ export interface ChildRecord {
 	spawnedAt: string;
 	retiredAt?: string;
 
-	// outcome (snapshot taken BEFORE recycle — F27)
+	// outcome (snapshot taken before child retirement — F27)
 	execution?: Execution;
 	acceptance?: AcceptanceResult;
 	/**
@@ -321,7 +313,7 @@ export interface ChildRecord {
 	onBlocked?: OnBlockedPolicy;
 	/** Snapshotted at launch; missing `{"ok":…}` on success becomes rejected. */
 	completionGuard?: boolean;
-	/** Isolated git worktree the child's pane used; left on disk after retire. */
+	/** Isolated git worktree used by the child; left on disk after retire. */
 	worktreePath?: string;
 	/** Branch created in that worktree; the child ships via MR, not the parent checkout. */
 	worktreeBranch?: string;
@@ -335,23 +327,8 @@ export interface ChildRecord {
 	/** Model actually started with (resolved + fallback). */
 	model?: string;
 	thinking?: string | false;
-	/**
-	 * Models that were requested but could not be handed to the target CLI's
-	 * `--model` (`nativeModelFor` returns undefined for them), so the child runs
-	 * on the CLI's own default instead.
-	 *
-	 * Only reachable for an INHERITED model — an explicitly chosen one is
-	 * refused before launch (see `Orchestrator.launch`'s `modelOrigin`). This is
-	 * the intended case: a `kind: cursor` role with no model of its own
-	 * inherits the parent's pi-shaped model, which must not be forwarded.
-	 */
+	/** Models that were requested but cannot be represented by the RPC child. */
 	modelDropped?: string[];
-	/**
-	 * Exact text sent with `herdr agent prompt`. Non-pi collect reads the pane,
-	 * which still contains this echo; strip it before extracting a verdict so a
-	 * template `{"ok": true}` in the system prompt cannot attest success.
-	 */
-	promptText?: string;
 }
 
 export interface RunRecord {
@@ -361,15 +338,10 @@ export interface RunRecord {
 	cwd: string;
 
 	herdr: {
-		workspaceId?: string;
-		tabId?: string;
-		tabLabel?: string;
-		/**
-		 * Parent Pi's herdr pane (`HERDR_PANE_ID`). Scopes type-tab labels and
-		 * control-action lookup so two parent sessions in the same repo/Space
-		 * cannot steer or recycle each other's children.
-		 */
-		parentPaneId?: string;
+		/** Current transport marker under the historic run.json key. */
+		supervisor?: "rpc";
+		/** Reserved for M2 tree identity. */
+		node_id?: string;
 	};
 
 	/** Lineage: root → this node. */
@@ -384,159 +356,6 @@ export interface RunRecord {
 	createdAt: string;
 	updatedAt: string;
 }
-
-// =============================================================================
-// herdr client (design §9) — thin, testable wrapper over the CLI
-// =============================================================================
-
-export interface HerdrError {
-	code: string;
-	message: string;
-	details?: unknown;
-}
-
-export type HerdrResult<T> =
-	| { ok: true; value: T }
-	| { ok: false; error: HerdrError };
-
-export interface PaneInfo {
-	pane_id: string;
-	tab_id: string;
-	workspace_id: string;
-	agent_status?: string;
-	cwd?: string | null;
-	terminal_title_stripped?: string;
-}
-
-export interface AgentInfo {
-	name?: string | null;
-	pane_id: string;
-	tab_id: string;
-	workspace_id: string;
-	agent: string | null;
-	agent_status: string;
-	cwd?: string | null;
-	agent_session?: { kind: string; source: string; value: string } | null;
-	state_labels?: Record<string, string>;
-	tokens?: unknown;
-}
-
-export interface TabInfo {
-	tab_id: string;
-	workspace_id: string;
-	label?: string | null;
-	pane_count: number;
-}
-
-export interface AgentStartResult {
-	name: string;
-	paneId: string;
-	argv: string[];
-	/** Session path reported by herdr (F1) — absent for non-pi kinds (F7). */
-	sessionPath?: string;
-	agentStatus: string;
-}
-
-export interface ProcessInfo {
-	foregroundProcesses: Array<{
-		argv: string[];
-		cmdline: string;
-		pid: number;
-		name: string;
-		cwd?: string;
-	}>;
-	shellPid?: number;
-}
-
-/** Injectable runner so the client is unit-testable without a live herdr. */
-export type CommandRunner = (
-	args: string[],
-	opts?: { timeoutMs?: number; env?: Record<string, string | undefined> },
-) => Promise<{ stdout: string; stderr: string; code: number }>;
-
-export interface HerdrClient {
-	// ── panes ──
-	paneSplit(opts: {
-		target?: string;
-		current?: boolean;
-		direction: "right" | "down";
-		cwd?: string;
-		env?: Record<string, string>;
-		focus?: boolean;
-	}): Promise<HerdrResult<PaneInfo>>;
-	paneClose(paneId: string): Promise<HerdrResult<void>>;
-	paneRead(
-		paneId: string,
-		opts?: { source?: ReadSource; lines?: number },
-	): Promise<HerdrResult<string>>;
-	paneList(): Promise<HerdrResult<PaneInfo[]>>;
-	paneGet(paneId: string): Promise<HerdrResult<PaneInfo>>;
-	paneProcessInfo(paneId: string): Promise<HerdrResult<ProcessInfo>>;
-	paneReportMetadata(opts: {
-		paneId: string;
-		source: string;
-		displayAgent?: string;
-		title?: string;
-		tokens?: Record<string, string>;
-		/** `idle=waiting 2 subagents` — labels a herdr agent_status from this source. */
-		stateLabel?: { status: string; text: string };
-		/** Auto-expiry so a crashed reporter leaves no stale label. */
-		ttlMs?: number;
-		/** Drop all state-labels set by this source. */
-		clearStateLabels?: boolean;
-	}): Promise<HerdrResult<void>>;
-
-	// ── tabs ──
-	tabCreate(opts: {
-		cwd?: string;
-		label?: string;
-		focus?: boolean;
-		/** Environment for the tab's root pane process (lineage propagation). */
-		env?: Record<string, string>;
-		/** Pin the new tab to this Space (`herdr tab create --workspace`). */
-		workspaceId?: string;
-	}): Promise<HerdrResult<{ tab: TabInfo; rootPaneId: string }>>;
-	tabClose(tabId: string): Promise<HerdrResult<void>>;
-	tabRename(tabId: string, label: string): Promise<HerdrResult<void>>;
-	tabList(workspaceId?: string): Promise<HerdrResult<TabInfo[]>>;
-
-	// ── agents ──
-	agentStart(opts: {
-		name: string;
-		kind: AgentKind;
-		paneId: string;
-		args?: string[];
-		timeoutMs?: number;
-	}): Promise<HerdrResult<AgentStartResult>>;
-	agentPrompt(
-		target: string,
-		text: string,
-		opts?: { wait?: boolean; timeoutMs?: number },
-	): Promise<HerdrResult<AgentInfo>>;
-	agentGet(target: string): Promise<HerdrResult<AgentInfo>>;
-	agentList(): Promise<HerdrResult<AgentInfo[]>>;
-	agentSendKeys(target: string, ...keys: string[]): Promise<HerdrResult<void>>;
-	agentWait(
-		target: string,
-		opts?: { until?: string[]; timeoutMs?: number },
-	): Promise<HerdrResult<void>>;
-
-	// ── meta ──
-	version(): Promise<HerdrResult<string>>;
-	available(): Promise<boolean>;
-
-	// ── integrations ──
-	/** One integration's status, or null when herdr cannot report it. */
-	integrationStatus(target: string): Promise<HerdrResult<string | null>>;
-	/** Install an integration hook (idempotent on reinstall). */
-	integrationInstall(target: string): Promise<HerdrResult<string>>;
-}
-
-export type ReadSource =
-	| "visible"
-	| "recent"
-	| "recent-unwrapped"
-	| "detection";
 
 // =============================================================================
 // Session parsing (design §10)
@@ -606,7 +425,6 @@ export interface TurnRecord {
  */
 export interface Handle {
 	name: string;
-	paneId: string | null;
 	sessionFile: string;
 	runId: string;
 	agent: string;
@@ -637,12 +455,19 @@ export interface PresetConfig {
 	thinking?: string | false;
 }
 
+/** @deprecated Transitional herdr.* settings retained until v3. */
 export interface HerdrSettings {
-	defaultPlacement?: Placement;
+	/** @deprecated Parsed for transition compatibility; ignored by RPC v2. */
+	defaultPlacement?: "split-down" | "split-right" | "new-tab";
+	/** @deprecated Legacy concurrency hint; ignored by RPC v2. */
 	maxConcurrentAgents?: number;
+	/** @deprecated Legacy Herdr launch retry setting. */
 	startRetries?: number;
+	/** @deprecated Legacy Herdr launch retry setting. */
 	startRetryBackoffMs?: number;
+	/** @deprecated Legacy session retention setting. */
 	sessionRetentionDays?: number;
+	/** @deprecated Legacy session retention setting. */
 	sessionRetentionMaxBytesPerRun?: number;
 }
 
@@ -747,6 +572,7 @@ export interface SubagentsSettings {
 	disableBuiltins?: boolean;
 	disableThinking?: boolean;
 	maxSubagentSpawnsPerSession?: number;
+	/** @deprecated Transitional herdr.* keys are parsed and ignored by RPC v2. */
 	herdr?: HerdrSettings;
 	legion?: LegionSettings;
 	/** Completion-notice merge mode. Default "smart". */
@@ -803,6 +629,7 @@ export class SubagentError extends Error {
 export const ErrorCodes = {
 	HERDR_UNAVAILABLE: "HERDR_UNAVAILABLE",
 	DISABLED: "DISABLED",
+	/** @deprecated Legacy Herdr client error retained for API compatibility. */
 	PANE_BUSY: "PANE_BUSY",
 	START_FAILED: "START_FAILED",
 	START_TIMEOUT: "START_TIMEOUT",
@@ -821,28 +648,20 @@ export const ErrorCodes = {
 // =============================================================================
 
 export const DEFAULTS = {
-	/** F19/F20: agent_pane_busy race; retry with backoff. */
+	/** @deprecated Legacy Herdr start-retry settings retained by the archived backend. */
 	startRetries: 40,
 	startRetryBackoffMs: 150,
 	/** F8: agent wait covers a turn; generous default. */
 	turnTimeoutMs: 900_000,
 	/** jsonl quiet window before declaring a turn settled. */
 	settleQuietMs: 2_500,
+	/** @deprecated Legacy Herdr concurrency hint retained during migration. */
 	maxConcurrentAgents: 6,
+	/** @deprecated Legacy Herdr session retention setting. */
 	sessionRetentionDays: 7,
-	/** F22: missing binary surfaces as a ~15s timeout. */
+	/** @deprecated Legacy Herdr probe settings; retained for the archived backend. */
 	startTimeoutMs: 45_000,
 	binaryProbeTimeoutMs: 3_000,
-	/**
-	 * Default wall clock for ONE herdr CLI invocation (agent get, pane list,
-	 * tab create, …). Calls that need longer pass their own timeoutMs and are
-	 * NOT capped by this.
-	 *
-	 * Measured (hw 2026-10-09): a fork storm on the host wedged the herdr CLI
-	 * mid-invocation; with no cap, ONE stuck `agent get` froze the whole
-	 * collect/wait chain forever — the parent's `wait`/`collect` tool calls
-	 * never returned (55+ min, no toolResult). Every short control call now
-	 * fails fast with a timeout error the poll loops already tolerate.
-	 */
+	/** @deprecated Legacy Herdr command timeout retained for the archived backend. */
 	commandTimeoutMs: 15_000,
 } as const;

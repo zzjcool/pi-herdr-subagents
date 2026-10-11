@@ -18,7 +18,6 @@ import {
 	type AcceptanceConfig,
 	type AcceptanceCriterion,
 	type OnBlockedPolicy,
-	type Placement,
 	type SystemPromptMode,
 	type ToolBudgetConfig,
 	type TurnBudgetConfig,
@@ -78,11 +77,6 @@ function extraAgentDirs(): string[] {
 
 const VALID_KINDS: ReadonlySet<string> = new Set(AGENT_KINDS);
 
-const VALID_PLACEMENTS: ReadonlySet<string> = new Set([
-	"split-down",
-	"split-right",
-	"new-tab",
-]);
 const VALID_ON_BLOCKED: ReadonlySet<string> = new Set([
 	"forward",
 	"auto-approve",
@@ -484,12 +478,8 @@ function applyBehaviorFields(config: AgentConfig, fm: AgentFrontmatter): void {
 	}
 }
 
-/** herdr-specific placement and blocking policy. */
+/** Transitional blocked-policy frontmatter retained for approval handling. */
 function applyHerdrFields(config: AgentConfig, fm: AgentFrontmatter): void {
-	const placement = str(fm.placement);
-	if (placement && VALID_PLACEMENTS.has(placement)) {
-		config.placement = placement as Placement;
-	}
 	const onBlocked = str(fm.onBlocked);
 	if (onBlocked && VALID_ON_BLOCKED.has(onBlocked)) {
 		config.onBlocked = onBlocked as OnBlockedPolicy;

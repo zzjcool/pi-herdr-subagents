@@ -30,7 +30,6 @@ afterEach(() => {
 function makeChild(name: string, overrides: Partial<ChildRecord> = {}): ChildRecord {
 	return {
 		name,
-		paneId: "w1:p1",
 		sessionFile: path.join(tmpDir, "runs", "r-x", `${name}.jsonl`),
 		ownerToken: "tok-abc",
 		state: "launching",
@@ -81,19 +80,19 @@ test("createRun truncates nested path to 4 entries", () => {
 	assert.equal(run.path.length, 4);
 });
 
-test("create/read round-trip preserves all fields", () => {
+test("create/read round-trip preserves RPC run identity", () => {
 	const store = newStore();
 	const created = store.createRun({
 		task: "refactor",
 		cwd: "/proj",
 		maxDepth: 4,
-		herdr: { workspaceId: "w1", tabId: "w1:t2", tabLabel: "task:refactor" },
+		herdr: { supervisor: "rpc", node_id: "root" },
 	});
 	const read = store.readRun(created.runId);
 	assert.ok(read);
 	assert.equal(read.runId, created.runId);
 	assert.equal(read.maxDepth, 4);
-	assert.deepEqual(read.herdr, { workspaceId: "w1", tabId: "w1:t2", tabLabel: "task:refactor" });
+	assert.deepEqual(read.herdr, { supervisor: "rpc", node_id: "root" });
 });
 
 test("readRun returns null for a missing run", () => {
@@ -304,11 +303,9 @@ test("updateChild mutates only the named child and persists", async () => {
 	await store.addChild(run.runId, makeChild("b"));
 	const updated = await store.updateChild(run.runId, "a", (c) => {
 		c.state = "retired";
-		c.paneId = null;
 		c.retiredAt = new Date().toISOString();
 	});
 	assert.equal(updated.children[0]?.state, "retired");
-	assert.equal(updated.children[0]?.paneId, null);
 	assert.equal(updated.children[1]?.state, "launching");
 	assert.equal(store.findChild(run.runId, "a")?.state, "retired");
 });
@@ -578,62 +575,23 @@ test("sessionFileFor keeps the pre-creation contract", () => {
 	}
 });
 
-test("pickChildByName does not return another parent's child of the same name", async () => {
+test("pickChildByName prefers a live child when names are reused across run records", async () => {
 	const store = newStore();
-	const theirs = store.createRun({
-		task: "theirs",
-		cwd: "/p",
-		herdr: { parentPaneId: "w1:pA" },
-	});
-	await store.addChild(
-		theirs.runId,
-		makeChild("scout-0", { state: "working", paneId: "w1:p10" }),
-	);
-	const ours = store.createRun({
-		task: "ours",
-		cwd: "/p",
-		herdr: { parentPaneId: "w1:pB" },
-	});
-	await store.addChild(
-		ours.runId,
-		makeChild("scout-0", { state: "working", paneId: "w1:p20" }),
-	);
-
-	const picked = pickChildByName(store.listRuns(), "scout-0", {
-		parentPaneId: "w1:pB",
-	});
-	assert.equal(picked?.run.runId, ours.runId);
-	assert.equal(picked?.child.paneId, "w1:p20");
-	assert.equal(
-		pickChildByName(store.listRuns(), "scout-0", { parentPaneId: "w1:pC" }),
-		null,
-	);
+	const old = store.createRun({ task: "old", cwd: "/p" });
+	await store.addChild(old.runId, makeChild("scout-0", { state: "retired" }));
+	const current = store.createRun({ task: "current", cwd: "/p" });
+	await store.addChild(current.runId, makeChild("scout-0", { state: "working" }));
+	const picked = pickChildByName(store.listRuns(), "scout-0");
+	assert.equal(picked?.run.runId, current.runId);
+	assert.equal(picked?.child.state, "working");
 });
 
-test("pickChildByName prefers a live child over an older retired one", async () => {
-	const store = newStore();
-	const old = store.createRun({
-		task: "old",
-		cwd: "/p",
-		herdr: { parentPaneId: "w1:pA" },
-	});
-	await store.addChild(
-		old.runId,
-		makeChild("scout-0", { state: "retired", paneId: null }),
-	);
-	const next = store.createRun({
-		task: "next",
-		cwd: "/p",
-		herdr: { parentPaneId: "w1:pA" },
-	});
-	await store.addChild(
-		next.runId,
-		makeChild("scout-0", { state: "working", paneId: "w1:p3" }),
-	);
-
-	const picked = pickChildByName(store.listRuns(), "scout-0", {
-		parentPaneId: "w1:pA",
-	});
-	assert.equal(picked?.run.runId, next.runId);
-	assert.equal(picked?.child.state, "working");
+test("pickChildByName falls back to the newest retired record when no live child exists", async () => {
+	let tick = 1_000_000;
+	const store = newStore(() => tick++);
+	const old = store.createRun({ task: "old", cwd: "/p" });
+	await store.addChild(old.runId, makeChild("scout-0", { state: "retired" }));
+	const next = store.createRun({ task: "next", cwd: "/p" });
+	await store.addChild(next.runId, makeChild("scout-0", { state: "retired" }));
+	assert.equal(pickChildByName(store.listRuns(), "scout-0")?.run.runId, next.runId);
 });

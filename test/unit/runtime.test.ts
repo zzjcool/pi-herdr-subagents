@@ -75,7 +75,7 @@ test("runtime: async watch notifies the parent once and drops the widget entry",
 	assert.equal((busy.at(-1) as { active: boolean }).active, false);
 });
 
-test("runtime: watch recycles the pane after a terminal collect", async () => {
+test("runtime: watch retires the RPC child after a terminal collect", async () => {
 	const messages: unknown[] = [];
 	let retired = 0;
 	const runtime = createSessionRuntime({
@@ -248,7 +248,7 @@ test("runtime: a blocked child asks the parent and does not recycle", async () =
 	assert.equal(retired, 0);
 	assert.equal(messages.length, 0, "blocked is not a completion");
 	assert.equal(runtime.get("w1")?.state, "blocked");
-	assert.equal(runtime.activeJobs().length, 1, "pane stays on the widget");
+	assert.equal(runtime.activeJobs().length, 1, "blocked RPC child stays on the widget");
 });
 
 test("runtime: approving a blocked child rewatches instead of releasing", async () => {
@@ -333,42 +333,7 @@ test("runtime: session jsonl fills model, turns, and in-flight tools", async () 
 	});
 });
 
-test("runtime: non-pi probe fills the same live fields", async () => {
-	const runtime = createSessionRuntime({
-		sendMessage() {},
-		now: () => 1_000,
-		probeMs: 0,
-	});
-	runtime.track({
-		name: "cursor-0",
-		runId: "r-1",
-		agent: "reviewer",
-		sessionFile: "",
-		timeoutMs: 1_000,
-		kind: "cursor",
-		model: "inherit-parent",
-		probe: async () => ({
-			model: "cursor/gpt-4.1",
-			herdrStatus: "working",
-			turns: 2,
-			lastTools: ["edit"],
-		}),
-		collect: () => new Promise(() => {}),
-	});
-	await waitFor(
-		() => runtime.get("cursor-0")?.probed?.model === "cursor/gpt-4.1",
-		"probe result",
-	);
-	assert.deepEqual(runtime.get("cursor-0")?.probed, {
-		model: "cursor/gpt-4.1",
-		herdrStatus: "working",
-		turns: 2,
-		lastTools: ["edit"],
-	});
-	runtime.dispose();
-});
-
-test("shouldRecycleAfterCollect keeps running/blocked panes, recycles unknown", () => {
+test("shouldRecycleAfterCollect keeps running/blocked RPC children, recycles unknown", () => {
 	assert.equal(shouldRecycleAfterCollect("running"), false);
 	assert.equal(shouldRecycleAfterCollect("blocked"), false);
 	assert.equal(shouldRecycleAfterCollect("unknown"), true);
@@ -586,7 +551,7 @@ test("runtime: retire runs during the batch window, not after the flush", async 
 
 // ─────────────────────────── runtime.wait (T5) ───────────────────────────
 
-test("runtime.wait: aggregates both children, recycles panes, suppresses notify", async () => {
+test("runtime.wait: aggregates both children, retires RPC children, suppresses notify", async () => {
 	const messages: SentMessage[] = [];
 	let retired = 0;
 	const resolvers = new Map<string, (s: CollectSnapshot) => void>();
@@ -624,7 +589,7 @@ test("runtime.wait: aggregates both children, recycles panes, suppresses notify"
 			{ name: "b", output: "B-done" },
 		],
 	);
-	await waitFor(() => retired === 2, "both panes recycled");
+	await waitFor(() => retired === 2, "both RPC children retired");
 	assert.equal(runtime.activeJobs().length, 0, "both released");
 	await new Promise((r) => setTimeout(r, 20));
 	assert.equal(messages.length, 0, "wait consumes the results; no notify");
@@ -663,7 +628,7 @@ test("runtime.wait: the hit path itself releases the job (no watch finally to hi
 	});
 	const results = await runtime.wait(["solo"], { timeoutMs: 5_000 });
 	assert.equal(results[0]?.snapshot?.output, "solo-done");
-	await waitFor(() => retired === 1, "pane recycled by the wait hit");
+	await waitFor(() => retired === 1, "RPC child retired by the wait hit");
 	assert.equal(runtime.activeJobs().length, 0, "released by the wait hit");
 	runtime.dispose();
 });

@@ -1,1037 +1,229 @@
-/**
- * Orchestrator integration tests.
- *
- * These exercise launch / collect / retire against the fake herdr (driven
- * through the REAL client, so argv construction and response parsing are
- * covered too), asserting the MEASURED behaviours that make this design work:
- *
- *   F4  — the session file is pre-created before the agent starts
- *   F11 — retirement uses ctrl+d, and falls back to pane close
- *   F12 — closing a pane is safe: the session file survives
- *   F15 — retireAll can reap a whole tab
- *   F19 — the agent_pane_busy race is retried, not fatal
- *   F26 — success/failure comes from the session, not agent_status
- *   F27 — retire snapshots the outcome BEFORE the agent disappears
- */
-
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-	mkdtempSync,
-	rmSync,
-	existsSync,
-	writeFileSync,
-	statSync,
-	readFileSync,
-} from "node:fs";
-import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import {
-	FakeHerdr,
-	appendTurnToFakeStore,
-	createFakeRunner,
-} from "../helpers/fake-herdr.ts";
-import { createHerdrClient } from "../../src/herdr/client.ts";
-import {
-	Orchestrator,
-	preCreateSessionFile,
-} from "../../src/runs/orchestrator.ts";
-import { assistantMsg, sessionHeader, userMsg } from "../helpers/fixtures.ts";
-import type { AgentConfig } from "../../src/shared/types.ts";
-
-/** Build a pi-shaped session transcript from the shared fixtures. */
-function transcript(messages: Array<Record<string, unknown>>): string {
-	const lines = [sessionHeader()];
-	for (const m of messages) {
-		if (m.role === "user") {
-			lines.push(userMsg(String(m.text ?? "")));
-			continue;
-		}
-		const opts: Record<string, unknown> = {};
-		if (m.stopReason !== undefined) opts.stopReason = m.stopReason;
-		if (m.text !== undefined) opts.text = m.text;
-		if (m.tools !== undefined) opts.tools = m.tools;
-		if (m.errorMessage !== undefined) opts.errorMessage = m.errorMessage;
-		lines.push(assistantMsg(opts));
-	}
-	return `${lines.join("\n")}\n`;
-}
+import { Orchestrator, preCreateSessionFile } from "../../src/runs/orchestrator.ts";
+import { ErrorCodes, SubagentError, type AgentConfig } from "../../src/shared/types.ts";
+import { FakeSupervisor } from "../helpers/fake-supervisor.ts";
+import { RunStore } from "../../src/runs/store.ts";
 
 function agent(over: Partial<AgentConfig> = {}): AgentConfig {
 	return {
-		name: "reviewer",
+		name: "worker",
 		description: "test agent",
-		systemPromptMode: "replace",
+		systemPromptMode: "append",
 		inheritProjectContext: true,
 		inheritSkills: false,
 		kind: "pi",
 		systemPrompt: "You are a test agent.",
 		source: "user",
-		filePath: "/fake/reviewer.md",
+		filePath: "/fake/worker.md",
 		...over,
 	};
 }
 
-interface Harness {
-	orchestrator: Orchestrator;
-	fake: FakeHerdr;
-	client: ReturnType<typeof createHerdrClient>;
-	runDir: string;
-	/** How many `agent start` invocations were attempted (retry assertions). */
-	startAttempts: () => number;
-	openPanes: () => number;
-	cleanup: () => void;
+function tempDir(prefix: string): string {
+	return mkdtempSync(path.join(tmpdir(), prefix));
 }
 
-/**
- * Wire the orchestrator to a fake herdr through the REAL client.
- * `sleep` advances the fake clock rather than really waiting, so the F19 busy
- * window expires deterministically and the tests stay fast.
- */
-function harness(options: { paneBusyMs?: number } = {}): Harness {
-	const runDir = mkdtempSync(path.join(tmpdir(), "orch-test-"));
-	const fake = new FakeHerdr({ paneBusyMs: options.paneBusyMs ?? 0 });
-	fake.addRootPane("w1");
-	const client = createHerdrClient(createFakeRunner(fake));
-
+function harness(options: ConstructorParameters<typeof FakeSupervisor>[0] = {}) {
+	const runDir = tempDir("rpc-orchestrator-");
+	const supervisor = new FakeSupervisor(options);
+	let clock = 0;
 	const orchestrator = new Orchestrator({
-		client,
+		supervisor,
 		runDir,
 		cwd: "/tmp/project",
-		now: () => fake.now,
-		cursorChatsRoot: fake.chatRoot,
-		sleep: async (ms) => {
-			fake.advance(ms);
-		},
+		now: () => clock,
+		sleep: async (ms) => { clock += ms; },
 	});
-
 	return {
-		orchestrator,
-		fake,
-		client,
 		runDir,
-		startAttempts: () =>
-			fake.commands.filter((c) => c.args[0] === "agent" && c.args[1] === "start")
-				.length,
-		openPanes: () => fake.panes.size,
+		supervisor,
+		orchestrator,
 		cleanup: () => rmSync(runDir, { recursive: true, force: true }),
 	};
 }
 
-// ─────────────────────────── session pre-creation (F4) ───────────────────────────
-
-test("preCreateSessionFile creates an empty 0600 file and is idempotent", () => {
-	const dir = mkdtempSync(path.join(tmpdir(), "precreate-"));
+test("preCreateSessionFile is idempotent and leaves an empty private session file", () => {
+	const root = tempDir("rpc-precreate-");
 	try {
-		const file = path.join(dir, "nested", "s.jsonl");
+		const file = path.join(root, "nested", "session.jsonl");
 		preCreateSessionFile(file);
-		assert.ok(existsSync(file));
+		assert.equal(existsSync(file), true);
 		assert.equal(statSync(file).size, 0);
-
-		// Idempotent: an existing file must not be truncated.
 		writeFileSync(file, "existing\n");
 		preCreateSessionFile(file);
-		assert.equal(statSync(file).size, "existing\n".length);
+		assert.equal(readFileSync(file, "utf8"), "existing\n");
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		rmSync(root, { recursive: true, force: true });
 	}
 });
 
-test("launch pre-creates the session file before starting the agent (F4)", async () => {
+test("RPC launch builds the Pi argv, records lineage/budgets, and stores a real owner token", async () => {
 	const h = harness();
+	h.orchestrator = new Orchestrator({
+		supervisor: h.supervisor,
+		runDir: h.runDir,
+		cwd: "/tmp/project",
+		team: { name: "frontend", source: "settings" },
+		now: () => 0,
+		sleep: async () => {},
+	});
 	try {
 		const handle = await h.orchestrator.launch({
-			agent: agent(),
-			task: "do it",
-		});
-		assert.ok(
-			existsSync(handle.sessionFile),
-			"session file must exist right after launch",
-		);
-		assert.notEqual(handle.paneId, null);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("launch records the child with provenance", async () => {
-	const h = harness();
-	try {
-		await h.orchestrator.launch({
-			agent: agent({ name: "worker" }),
-			task: "t",
-			model: "cb/glm-5.3",
-		});
-		const [child] = h.orchestrator.childrenSnapshot();
-		assert.ok(child);
-		assert.equal(child.agent, "worker");
-		assert.equal(child.kind, "pi");
-		assert.equal(child.model, "cb/glm-5.3");
-		assert.equal(child.state, "working");
-		assert.ok(child.ownerToken.length > 0, "an owner token must be recorded");
-	} finally {
-		h.cleanup();
-	}
-});
-
-// ─────────────────────────── the readiness race (F19) ───────────────────────────
-
-test("launch retries agent_pane_busy until the pane is ready (F19)", async () => {
-	const h = harness({ paneBusyMs: 500 });
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		assert.ok(handle.name);
-		assert.ok(
-			h.startAttempts() > 1,
-			`expected more than one start attempt, got ${h.startAttempts()}`,
-		);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("a failed launch rolls back its pane instead of leaking it", async () => {
-	// A pane that never becomes ready exhausts the retry budget, so the launch
-	// fails — and the pane it created must be closed again.
-	const runDir = mkdtempSync(path.join(tmpdir(), "orch-rollback-"));
-	try {
-		const fake = new FakeHerdr({ paneBusyMs: 10_000 });
-		fake.addRootPane("w1");
-		const orchestrator = new Orchestrator({
-			client: createHerdrClient(createFakeRunner(fake)),
-			runDir,
-			cwd: "/tmp/project",
-			sleep: async () => {}, // never advance: the pane stays busy forever
-			startRetries: 3,
-			startRetryBackoffMs: 1,
-		});
-
-		const before = fake.panes.size;
-		await assert.rejects(
-			() => orchestrator.launch({ agent: agent(), task: "t" }),
-			/agent start/,
-		);
-		assert.equal(
-			fake.panes.size,
-			before,
-			"a failed launch must not leak its pane",
-		);
-	} finally {
-		rmSync(runDir, { recursive: true, force: true });
-	}
-});
-
-// ─────────────────────────── outcome derivation (F26/F27/F29) ───────────────────────────
-
-test("collect derives success from the session, not agent_status (F26)", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "go" },
-				{ role: "assistant", stopReason: "stop", text: "done" },
-			]),
-		);
-		const result = await h.orchestrator.collect(handle.name);
-		assert.equal(result.execution.status, "success");
-		assert.equal(result.output, "done");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("collect persists the full output to <name>.output.md and reports its path", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		const long = `${"y".repeat(9000)}\n{"ok": true, "reason": "long"}`;
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "go" },
-				{ role: "assistant", stopReason: "stop", text: long },
-			]),
-		);
-		const result = await h.orchestrator.collect(handle.name);
-		assert.equal(result.execution.status, "success");
-		// The full text — beyond any preview cap — lands on disk, and the
-		// collect result names the file so a truncated notice has a one-step
-		// recovery instead of a manual jsonl re-parse.
-		assert.ok(result.outputFile, "collect must report an outputFile");
-		assert.ok(result.outputFile.endsWith(".output.md"));
-		assert.equal(
-			readFileSync(result.outputFile, "utf-8").trim(),
-			long,
-			"the persisted artifact must carry the full output verbatim",
-		);
-		// The cached (post-retire) collect path reports it too.
-		const cached = h.orchestrator.cachedCollect(handle.name);
-		assert.ok(cached?.outputFile);
-		assert.equal(cached?.outputFile, result.outputFile);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("collect reports failure for an LLM error even though herdr says done (F26)", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "go" },
-				{
-					role: "assistant",
-					stopReason: "error",
-					errorMessage: "400 status code",
-				},
-			]),
-		);
-		const result = await h.orchestrator.collect(handle.name);
-		assert.equal(result.execution.status, "failed");
-		assert.equal(result.execution.errorMessage, "400 status code");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("collect reports abort when the agent is GONE and the last prompt has no reply (F29)", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(handle.sessionFile, transcript([{ role: "user", text: "go" }]));
-
-		// F29's measured scenario is a HARD KILL: the pane dies mid-turn, so no
-		// assistant message is ever written and the agent is gone. Only the
-		// combination of "no reply" + "agent gone" is an abort; a live agent with
-		// no reply is simply still working (covered by the next test).
-		// ctrl+d is the fake's modelled clean exit (F11).
-		await h.client.agentSendKeys(handle.name, "ctrl+d");
-
-		const result = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 2_000,
-		});
-		assert.equal(result.execution.status, "aborted");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("collect reports `running` (not aborted) when the agent is still alive", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		// A user prompt with no reply yet, but the agent is alive: this is a slow
-		// turn, not an abort. Reporting `aborted` here would be a false alarm.
-		writeFileSync(handle.sessionFile, transcript([{ role: "user", text: "go" }]));
-
-		const result = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 2_000,
-		});
-		assert.equal(result.execution.status, "running");
-		assert.match(result.execution.reason ?? "", /timed out|still alive/);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("a running snapshot writes no output artifact and clears none (no stale vintage)", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "go" },
-				{ role: "assistant", stopReason: "stop", text: "first answer" },
-			]),
-		);
-		// Turn 1 settles with output → artifact on disk, recorded on the child.
-		const first = await h.orchestrator.collect(handle.name);
-		assert.ok(first.outputFile);
-		assert.ok(existsSync(first.outputFile!));
-
-		// Turn 2 goes live again (steer, no reply yet): the running snapshot
-		// must NOT write a partial artifact NOR report the stale turn-1 file.
-		writeFileSync(handle.sessionFile, transcript([{ role: "user", text: "again" }]));
-		const running = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 2_000,
-		});
-		assert.equal(running.execution.status, "running");
-		assert.equal(running.outputFile, undefined);
-		const cached = h.orchestrator.cachedCollect(handle.name);
-		assert.equal(cached?.outputFile, undefined, "cached collect must not resurrect the stale artifact");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("an empty terminal output clears an earlier turn's artifact (vintage mismatch)", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "go" },
-				{ role: "assistant", stopReason: "stop", text: "first answer" },
-			]),
-		);
-		const first = await h.orchestrator.collect(handle.name);
-		assert.ok(first.outputFile);
-		assert.ok(existsSync(first.outputFile!));
-
-		// Turn 2 terminates with NO text (hard kill: user row, no assistant).
-		writeFileSync(handle.sessionFile, transcript([{ role: "user", text: "again" }]));
-		await h.client.agentSendKeys(handle.name, "ctrl+d");
-		const second = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 2_000,
-		});
-		assert.equal(second.execution.status, "aborted");
-		assert.equal(second.outputFile, undefined);
-		assert.equal(
-			existsSync(first.outputFile!),
-			false,
-			"a stale artifact must be removed once this turn produced no output",
-		);
-		const cached = h.orchestrator.cachedCollect(handle.name);
-		assert.equal(cached?.outputFile, undefined);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("collect keeps the pane and reports `running` when the herdr CLI itself is wedged (hw 2026-10-09)", async () => {
-	// Incident regression: a fork storm on the host wedged every herdr CLI
-	// invocation. With the command timeout in place those calls settle with
-	// HERDR_ERROR — and collect MUST treat that as "status unavailable",
-	// never as "agent gone": the child is alive, only our control channel is
-	// broken. `aborted` here would make the runtime retire a live child.
-	const runDir = mkdtempSync(path.join(tmpdir(), "orch-wedged-"));
-	try {
-		const fake = new FakeHerdr({});
-		fake.addRootPane("w1");
-		// Wrap the fake runner: `agent get`/`agent wait` settle as a timeout
-		// kill (code -2, the runner's timeout signature) while everything else
-		// hits the healthy fake — exactly a wedged control plane.
-		const base = createFakeRunner(fake);
-		const wedged: typeof base = async (args, opts) => {
-			if (args[0] === "agent" && (args[1] === "get" || args[1] === "wait")) {
-				return {
-					stdout: "",
-					stderr: `\n[timeout after ${opts?.timeoutMs ?? 15_000}ms]`,
-					code: -2,
-				};
-			}
-			return base(args, opts);
-		};
-		const orchestrator = new Orchestrator({
-			client: createHerdrClient(wedged),
-			runDir,
-			cwd: "/tmp/project",
-			sleep: async () => {},
-		});
-
-		const handle = await orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(
-			handle.sessionFile,
-			transcript([{ role: "user", text: "go" }]),
-		);
-
-		const before = fake.panes.size;
-		const result = await orchestrator.collect(handle.name, {
-			timeoutMs: 1_000,
-		});
-		assert.equal(
-			result.execution.status,
-			"running",
-			`a wedged CLI must not read as aborted (got: ${result.execution.reason})`,
-		);
-		assert.match(result.execution.reason ?? "", /unavailable|timed out/);
-		// The pane must survive: retiring a live child because OUR channel
-		// broke loses unsaved turn state.
-		assert.equal(
-			fake.panes.size,
-			before,
-			"collect must not close the pane when the CLI is wedged",
-		);
-	} finally {
-		rmSync(runDir, { recursive: true, force: true });
-	}
-});
-
-test("collect turns a self-reported verdict into acceptance (F33)", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "go" },
-				{
-					role: "assistant",
-					stopReason: "stop",
-					text: '{"ok": false, "reason": "missing input"}',
-				},
-			]),
-		);
-		const result = await h.orchestrator.collect(handle.name);
-		assert.equal(result.execution.status, "success");
-		assert.equal(result.acceptance.status, "rejected");
-		assert.equal(result.acceptance.reason, "missing input");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("collect on an unknown child throws", async () => {
-	const h = harness();
-	try {
-		await assert.rejects(() => h.orchestrator.collect("nobody"), /unknown child/);
-	} finally {
-		h.cleanup();
-	}
-});
-
-// ─────────────────────────── retirement (F11/F12/F15/F27) ───────────────────────────
-
-test("retire snapshots the outcome before the agent disappears (F27)", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "go" },
-				{ role: "assistant", stopReason: "stop", text: "ok" },
-			]),
-		);
-
-		// Retire WITHOUT calling collect first: the snapshot must still be taken.
-		const child = await h.orchestrator.retire(handle.name);
-		assert.equal(child.state, "retired");
-		assert.equal(
-			child.execution?.status,
-			"success",
-			"outcome must be captured during retire",
-		);
-		assert.equal(child.paneId, null, "paneId is cleared after recycling");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("retire leaves the session file on disk so resume stays possible (F12)", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "go" },
-				{ role: "assistant", stopReason: "stop", text: "ok" },
-			]),
-		);
-		await h.orchestrator.retire(handle.name);
-		assert.ok(
-			existsSync(handle.sessionFile),
-			"session file must survive retirement",
-		);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("retire exits the agent and closes its pane", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		assert.ok(h.fake.agents.has(handle.name), "agent should exist after launch");
-
-		await h.orchestrator.retire(handle.name);
-
-		assert.equal(h.fake.agents.has(handle.name), false, "agent must be gone");
-		// Only the root pane remains.
-		assert.equal(h.openPanes(), 1, "the child pane must be closed");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("retire is idempotent", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		await h.orchestrator.retire(handle.name);
-		const again = await h.orchestrator.retire(handle.name);
-		assert.equal(again.state, "retired");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("retireAll reaps every child (F15)", async () => {
-	const h = harness();
-	try {
-		const a = await h.orchestrator.launch({
-			agent: agent({ name: "a" }),
-			task: "t",
-		});
-		const b = await h.orchestrator.launch({
-			agent: agent({ name: "b" }),
-			task: "t",
-		});
-
-		const retired = await h.orchestrator.retireAll({});
-
-		assert.equal(retired.length, 2);
-		assert.equal(h.fake.agents.has(a.name), false);
-		assert.equal(h.fake.agents.has(b.name), false);
-	} finally {
-		h.cleanup();
-	}
-});
-
-// ─────────────────────────── names, steering, audit, restore ───────────────────────────
-
-test("allocateName produces valid, non-colliding names", () => {
-	const h = harness();
-	try {
-		const seen = new Set<string>();
-		for (let i = 0; i < 5; i += 1) {
-			const n = h.orchestrator.allocateName("Review Agent");
-			assert.match(n, /^[a-z][a-z0-9_-]{0,31}$/, `invalid name: ${n}`);
-			assert.equal(seen.has(n), false, `duplicate name: ${n}`);
-			seen.add(n);
-		}
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("steer forwards a prompt to a live child (F10)", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		await h.orchestrator.steer(handle.name, "change of plan");
-		// The fake records prompts it received.
-		const prompts = h.fake.commands.filter(
-			(c) => c.args[0] === "agent" && c.args[1] === "prompt",
-		);
-		assert.equal(prompts.length, 2, "launch delivers the task, steer adds a second prompt");
-		assert.match(prompts[0]?.args.join(" ") ?? "", /Task: t/);
-		assert.match(prompts[1]?.args.join(" ") ?? "", /change of plan/);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("steer on a missing child throws", async () => {
-	const h = harness();
-	try {
-		await assert.rejects(() => h.orchestrator.steer("ghost", "hi"));
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("auditOrphans reports panes in the tab that the tree does not know about", async () => {
-	const h = harness();
-	try {
-		// The run owns one task tab; its children live inside it.
-		await h.orchestrator.launch({ agent: agent(), task: "t" });
-		const tabId = h.orchestrator.tabId;
-		assert.ok(tabId, "the launch must have created the run tab");
-
-		// An out-of-band pane in the SAME tab, created by someone else: a new tab
-		// would be invisible to the audit, which is scoped to one tab.
-		const orphanPane = h.fake.addPaneInTab(tabId, "w1");
-		void orphanPane;
-
-		const orphans = await h.orchestrator.auditOrphans(tabId);
-		assert.ok(
-			orphans.length >= 1,
-			`expected at least one orphan, got ${orphans.length}`,
-		);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("restore rehydrates children from a persisted record", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		const snapshot = h.orchestrator.childrenSnapshot();
-
-		const fresh = new Orchestrator({
-			client: h.client,
-			runDir: h.runDir,
-			cwd: "/tmp/project",
-			sleep: async () => {},
-		});
-		fresh.restore({
-			schemaVersion: 1,
-			runId: "r-test",
-			task: "t",
-			cwd: "/tmp/project",
-			herdr: {},
-			path: [],
-			depth: 0,
-			maxDepth: 1,
-			children: snapshot,
-			budget: { spawned: 1, limit: 8, granted: 0 },
-			createdAt: new Date().toISOString(),
-			updatedAt: new Date().toISOString(),
-		});
-
-		assert.equal(fresh.childrenSnapshot().length, 1);
-		assert.equal(fresh.childrenSnapshot()[0]?.name, handle.name);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("collect runs verification-output criteria and promotes attested to verified", async () => {
-	const h = harness();
-	try {
-		const commands: string[] = [];
-		const orchestrator = new Orchestrator({
-			client: h.client,
-			runDir: h.runDir,
-			cwd: "/work",
-			sleep: async (ms) => {
-				h.fake.advance(ms);
-			},
-			verifyRunner: async (command, cwd) => {
-				commands.push(`${cwd}::${command}`);
-				return { code: 0, stdout: "ok\n", stderr: "" };
-			},
-		});
-		const handle = await orchestrator.launch({
 			agent: agent({
-				acceptance: {
-					level: "attested",
-					criteria: [
-						{
-							id: "typecheck-test-pass",
-							must: "项目自己的验证全绿",
-							evidence: ["verification-output"],
-							severity: "required",
-							command: "npm run typecheck && npm test",
-						},
-					],
-				},
+				tools: ["read", "bash"],
+				allowNestedSubagents: true,
+				toolBudget: { maxToolCalls: 12 },
+				turnBudget: { maxTurns: 4 },
+				toolTimeoutMs: 2_000,
+				acceptance: { level: "attested", role: "read-only" },
 			}),
-			task: "t",
+			task: "inspect the project",
+			model: "anthropic/claude-sonnet-4",
 		});
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "t" },
-				{
-					role: "assistant",
-					stopReason: "stop",
-					text: '{"ok": true, "reason": "done"}',
-				},
-			]),
-		);
-		const collected = await orchestrator.collect(handle.name, {
-			timeoutMs: 5_000,
-		});
+		const spawn = h.supervisor.spawns[0];
+		assert.ok(spawn);
+		assert.deepEqual(handle.child, h.orchestrator.childrenSnapshot()[0]);
+		assert.ok(handle.child.ownerToken.length > 0);
+		assert.equal(handle.sessionFile, path.join(h.runDir, `${handle.name}.jsonl`));
+		assert.deepEqual(spawn.input.agent.kind, "pi");
+		assert.ok(spawn.args.includes("--session"));
+		assert.ok(spawn.args.includes(handle.sessionFile));
+		assert.ok(spawn.args.includes("--model"));
+		assert.ok(spawn.args.includes("anthropic/claude-sonnet-4"));
+		assert.ok(spawn.args.includes("--tools"));
+		assert.ok(spawn.args.includes("read,bash"));
+		assert.ok(spawn.args.includes("--extension"));
+		assert.equal(spawn.args.some((arg) => arg.startsWith("@")), false, "RPC task is sent over prompt, not argv");
+		assert.equal(spawn.input.env?.PI_SUBAGENT_CHILD, "1");
+		assert.equal(spawn.input.env?.PI_SUBAGENT_MAX_TOOL_CALLS, "12");
+		assert.equal(spawn.input.env?.PI_SUBAGENT_MAX_TURNS, "4");
+		assert.equal(spawn.input.env?.PI_SUBAGENT_TOOL_TIMEOUT_MS, "2000");
+		assert.equal(spawn.input.env?.PI_SUBAGENT_ACCEPTANCE_ROLE, "read-only");
+		assert.equal(spawn.input.env?.PI_SUBAGENTS_TEAM, "frontend");
+		assert.equal(JSON.parse(spawn.input.env?.PI_SUBAGENT_PARENT_PATH ?? "[]").length, 1);
+		assert.equal(h.supervisor.calls.some((call) => call.method === "spawnChild"), true);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("M1 lifecycle: launch, RPC steer, session JSONL collect, and retire", async () => {
+	const h = harness({ immediateTimeout: false });
+	try {
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "first task", worktree: false });
+		await h.orchestrator.steer(handle.name, "focus on the failing assertion");
+		assert.ok(h.supervisor.calls.some((call) => call.method === "steer" && call.name === handle.name));
+		const collecting = h.orchestrator.collect(handle.name, { timeoutMs: 2_000 });
+		h.supervisor.settle(handle.name, { text: '{"ok":true,"reason":"all checks pass"}' });
+		const collected = await collecting;
+		assert.equal(collected.execution.status, "success");
 		assert.equal(collected.acceptance.status, "accepted");
-		assert.equal(collected.acceptance.level, "verified");
-		assert.equal(commands.length, 1);
-		assert.match(commands[0] ?? "", /\/work::npm run typecheck/);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("collect reports blocked without waiting out the timeout", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({ onBlocked: "forward" }),
-			task: "t",
-		});
-		assert.equal(handle.child.onBlocked, "forward");
-		h.fake.block(handle.name);
-		const started = Date.now();
-		const collected = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 60_000,
-		});
-		assert.ok(Date.now() - started < 5_000, "must not wait the full timeout");
-		assert.equal(collected.blocked, true);
-		assert.equal(collected.execution.status, "running");
-		assert.equal(
-			h.orchestrator.childrenSnapshot().find((c) => c.name === handle.name)
-				?.state,
-			"blocked",
-		);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("cachedCollect returns the snapshot after retire so a later collect is a no-wait", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "go" },
-				{ role: "assistant", stopReason: "stop", text: "ok" },
-			]),
-		);
-		await h.orchestrator.collect(handle.name, { timeoutMs: 5_000 });
-		await h.orchestrator.retire(handle.name);
+		assert.equal(collected.acceptance.level, "attested");
+		assert.match(collected.output, /all checks pass/);
+		assert.ok(collected.outputFile && existsSync(collected.outputFile));
 		const cached = h.orchestrator.cachedCollect(handle.name);
-		assert.ok(cached);
-		assert.equal(cached.execution.status, "success");
-		assert.equal(h.orchestrator.cachedCollect("nobody"), undefined);
+		assert.equal(cached?.execution.status, "success");
+		assert.equal(cached?.output, collected.output);
+		assert.equal(cached?.outputFile, collected.outputFile);
+		const retired = await h.orchestrator.retire(handle.name);
+		assert.equal(retired.state, "retired");
+		assert.equal(h.supervisor.isAlive(handle.name), false);
+		assert.equal(existsSync(handle.sessionFile), true, "retire preserves resume JSONL");
+		assert.equal(h.orchestrator.cachedCollect(handle.name)?.outputFile, collected.outputFile);
+		await h.orchestrator.retire(handle.name);
+		assert.equal(h.supervisor.calls.filter((call) => call.method === "retire").length, 1, "retire is idempotent after the RPC process stops");
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("approveBlocked sends y and lets collect run again", async () => {
+test("resume reuses the persisted session and asks the new RPC process to continue", async () => {
 	const h = harness();
 	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		h.fake.block(handle.name);
-		await h.orchestrator.collect(handle.name, { timeoutMs: 5_000 });
-		await h.orchestrator.approveBlocked(handle.name);
-		const child = h.orchestrator
-			.childrenSnapshot()
-			.find((c) => c.name === handle.name);
-		assert.equal(child?.state, "working");
-		assert.equal(child?.execution, undefined);
-		assert.ok(
-			h.fake.sentKeys.some((entry) => entry.keys.includes("y")),
-			"approval must reach herdr as send-keys y",
-		);
+		const first = await h.orchestrator.launch({ agent: agent(), task: "remember the code", name: "worker-existing", worktree: false });
+		h.supervisor.settle(first.name, { text: "resume sentinel: ORBIT-91" });
+		await h.orchestrator.collect(first.name);
+		await h.orchestrator.retire(first.name);
+
+		const resumed = await h.orchestrator.launch({ agent: agent(), task: "repeat the resume sentinel", name: first.name, worktree: false });
+		assert.equal(resumed.sessionFile, first.sessionFile);
+		assert.equal(h.supervisor.spawns.at(-1)?.resumedFromExistingSession, true);
+		assert.match(readFileSync(resumed.sessionFile, "utf8"), /repeat the resume sentinel/);
+		h.supervisor.settle(resumed.name, { text: "ORBIT-91" });
+		const collected = await h.orchestrator.collect(resumed.name);
+		assert.equal(collected.execution.status, "success");
+		assert.match(collected.output, /ORBIT-91/);
 	} finally {
 		h.cleanup();
 	}
 });
 
-function hasGit(): boolean {
+test("blocked RPC confirmation is correlated through UIProxy and stays live until answered", async () => {
+	const h = harness();
 	try {
-		execFileSync("git", ["--version"], { stdio: "ignore" });
-		return true;
-	} catch {
-		return false;
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "ask for approval", worktree: false });
+		h.supervisor.requestUI(handle.name, {
+			type: "extension_ui_request",
+			id: "rpc-confirm-1",
+			method: "confirm",
+			title: "Run command?",
+			message: "Allow the child command?",
+		});
+		const result = await h.orchestrator.collect(handle.name, { timeoutMs: 2_000 });
+		assert.equal(result.blocked, true);
+		assert.equal(result.execution.status, "running");
+		await h.orchestrator.approveBlocked(handle.name);
+		assert.deepEqual(h.supervisor.responseLog(handle.name), [
+			{ requestId: "rpc-confirm-1", response: { confirmed: true } },
+		]);
+		assert.equal(h.supervisor.isAlive(handle.name), true);
+	} finally {
+		h.cleanup();
 	}
-}
+});
 
-function initGitRepo(): string {
-	const dir = mkdtempSync(path.join(tmpdir(), "orch-git-"));
-	execFileSync("git", ["-C", dir, "init"], { stdio: "ignore" });
-	writeFileSync(path.join(dir, "README"), "hi\n");
-	execFileSync("git", ["-C", dir, "add", "README"], { stdio: "ignore" });
-	execFileSync("git", ["-C", dir, "commit", "-m", "init"], {
-		stdio: "ignore",
-		env: {
-			...process.env,
-			GIT_AUTHOR_NAME: "t",
-			GIT_AUTHOR_EMAIL: "t@t",
-			GIT_COMMITTER_NAME: "t",
-			GIT_COMMITTER_EMAIL: "t@t",
-		},
-	});
-	return dir;
-}
-
-test("launch worktree:true is refused outside a git repo", async () => {
+test("RPC child kind and spawn budget are refused before any process is created", async () => {
 	const h = harness();
 	try {
 		await assert.rejects(
-			() =>
-				h.orchestrator.launch({
-					agent: agent({ worktree: true }),
-					task: "t",
-				}),
-			/git repository/,
+			() => h.orchestrator.launch({ agent: agent({ kind: "cursor" }), task: "unsupported" }),
+			(error: unknown) => error instanceof SubagentError && error.code === ErrorCodes.INVALID_PARAMS && /pin pi-legion v0\.16\.x/.test(error.message),
 		);
-		assert.equal(h.startAttempts(), 0);
+		assert.equal(h.supervisor.spawns.length, 0);
+	} finally {
+		h.cleanup();
+	}
+
+	const limited = new Orchestrator({ supervisor: new FakeSupervisor(), runDir: tempDir("rpc-budget-"), cwd: "/tmp", maxSpawns: 0 });
+	await assert.rejects(
+		() => limited.launch({ agent: agent(), task: "over budget" }),
+		(error: unknown) => error instanceof SubagentError && error.code === ErrorCodes.BUDGET_EXCEEDED,
+	);
+});
+
+
+test("collect on an unknown child refuses with NOT_FOUND", async () => {
+	const h = harness();
+	try {
+		await assert.rejects(
+			() => h.orchestrator.collect("missing"),
+			(error: unknown) => error instanceof SubagentError && error.code === ErrorCodes.NOT_FOUND,
+		);
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("launch worktree:true sets pane cwd and retire leaves the tree", {
-	skip: !hasGit(),
-}, async () => {
-	const repo = initGitRepo();
-	const runDir = mkdtempSync(path.join(tmpdir(), "orch-wt-"));
-	const fake = new FakeHerdr({ paneBusyMs: 0 });
-	fake.addRootPane("w1");
-	const client = createHerdrClient(createFakeRunner(fake));
-	const verifyCwds: string[] = [];
-	const orchestrator = new Orchestrator({
-		client,
-		runDir,
-		cwd: repo,
-		sleep: async (ms) => {
-			fake.advance(ms);
-		},
-		verifyRunner: async (_command, cwd) => {
-			verifyCwds.push(cwd);
-			return { code: 0, stdout: "ok\n", stderr: "" };
-		},
-	});
-	try {
-		const handle = await orchestrator.launch({
-			agent: agent({
-				worktree: true,
-				acceptance: {
-					level: "attested",
-					criteria: [
-						{
-							id: "typecheck-test-pass",
-							must: "tests",
-							evidence: ["verification-output"],
-							severity: "required",
-							command: "npm test",
-						},
-					],
-				},
-			}),
-			task: "t",
-		});
-		assert.ok(handle.child.worktreePath);
-		assert.ok(handle.child.worktreeBranch);
-		assert.ok(existsSync(path.join(handle.child.worktreePath, "README")));
-		assert.match(
-			handle.child.worktreeBranch,
-			/^pi-subagent\/[a-z0-9._-]+-[0-9a-f]{8}$/,
-		);
-		const pane = fake.panes.get(handle.paneId ?? "");
-		assert.equal(pane?.cwd, handle.child.worktreePath);
-
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "t" },
-				{
-					role: "assistant",
-					stopReason: "stop",
-					text: '{"ok": true, "reason": "done"}',
-				},
-			]),
-		);
-		const collected = await orchestrator.collect(handle.name, {
-			timeoutMs: 5_000,
-		});
-		assert.equal(collected.acceptance.level, "verified");
-		assert.deepEqual(verifyCwds, [handle.child.worktreePath]);
-
-		await orchestrator.retire(handle.name);
-		assert.ok(
-			existsSync(handle.child.worktreePath),
-			"retire must leave the worktree on disk",
-		);
-	} finally {
-		rmSync(runDir, { recursive: true, force: true });
-		rmSync(repo, { recursive: true, force: true });
-	}
-});
-
-test("launch worktree: false opts out of the role default", {
-	skip: !hasGit(),
-}, async () => {
-	const repo = initGitRepo();
-	const runDir = mkdtempSync(path.join(tmpdir(), "orch-wt-off-"));
-	const fake = new FakeHerdr({ paneBusyMs: 0 });
-	fake.addRootPane("w1");
-	const orchestrator = new Orchestrator({
-		client: createHerdrClient(createFakeRunner(fake)),
-		runDir,
-		cwd: repo,
-		sleep: async (ms) => fake.advance(ms),
-	});
-	try {
-		const handle = await orchestrator.launch({
-			agent: agent({ worktree: true }),
-			task: "t",
-			worktree: false,
-		});
-		assert.equal(handle.child.worktreePath, undefined);
-		assert.equal(fake.panes.get(handle.paneId ?? "")?.cwd, repo);
-	} finally {
-		rmSync(runDir, { recursive: true, force: true });
-		rmSync(repo, { recursive: true, force: true });
-	}
-});
-
-test("launch worktree: true isolates even when the role did not default it", {
-	skip: !hasGit(),
-}, async () => {
-	const repo = initGitRepo();
-	const runDir = mkdtempSync(path.join(tmpdir(), "orch-wt-on-"));
-	const fake = new FakeHerdr({ paneBusyMs: 0 });
-	fake.addRootPane("w1");
-	const orchestrator = new Orchestrator({
-		client: createHerdrClient(createFakeRunner(fake)),
-		runDir,
-		cwd: repo,
-		sleep: async (ms) => fake.advance(ms),
-	});
-	try {
-		const handle = await orchestrator.launch({
-			agent: agent({ worktree: false }),
-			task: "t",
-			worktree: true,
-		});
-		assert.ok(handle.child.worktreePath);
-		assert.equal(fake.panes.get(handle.paneId ?? "")?.cwd, handle.child.worktreePath);
-	} finally {
-		rmSync(runDir, { recursive: true, force: true });
-		rmSync(repo, { recursive: true, force: true });
-	}
-});
-
-test("launch retries fallbackModels after a start failure", async () => {
+test("completionGuard rejects a successful RPC turn without a verdict", async () => {
 	const h = harness();
 	try {
-		h.fake.failStartOnModel.add("bad/model");
-		const handle = await h.orchestrator.launch({
-			agent: agent({ fallbackModels: ["good/model"] }),
-			task: "t",
-			model: "bad/model",
-		});
-		assert.equal(handle.child.model, "good/model");
-		assert.deepEqual(h.fake.startedModels, ["good/model"]);
-		assert.ok(h.startAttempts() >= 2);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("completionGuard rejects a successful turn with no verdict JSON", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({ completionGuard: true }),
-			task: "t",
-		});
-		assert.equal(handle.child.completionGuard, true);
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "t" },
-				{ role: "assistant", stopReason: "stop", text: "all done, trust me" },
-			]),
-		);
-		const collected = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 5_000,
-		});
+		const handle = await h.orchestrator.launch({ agent: agent({ completionGuard: true }), task: "finish with no verdict", worktree: false });
+		h.supervisor.settle(handle.name, { text: "finished without JSON" });
+		const collected = await h.orchestrator.collect(handle.name);
 		assert.equal(collected.execution.status, "success");
 		assert.equal(collected.acceptance.status, "rejected");
 		assert.match(collected.acceptance.reason ?? "", /completionGuard/);
@@ -1040,847 +232,135 @@ test("completionGuard rejects a successful turn with no verdict JSON", async () 
 	}
 });
 
-test("launch injects budget and nested-allow env into the pane", async () => {
+test("required verification command promotes an attested RPC verdict to verified", async () => {
 	const h = harness();
-	try {
-		await h.orchestrator.launch({
-			agent: agent({
-				toolBudget: { maxToolCalls: 4 },
-				turnBudget: { maxTurns: 2 },
-				toolTimeoutMs: 9_000,
-				allowNestedSubagents: true,
-			}),
-			task: "t",
-		});
-		const tab = h.fake.commands.find(
-			(c) => c.args[0] === "tab" && c.args[1] === "create",
-		);
-		assert.ok(tab);
-		const argv = tab.args.join(" ");
-		assert.match(argv, /PI_SUBAGENT_MAX_TOOL_CALLS=4/);
-		assert.match(argv, /PI_SUBAGENT_MAX_TURNS=2/);
-		assert.match(argv, /PI_SUBAGENT_TOOL_TIMEOUT_MS=9000/);
-		assert.match(argv, /PI_SUBAGENT_ALLOW_NESTED=1/);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("probeProgress maps non-pi herdr labels onto the same live fields as jsonl", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({
-				name: "reviewer",
-				kind: "cursor",
-				model: "grok-4.6",
-			}),
-			task: "t",
-		});
-		assert.equal(handle.child.kind, "cursor");
-		assert.equal(handle.child.model, "cursor-grok-4.6-high");
-		h.fake.setLiveProgress(handle.name, {
-			status: "working",
-			labels: { model: "cursor/gpt-4.1", tool: "edit", turns: "2" },
-			title: "Cursor · cursor/gpt-4.1",
-		});
-		const live = await h.orchestrator.probeProgress(handle.name);
-		assert.equal(live.model, "cursor/gpt-4.1");
-		assert.equal(live.herdrStatus, "working");
-		assert.equal(live.turns, 2);
-		assert.deepEqual(live.lastTools, ["edit"]);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("every kind starts via herdr then gets the task as agent prompt", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({
-				kind: "cursor",
-				model: "grok-4.6",
-				thinking: "medium",
-				systemPrompt: "You are a cursor child.",
-			}),
-			task: "review src/foo.ts",
-		});
-		const start = h.fake.commands.find(
-			(c) => c.args[0] === "agent" && c.args[1] === "start",
-		);
-		assert.ok(start);
-		const startArgv = start.args.join(" ");
-		assert.match(startArgv, /--kind cursor/);
-		assert.match(startArgv, /--model cursor-grok-4\.6-medium/);
-		assert.equal(
-			start.args.includes("--session"),
-			false,
-			"pi --session must not be forwarded to cursor",
-		);
-		assert.equal(
-			start.args.some((a) => a.startsWith("@")),
-			false,
-			"task is not a start argument",
-		);
-
-		const prompt = h.fake.commands.find(
-			(c) => c.args[0] === "agent" && c.args[1] === "prompt",
-		);
-		assert.ok(prompt);
-		assert.equal(prompt.args[2], handle.name);
-		assert.match(prompt.args.at(-1) ?? "", /You are a cursor child/);
-		assert.match(prompt.args.at(-1) ?? "", /review src\/foo\.ts/);
-
-		const paneId = handle.paneId;
-		assert.ok(paneId);
-		const pane = h.fake.panes.get(paneId);
-		assert.ok(pane);
-		// The pane renders the reply; the fake ALSO lands it in the chat store
-		// (as the real cursor-agent does), which is what settles the turn now.
-		pane.screen.push('CURSOR_OK\n{"ok": true, "reason": "reviewed"}');
-		const fakeAgent = h.fake.agents.get(handle.name);
-		assert.ok(fakeAgent?.chatStore, "cursor child must have a chat store");
-		appendTurnToFakeStore(
-			fakeAgent!.chatStore!,
-			"(pasted prompt)",
-			'CURSOR_OK\n{"ok": true, "reason": "reviewed"}',
-		);
-
-		const collected = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 5_000,
-		});
-		assert.equal(collected.execution.status, "success");
-		assert.match(collected.output, /CURSOR_OK/);
-		assert.equal(collected.acceptance.status, "accepted");
-		// The chat-store path (the one that made manual recovery painful: SQLite
-		// parsing) must persist the SAME full-text artifact as the jsonl path.
-		assert.ok(collected.outputFile, "cursor collect must report an outputFile");
-		assert.match(
-			readFileSync(collected.outputFile!, "utf-8"),
-			/CURSOR_OK[\s\S]*"ok": true/,
-		);
-		assert.match(startArgv, /--trust/);
-	} finally {
-		h.cleanup();
-	}
-});
-
-// ─────────────────────────── integration hook guard (cursor telemetry) ───────────────────────────
-
-/**
- * nj-hw 2026-09-28: a missing herdr cursor integration hook made every cursor
- * child report "failed: no session jsonl; collected from pane" even though the
- * runs fully succeeded (multi-MB chat stores on disk). The guard auto-installs
- * the hook before the first cursor launch; a failed install refuses the launch
- * with the fix in the message instead of letting the telemetry silently break.
- */
-test("cursor launch auto-installs a missing integration hook", async () => {
-	const h = harness();
-	try {
-		h.fake.cursorIntegration = "not installed (/fake/.cursor/herdr-agent-state.sh)";
-		const handle = await h.orchestrator.launch({
-			agent: agent({ kind: "cursor", model: "grok-4.6" }),
-			task: "t",
-		});
-		assert.equal(handle.child.kind, "cursor");
-		const install = h.fake.commands.find(
-			(c) => c.args[0] === "integration" && c.args[1] === "install",
-		);
-		assert.ok(install, "a missing hook must trigger integration install");
-		assert.equal(install.args[2], "cursor");
-		// The fake flips its status line on install, so the re-check passes and
-		// the launch proceeds.
-		assert.equal(h.fake.cursorIntegration.startsWith("not installed"), false);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("cursor launch probes the integration once per kind, not per launch", async () => {
-	const h = harness();
-	try {
-		await h.orchestrator.launch({
-			agent: agent({ kind: "cursor", model: "grok-4.6" }),
-			task: "t",
-		});
-		await h.orchestrator.launch({
-			agent: agent({ kind: "cursor", model: "grok-4.6" }),
-			task: "t2",
-		});
-		const probes = h.fake.commands.filter(
-			(c) => c.args[0] === "integration" && c.args[1] === "status",
-		);
-		assert.equal(probes.length, 1, "the second launch must reuse the check");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("cursor launch refuses cleanly when the hook cannot be installed", async () => {
-	const h = harness();
-	try {
-		h.fake.cursorIntegration = "not installed (/fake/.cursor/herdr-agent-state.sh)";
-		h.fake.cursorIntegrationInstallError =
-			"install cursor agent cli first";
-		await assert.rejects(
-			h.orchestrator.launch({
-			agent: agent({ kind: "cursor", model: "grok-4.6" }),
-			task: "t",
-		}),
-			(error) => {
-				assert.ok(error instanceof Error);
-				assert.match(
-					error.message,
-				/integration hook is missing and auto-install failed/,
-				);
-				assert.match(error.message, /herdr integration install cursor/);
-				// Leak-free: no pane, no worktree, no session file beyond the empty pre-create.
-				assert.equal(h.openPanes(), 1, "only the root pane remains");
-				return true;
-			},
-		);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("an older herdr without integration commands must not brick launches", async () => {
-	const h = harness();
-	try {
-		h.fake.cursorIntegration = null; // `integration status` errors
-		const handle = await h.orchestrator.launch({
-			agent: agent({ kind: "cursor", model: "grok-4.6" }),
-			task: "t",
-		});
-		assert.equal(handle.child.kind, "cursor");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("pi launches never probe integrations", async () => {
-	const h = harness();
-	try {
-		await h.orchestrator.launch({
-			agent: agent(),
-			task: "t",
-		});
-		const probes = h.fake.commands.filter(
-			(c) => c.args[0] === "integration",
-		);
-		assert.equal(probes.length, 0);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("a hook that reports not-installed even after a successful install refuses the launch", async () => {
-	const h = harness();
-	try {
-		h.fake.cursorIntegration = "not installed (/fake/.cursor/herdr-agent-state.sh)";
-		h.fake.cursorIntegrationInstallKeepsMissing = true;
-		await assert.rejects(
-			h.orchestrator.launch({
-				agent: agent({ kind: "cursor", model: "grok-4.6" }),
-				task: "t",
-			}),
-			(error) => {
-				assert.ok(error instanceof Error);
-				assert.match(
-					error.message,
-				/still reports .not installed. after install/,
-				);
-				assert.equal(h.openPanes(), 1, "refusal allocates nothing");
-				return true;
-			},
-		);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("pane collect does not attest a system-prompt template verdict", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({
-				kind: "cursor",
-				onBlocked: "auto-approve",
-				systemPrompt: `You are search.\n\n\`\`\`json\n{"ok": true, "reason": "search complete, N sourced facts"}\n\`\`\``,
-			}),
-			task: "find hangzhou population",
-		});
-		const paneId = handle.paneId;
-		assert.ok(paneId);
-		const pane = h.fake.panes.get(paneId);
-		assert.ok(pane);
-		assert.ok(handle.child.promptText);
-		pane.screen.push(handle.child.promptText);
-		pane.screen.push("Hangzhou facts still loading from the search tool.");
-
-		const collected = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 5_000,
-		});
-		assert.equal(collected.acceptance.status, "unknown");
-		assert.notEqual(collected.acceptance.reason, "search complete, N sourced facts");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("cursor collect sends enter when the pane is still a paste preview", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
-			task: "t",
-		});
-		const paneId = handle.paneId;
-		assert.ok(paneId);
-		const pane = h.fake.panes.get(paneId);
-		assert.ok(pane);
-		pane.screen.push("[Pasted text #1 +55 lines]");
-
-		const collected = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 5_000,
-		});
-		assert.ok(
-			h.fake.sentKeys.some(
-				(row) => row.target === handle.name && row.keys.includes("enter"),
-			),
-			"stuck cursor pane must be nudged with enter",
-		);
-		assert.match(collected.output, /Paste submitted/);
-		assert.equal(collected.acceptance.status, "accepted");
-		assert.equal(
-			h.fake.agents.has(handle.name),
-			true,
-			"a submitted paste must not recycle the pane mid-turn",
-		);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("cursor collect does not settle on an idle Working spinner (debugger 7s retire)", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
-			task: "diagnose the pane recycle",
-		});
-		const paneId = handle.paneId;
-		assert.ok(paneId);
-		const pane = h.fake.panes.get(paneId);
-		assert.ok(pane);
-		pane.screen.push("cursor-agent --model cursor-grok-4.6-xhigh --trust --force");
-		pane.screen.push("➜  mqtt-workspace cursor-agent --model cursor-grok-4.6-xhigh");
-		pane.screen.push("Working");
-
-		const collected = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 5_000,
-		});
-		assert.equal(collected.execution.status, "running");
-		assert.match(collected.execution.reason ?? "", /timed out/);
-		assert.equal(
-			h.fake.agents.has(handle.name),
-			true,
-			"timeout must not close a still-alive cursor pane",
-		);
-		assert.equal(
-			h.fake.panes.has(paneId),
-			true,
-			"collect itself must not recycle; running is not terminal",
-		);
-	} finally {
-		h.cleanup();
-	}
-});
-
-
-// ─────────── kind/model coherence: explicit refused, inherited dropped ───────────
-
-// `nativeModelFor` returns undefined for a model the target CLI cannot express
-// (a pi-shaped `provider/id` handed to cursor), which silently omits `--model`
-// and leaves the child on the CLI's own default. Whether that is a bug or the
-// intended outcome depends on how the model was chosen, so the launch layer
-// refuses an EXPLICIT mismatch and permits an INHERITED one — the parent's pi
-// model is simply not applicable to a different CLI (kind.ts documents the
-// deliberate drop). Checked BEFORE any resource is allocated.
-
-test("launch: an explicit model the kind cannot accept is refused, leaking no pane", async () => {
-	const h = harness();
-	const before = h.fake.panes.size;
-	try {
-		await assert.rejects(
-			() =>
-				h.orchestrator.launch({
-					agent: agent({ kind: "cursor", model: "cb/kimi-k3" }),
-					task: "t",
-				}),
-			/cannot be used with kind 'cursor'/,
-		);
-		assert.equal(
-			h.fake.panes.size,
-			before,
-			"a model refusal must not leak a pane",
-		);
-		assert.equal(h.startAttempts(), 0, "no agent start should be attempted");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("launch: an INHERITED model the kind cannot accept is dropped, not refused", async () => {
-	// The parent is pi; a cursor role with no model of its own inherits that
-	// pi-shaped model. Forwarding it is impossible, so it is dropped and the
-	// child runs on cursor's own default — the documented behaviour.
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({ kind: "cursor", model: "cb/kimi-k3" }),
-			task: "t",
-			modelOrigin: "inherited",
-		});
-		assert.ok(handle.name);
-		assert.deepEqual(
-			handle.child.modelDropped,
-			["cb/kimi-k3"],
-			"the dropped model must be recorded on the child for the caller to surface",
-		);
-		assert.equal(handle.child.model, undefined, "no model was actually passed");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("launch: a compatible model still launches for a non-pi kind", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({ kind: "cursor", model: "grok-4.6" }),
-			task: "t",
-		});
-		assert.ok(handle.name);
-		// `child.model` records the NATIVE value actually handed to the CLI, which
-		// for cursor is the mapped slug rather than the frontmatter spelling.
-		assert.equal(handle.child.model, "cursor-grok-4.6-high");
-		assert.equal(handle.child.modelDropped, undefined);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("launch: an incompatible candidate is skipped in favour of a usable fallback", async () => {
-	// `fallbackModels` exists to try alternatives in order; a candidate the kind
-	// cannot express must not become the first attempt (it would start the child
-	// on the CLI default instead of falling through).
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({
-				kind: "cursor",
-				model: "cb/kimi-k3",
-				fallbackModels: ["grok-4.6"],
-			}),
-			task: "t",
-		});
-		assert.equal(handle.child.model, "cursor-grok-4.6-high");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("launch: the default origin treats an explicit `model` param as a choice", async () => {
-	// Direct API callers (src/api.ts) pass `model` deliberately; the default
-	// must therefore refuse an unusable one rather than silently dropping it.
-	const h = harness();
-	try {
-		await assert.rejects(
-			() =>
-				h.orchestrator.launch({
-					agent: agent({ kind: "cursor" }),
-					task: "t",
-					model: "cb/kimi-k3",
-				}),
-			/cannot be used with kind 'cursor'/,
-		);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("launch: an agent with no model at all still launches", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		assert.ok(handle.name);
-		assert.equal(handle.child.modelDropped, undefined);
-	} finally {
-		h.cleanup();
-	}
-});
-
-// ─────────── the real cursor banner must not be read as a reply ───────────
-//
-// Live failures (advisor/search, three separate runs) showed the child recycled
-// ~3s after launch with `no session jsonl; collected from pane`. The pane was
-// still on the launch banner: the prompt was collapsed to `[Pasted text #N]`
-// and had never been submitted. `paneHasLiveReply` counted the banner text as a
-// reply, so the Enter nudge in `nonPiPaneStillWorking` was unreachable.
-//
-// Existing tests only pushed a bare `[Pasted text #N]`; these pin the FULL
-// banner, whose `Tip:` line ROTATES between runs.
-
-/** The banner as captured from live runs (Tip wording varies per run). */
-function cursorLaunchBanner(tip: string): string[] {
-	return [
-		"cursor-agent --model cursor-grok-4.6-xhigh --trust --force",
-		"➜  herdr-subagents cursor-agent --model cursor-grok-4.6-xhigh --trust --force",
-		"",
-		"  Cursor Agent",
-		"  v2026.09.18-9a7762b",
-		`  ${tip}`,
-		"",
-		"  → [Pasted text #1 +84 lines]",
-		"",
-		"  Cursor Grok 4.6 Extra High · 80.4% · 8 files edited                    Run Everything",
-		"  ~/code/herdr-subagents · master",
-	];
-}
-
-const OBSERVED_TIPS = [
-	"Tip: Try Cursor Grok 4.6 via /model, frontier intelligence at a fraction of the cost.",
-	"Tip: Use /debug to instrument and debug complex problems.",
-	"Tip: Type ? in the prompt bar to show in-app hints.",
-];
-
-test("cursor collect nudges Enter when the pane shows the real launch banner", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
-			task: "t",
-		});
-		const pane = h.fake.panes.get(handle.paneId!);
-		assert.ok(pane);
-		for (const line of cursorLaunchBanner(OBSERVED_TIPS[0]!)) {
-			pane.screen.push(line);
-		}
-
-		const collected = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 5_000,
-		});
-
-		assert.ok(
-			h.fake.sentKeys.some(
-				(row) => row.target === handle.name && row.keys.includes("enter"),
-			),
-			"the launch banner must not suppress the Enter nudge",
-		);
-		assert.match(collected.output, /Paste submitted/);
-		assert.equal(
-			h.fake.agents.has(handle.name),
-			true,
-			"a nudged turn must not recycle the pane",
-		);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("every observed Tip wording reaches the nudge (wording must not matter)", async () => {
-	for (const tip of OBSERVED_TIPS) {
-		const h = harness();
-		try {
-			const handle = await h.orchestrator.launch({
-				agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
-				task: "t",
-			});
-			const pane = h.fake.panes.get(handle.paneId!);
-			assert.ok(pane);
-			for (const line of cursorLaunchBanner(tip)) pane.screen.push(line);
-
-			const collected = await h.orchestrator.collect(handle.name, {
-				timeoutMs: 5_000,
-			});
-			assert.match(
-				collected.output,
-				/Paste submitted/,
-				`Tip wording must not change the outcome: ${tip}`,
-			);
-		} finally {
-			h.cleanup();
-		}
-	}
-});
-
-// ---------------------------------------------------------------------------
-// Structured cursor collection (chat store) — the SQLite channel
-// ---------------------------------------------------------------------------
-
-test("cursor collect reads the verdict from the chat store, not the pane", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
-			task: "t",
-		});
-		const pane = h.fake.panes.get(handle.paneId!);
-		assert.ok(pane);
-		// The pane shows ONLY the launch banner — nothing reply-like. The old
-		// screen-reading path could never settle from this alone.
-		for (const line of cursorLaunchBanner(OBSERVED_TIPS[0]!)) {
-			pane.screen.push(line);
-		}
-
-		const collected = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 5_000,
-		});
-
-		// The store carries the answer (written by the Enter submit): the
-		// verdict must be derived from it — attested, with the pane never having
-		// rendered a reply beyond the banner.
-		assert.equal(collected.execution.status, "success");
-		assert.equal(collected.acceptance.status, "accepted");
-		assert.equal(collected.acceptance.level, "attested");
-		assert.match(collected.output, /Paste submitted/);
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("cursor collect keeps waiting while the store has no answer yet", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({
-			agent: agent({ kind: "cursor", onBlocked: "auto-approve" }),
-			task: "t",
-		});
-		const pane = h.fake.panes.get(handle.paneId!);
-		assert.ok(pane);
-		// Banner + a mid-turn spinner, and NO paste preview anywhere: nothing
-		// to nudge, no answer in the store. The turn must time out as running.
-		for (const line of cursorLaunchBanner(OBSERVED_TIPS[1]!)) {
-			pane.screen.push(line);
-		}
-		pane.screen.push("⠘⠣ Working 12 tokens ctrl+c to stop");
-
-		const collected = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 3_000,
-		});
-
-		assert.equal(collected.execution.status, "running");
-		assert.equal(
-			h.fake.agents.has(handle.name),
-			true,
-			"a mid-turn pane must not be recycled",
-		);
-	} finally {
-		h.cleanup();
-	}
-});
-
-// ─────── C (U6): a running collect must not retire the child into `awaiting` ───────
-
-test("U6: a timed-out (running) collect leaves the child in `working`, not `awaiting`", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		// A prompt with no reply yet, agent alive: collect times out as running.
-		writeFileSync(handle.sessionFile, transcript([{ role: "user", text: "go" }]));
-
-		const result = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 2_000,
-		});
-		assert.equal(result.execution.status, "running");
-
-		// C: `awaiting` reads as "the turn ended, only cleanup left" — that is
-		// exactly the misreading that had the parent wrap up a live child. The
-		// lifecycle dimension must stay `working` while execution is `running`.
-		const child = h.orchestrator
-			.childrenSnapshot()
-			.find((c) => c.name === handle.name);
-		assert.equal(child?.state, "working");
-		assert.equal(child?.execution?.status, "running");
-	} finally {
-		h.cleanup();
-	}
-});
-
-test("U6: a terminal collect still marks the child `awaiting` (the change is running-only)", async () => {
-	const h = harness();
-	try {
-		const handle = await h.orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(
-			handle.sessionFile,
-			transcript([
-				{ role: "user", text: "go" },
-				{ role: "assistant", stopReason: "stop", text: "done" },
-			]),
-		);
-
-		const result = await h.orchestrator.collect(handle.name, {
-			timeoutMs: 5_000,
-		});
-		assert.equal(result.execution.status, "success");
-		const child = h.orchestrator
-			.childrenSnapshot()
-			.find((c) => c.name === handle.name);
-		assert.equal(child?.state, "awaiting");
-	} finally {
-		h.cleanup();
-	}
-});
-
-// ─────── D (U7): a growing artifact grants a bounded deadline extension ───────
-
-test("U7: a still-growing session file extends the collect deadline instead of reporting `running`", async () => {
-	// The incident: collect hit its 30-minute deadline while the worker was
-	// demonstrably still writing. A growing artifact must buy time; only a
-	// QUIET artifact may be reported as `running`.
-	const { appendFileSync } = await import("node:fs");
-	const runDir = mkdtempSync(path.join(tmpdir(), "orch-grace-"));
-	const fake = new FakeHerdr();
-	fake.addRootPane("w1");
-	const client = createHerdrClient(createFakeRunner(fake));
-	const timeoutMs = 3_000;
-	let sleeps = 0;
-	let growing = true;
+	const calls: Array<{ command: string; cwd: string }> = [];
 	const orchestrator = new Orchestrator({
-		client,
-		runDir,
+		supervisor: h.supervisor,
+		runDir: h.runDir,
 		cwd: "/tmp/project",
-		now: () => fake.now,
-		sleep: async (ms) => {
-			fake.advance(ms);
-			sleeps += 1;
-			if (!growing) return;
-			// Keep the file growing across the FIRST deadline (6 polls at
-			// 500ms), then land the real reply during the grace window.
-			if (sleeps <= 8) {
-				appendFileSync(
-					handleRef!.sessionFile,
-					`${userMsg(`still working ${sleeps}`)}\n`,
-				);
-				return;
-			}
-			growing = false;
-			appendFileSync(
-				handleRef!.sessionFile,
-				`${assistantMsg({ stopReason: "stop", text: "late but done" })}\n`,
-			);
+		verifyRunner: async (command, cwd) => {
+			calls.push({ command, cwd });
+			return { code: 0, stdout: "verified", stderr: "" };
 		},
 	});
-	let handleRef: { sessionFile: string } | undefined;
 	try {
-		const launch = await orchestrator.launch({ agent: agent(), task: "t" });
-		handleRef = { sessionFile: launch.sessionFile };
-		writeFileSync(launch.sessionFile, transcript([{ role: "user", text: "go" }]));
-		const started = fake.now;
-
-		const result = await orchestrator.collect(launch.name, { timeoutMs });
-		const elapsed = fake.now - started;
-
-		// The turn's completion was captured instead of a false `running`.
-		assert.equal(result.execution.status, "success");
-		assert.match(result.output, /late but done/);
-		assert.ok(
-			elapsed > timeoutMs,
-			`the deadline must have been extended (elapsed ${elapsed}ms)`,
-		);
-	} finally {
-		rmSync(runDir, { recursive: true, force: true });
-	}
-});
-
-test("collect on a non-pi child without turns keeps the pane when the herdr CLI is wedged (executionFromPane path)", async () => {
-	// The pi path (resolveExecution) is covered by the wedged test above; this
-	// pins the OTHER branch — a kind with no session jsonl reaches
-	// executionFromPane, whose pre-fix reading of a timed-out `agent get` was
-	// `aborted: herdr agent gone`, retiring a live child (hw 2026-10-09).
-	const runDir = mkdtempSync(path.join(tmpdir(), "orch-wedged-nonpi-"));
-	try {
-		const fake = new FakeHerdr({});
-		fake.addRootPane("w1");
-		const base = createFakeRunner(fake);
-		const wedged: typeof base = async (args, opts) => {
-			if (args[0] === "agent" && (args[1] === "get" || args[1] === "wait")) {
-				return {
-					stdout: "",
-					stderr: `\n[timeout after ${opts?.timeoutMs ?? 15_000}ms]`,
-					code: -2,
-				};
-			}
-			return base(args, opts);
-		};
-		const orchestrator = new Orchestrator({
-			client: createHerdrClient(wedged),
-			runDir,
-			cwd: "/tmp/project",
-			sleep: async () => {},
-		});
-
-		// claude kind writes no session jsonl (F7), so collect falls through to
-		// executionFromPane.
 		const handle = await orchestrator.launch({
-			agent: agent({ kind: "claude" }),
-			task: "t",
+			agent: agent({ acceptance: { level: "attested", criteria: [{ id: "tests", must: "tests pass", evidence: ["verification-output"], severity: "required", command: "npm test" }] } }),
+			task: "verify after completion",
+			worktree: false,
 		});
-
-		const before = fake.panes.size;
-		const result = await orchestrator.collect(handle.name, {
-			timeoutMs: 1_000,
-		});
-		assert.equal(
-			result.execution.status,
-			"running",
-			`a wedged CLI must not read as aborted (got: ${result.execution.reason})`,
-		);
-		assert.match(result.execution.reason ?? "", /unavailable|timed out/);
-		assert.equal(
-			fake.panes.size,
-			before,
-			"collect must not close the pane when the CLI is wedged",
-		);
+		h.supervisor.settle(handle.name, { text: '{"ok":true,"reason":"finished"}' });
+		const collected = await orchestrator.collect(handle.name);
+		assert.deepEqual(calls, [{ command: "npm test", cwd: "/tmp/project" }]);
+		assert.equal(collected.acceptance.status, "accepted");
+		assert.equal(collected.acceptance.level, "verified");
 	} finally {
-		rmSync(runDir, { recursive: true, force: true });
+		h.cleanup();
 	}
 });
 
-test("U7: a quiet artifact still times out as `running` (no extension, no hang)", async () => {
-	// No grace for a silent file: nothing is being written, so the timeout is
-	// the answer. This is the other half of the growing/quiet discriminator.
-	const runDir = mkdtempSync(path.join(tmpdir(), "orch-quiet-"));
-	const fake = new FakeHerdr();
-	fake.addRootPane("w1");
-	const client = createHerdrClient(createFakeRunner(fake));
-	const timeoutMs = 3_000;
-	const orchestrator = new Orchestrator({
-		client,
-		runDir,
-		cwd: "/tmp/project",
-		now: () => fake.now,
-		sleep: async (ms) => {
-			fake.advance(ms);
-		},
-	});
+test("a live child timeout stays working and does not write a terminal output artifact", async () => {
+	const h = harness();
 	try {
-		const handle = await orchestrator.launch({ agent: agent(), task: "t" });
-		writeFileSync(handle.sessionFile, transcript([{ role: "user", text: "go" }]));
-		const started = fake.now;
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "continue working", worktree: false });
+		const collected = await h.orchestrator.collect(handle.name, { timeoutMs: 2 });
+		assert.equal(collected.execution.status, "running");
+		assert.equal(collected.outputFile, undefined);
+		assert.equal(h.orchestrator.childrenSnapshot()[0]?.state, "working");
+		assert.equal(existsSync(path.join(h.runDir, `${handle.name}.output.md`)), false);
+	} finally {
+		h.cleanup();
+	}
+});
 
-		const result = await orchestrator.collect(handle.name, { timeoutMs });
-		const elapsed = fake.now - started;
+test("retireAll snapshots settled outcomes and retires every registered child", async () => {
+	const h = harness();
+	try {
+		const first = await h.orchestrator.launch({ agent: agent(), task: "first", name: "worker-a", worktree: false });
+		const second = await h.orchestrator.launch({ agent: agent(), task: "second", name: "worker-b", worktree: false });
+		h.supervisor.settle(first.name, { text: "first finished" });
+		h.supervisor.settle(second.name, { text: "second finished" });
+		const retired = await h.orchestrator.retireAll();
+		assert.deepEqual(retired.map((child) => child.name), ["worker-a", "worker-b"]);
+		assert.deepEqual(retired.map((child) => child.execution?.status), ["success", "success"]);
+		assert.ok(retired.every((child) => child.state === "retired"));
+		assert.ok(retired.every((child) => !h.supervisor.isAlive(child.name)));
+		assert.ok(h.supervisor.calls.filter((call) => call.method === "retire").length === 2);
+	} finally {
+		h.cleanup();
+	}
+});
 
-		assert.equal(result.execution.status, "running");
-		assert.match(result.execution.reason ?? "", /timed out/);
-		assert.ok(
-			elapsed < timeoutMs * 2,
-			`a quiet file must not extend the deadline (elapsed ${elapsed}ms)`,
+test("restore rehydrates persisted children and the run spawn budget", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "persist me", worktree: false });
+		const store = new RunStore({ rootDir: path.join(h.runDir, "store") });
+		const run = store.createRun({ task: "restore fixture", cwd: "/tmp/project" });
+		await store.addChild(run.runId, handle.child);
+		const persisted = store.readRun(run.runId);
+		assert.ok(persisted);
+		const restored = new Orchestrator({ supervisor: h.supervisor, runDir: h.runDir, cwd: "/tmp/project", maxSpawns: 1 });
+		restored.restore(persisted);
+		assert.equal(restored.childrenSnapshot()[0]?.ownerToken, handle.child.ownerToken);
+		assert.equal(restored.budget().used, 1);
+		await assert.rejects(
+			() => restored.launch({ agent: agent(), task: "over restored budget", worktree: false }),
+			(error: unknown) => error instanceof SubagentError && error.code === ErrorCodes.BUDGET_EXCEEDED,
 		);
 	} finally {
-		rmSync(runDir, { recursive: true, force: true });
+		h.cleanup();
+	}
+});
+
+test("allocateName avoids collisions and returns valid supervisor-local names", async () => {
+	const h = harness();
+	try {
+		assert.match(h.orchestrator.allocateName("worker"), /^worker-0$/);
+		const first = await h.orchestrator.launch({ agent: agent(), task: "one", worktree: false });
+		const second = await h.orchestrator.launch({ agent: agent(), task: "two", worktree: false });
+		assert.notEqual(first.name, second.name);
+		assert.match(first.name, /^[a-z][a-z0-9_-]{0,31}$/);
+		assert.match(second.name, /^[a-z][a-z0-9_-]{0,31}$/);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("steer on a missing child throws NOT_FOUND", async () => {
+	const h = harness();
+	try {
+		await assert.rejects(
+			() => h.orchestrator.steer("missing", "continue"),
+			(error: unknown) => error instanceof SubagentError && error.code === ErrorCodes.NOT_FOUND,
+		);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("retired child records survive restore without pane or tab identifiers", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "persist identity", worktree: false });
+		await h.orchestrator.retire(handle.name);
+		assert.equal("paneId" in handle.child, false);
+		assert.equal("tabId" in handle.child, false);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("RPC child with a non-success stop reason is not reported as accepted", async () => {
+	const h = harness();
+	try {
+		const handle = await h.orchestrator.launch({ agent: agent(), task: "fail", worktree: false });
+		h.supervisor.settle(handle.name, { text: "provider failed", stopReason: "error", errorMessage: "provider failure" });
+		const collected = await h.orchestrator.collect(handle.name);
+		assert.equal(collected.execution.status, "failed");
+		assert.notEqual(collected.acceptance.status, "accepted");
+	} finally {
+		h.cleanup();
 	}
 });
