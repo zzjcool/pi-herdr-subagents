@@ -126,6 +126,12 @@ export interface DbEventSourceOptions {
 export interface DbEventSource {
 	/** Start polling and immediately perform one initial incremental read. */
 	start(bus: Pick<LegionEventBus, "emit">): void;
+	/**
+	 * Notify the source that this same connection committed an event. SQLite's
+	 * data_version only reports writes from other connections, so this schedules
+	 * an immediate cursor read for local commits without weakening the poll dirty-check.
+	 */
+	notifyLocalCommit(): void;
 	stop(): void;
 	/** Perform one dirty-check/read cycle when the source is running. */
 	poll(): void;
@@ -163,6 +169,7 @@ export function createDbEventSource(
 	let timer: EventSourceIntervalHandle | undefined;
 	let running = false;
 	let polling = false;
+	let localCommitPending = false;
 	let lastDataVersion: number | undefined;
 
 	const reportError = (error: unknown): void => {
@@ -177,23 +184,26 @@ export function createDbEventSource(
 		if (!running || !bus || polling) return;
 		polling = true;
 		const currentBus = bus;
+		const hadLocalCommit = localCommitPending;
+		localCommitPending = false;
 		try {
 			const dataVersion = getDataVersion(db);
-			if (lastDataVersion === dataVersion) return;
-
-			// Drain all batches for this dirty version so the cursor cannot strand
-			// events when a busy producer commits more than one batch at once.
-			for (;;) {
-				const batch = readEventsAfter(db, cursor, { limit: EVENT_BATCH_SIZE });
-				for (const event of batch) {
-					currentBus.emit(event);
-					cursor = event.id;
-					if (!running || bus !== currentBus) return;
+			if (hadLocalCommit || lastDataVersion !== dataVersion) {
+				// Drain all batches for this dirty version so the cursor cannot strand
+				// events when a busy producer commits more than one batch at once.
+				for (;;) {
+					const batch = readEventsAfter(db, cursor, { limit: EVENT_BATCH_SIZE });
+					for (const event of batch) {
+						currentBus.emit(event);
+						cursor = event.id;
+						if (!running || bus !== currentBus) return;
+					}
+					if (batch.length < EVENT_BATCH_SIZE) break;
 				}
-				if (batch.length < EVENT_BATCH_SIZE) break;
+				lastDataVersion = dataVersion;
 			}
-			lastDataVersion = dataVersion;
 		} catch (error) {
+			if (hadLocalCommit) localCommitPending = true;
 			reportError(error);
 		} finally {
 			polling = false;
@@ -213,6 +223,10 @@ export function createDbEventSource(
 				bus = undefined;
 				throw error;
 			}
+		},
+		notifyLocalCommit() {
+			localCommitPending = true;
+			poll();
 		},
 		stop() {
 			if (timer !== undefined) {
